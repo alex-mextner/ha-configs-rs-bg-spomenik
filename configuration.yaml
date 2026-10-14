@@ -177,6 +177,8 @@ logger:
   default: info
 
 homeassistant:
+  allowlist_external_dirs:
+    - /config/custom_components/yandex_station/core/fonts
   internal_url: "http://192.168.0.39:8123"
   packages: !include_dir_named packages
 
