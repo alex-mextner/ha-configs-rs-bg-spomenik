@@ -1,0 +1,38 @@
+# Local TinyPrint X6h device. Put tinyprint_ble_address in local secrets.yaml.
+# Uses an already installed Unicode font; no font binaries are added to Git.
+homeassistant:
+  allowlist_external_dirs:
+    - /config/custom_components/yandex_station/core/fonts
+
+tinyprint:
+  printers:
+    - address: !secret tinyprint_ble_address
+      name: "X6h-2A4C"
+      font_path: "/config/custom_components/yandex_station/core/fonts/DejaVuSans.ttf"
+
+script:
+  tinyprint_test_ticket:
+    alias: "TinyPrint — проверка текста и QR"
+    icon: mdi:printer-check
+    mode: single
+    sequence:
+      - action: tinyprint.print_text
+        data:
+          text: |
+            Home Assistant
+            TinyPrint X6h
+            Проверка печати
+            {{ now().isoformat() }}
+          font_size: 24
+        response_variable: text_result
+      - action: tinyprint.print_qr
+        data:
+          text: "https://github.com/alex-mextner/ha-tinyprint"
+        response_variable: qr_result
+      - action: persistent_notification.create
+        data:
+          notification_id: tinyprint_test_result
+          title: "TinyPrint: тест передан"
+          message: >-
+            Текст и QR переданы через Bluetooth. Проверь читаемость бумаги:
+            протокол не подтверждает физический отпечаток.
