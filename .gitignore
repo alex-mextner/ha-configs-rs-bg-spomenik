@@ -75,3 +75,11 @@ custom_components/ha_creality_ws/
 
 # TLS private keys (ssl/key.pem was public until 2026-09-25)
 ssl/*.pem
+
+# Transaction state; not configuration.
+.ha-submodule-updates.lock
+.ha-update-*/
+backups/integration-updates/
+
+# Host-provisioned tools for container commit hooks (not source).
+.tools/
