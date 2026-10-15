@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -45,6 +46,10 @@ class BluetoothInstallerTests(unittest.TestCase):
         self.helper_path = self.sandbox / "system/usr/local/libexec/ha-bluetooth-host"
         self.backup_path = self.sandbox / "system/var/backups/ha-bluetooth"
         self.call_log = self.sandbox / "calls.log"
+        self.dbus_path = self.sandbox / "bus.sock"
+        self.dbus_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(self.dbus_socket.close)
+        self.dbus_socket.bind(str(self.dbus_path))
         self.settings_path.parent.mkdir(parents=True)
         self.unit_path.parent.mkdir(parents=True)
         self.helper_path.parent.mkdir(parents=True)
@@ -67,6 +72,12 @@ class BluetoothInstallerTests(unittest.TestCase):
             self.application_root / "scripts/install_ha_bluetooth.sh"
         )
         self._prepend_fake_path(self.application_root / "scripts/ha_bluetooth_host.sh")
+        helper = self.application_root / "scripts/ha_bluetooth_host.sh"
+        helper.write_text(
+            helper.read_text().replace(
+                "/run/dbus/system_bus_socket", str(self.dbus_path)
+            )
+        )
 
     def _redirect_system_paths(self, installer: Path) -> None:
         content = installer.read_text()
@@ -211,6 +222,14 @@ exit 0
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertFalse(marker.exists(), "Settings must not execute a second word")
 
+    def test_missing_system_bus_socket_prevents_publication(self) -> None:
+        self._seed_published_files()
+        self.dbus_socket.close()
+        self.dbus_path.unlink()
+        result = self._run_installer()
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("System D-Bus socket is missing", result.stderr)
+
     def test_fresh_host_creates_missing_helper_directory(self) -> None:
         self.helper_path.parent.rmdir()
         result = self._run_installer()
@@ -341,7 +360,12 @@ class BluetoothHostPreparationTests(unittest.TestCase):
             fake_bin = sandbox / "fake-bin"
             fake_bin.mkdir()
             host_script = sandbox / "ha_bluetooth_host.sh"
+            bus_path = sandbox / "bus.sock"
+            bus_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(bus_socket.close)
+            bus_socket.bind(str(bus_path))
             content = (ROOT / "scripts/ha_bluetooth_host.sh").read_text()
+            content = content.replace("/run/dbus/system_bus_socket", str(bus_path))
             content = content.replace(
                 "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 f"export PATH={fake_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

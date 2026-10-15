@@ -22,16 +22,30 @@ done
 args+=(-f "$ROOT/docker/bluetooth/compose.final.yaml")
 # Machine/global options belong in the settings or COMPOSE_PROFILES. Requiring
 # the verb first also prevents an `exec SERVICE run` payload from acting as `run`.
+dry_run=0
+no_start=0
+dns_build_options=()
+if [[ "${1:-}" == up ]]; then
+  for arg in "$@"; do
+    case "$arg" in
+      --dry-run) dry_run=1 ;;
+      --no-start) no_start=1 ;;
+      --build|--no-build) dns_build_options+=("$arg") ;;
+    esac
+  done
+fi
 case "${1:-}" in
   up|create|run)
-    python3 "$ROOT/scripts/ha_bluetooth_network_check.py" "${args[@]}"
+    if (( ! dry_run )); then
+      python3 "$ROOT/scripts/ha_bluetooth_network_check.py" "${args[@]}"
+    fi
     ;;
   -h|--help|--version|"") ;;
   -*) echo 'Pass the Compose command first; use deployment settings for global options.' >&2; exit 2 ;;
 esac
-if [[ "${1:-}" == up && " $* " != *" --no-start "* ]]; then
+if [[ "${1:-}" == up ]] && (( ! no_start && ! dry_run )); then
   # Reserve the static address and prove forwarding BEFORE other services can
-  # be recreated. A concurrent claimant can only fail this isolated DNS step.
-  docker compose "${args[@]}" up -d --no-deps --wait --wait-timeout 90 ha-docker-dns
+  # be recreated. Apply requested build options before waiting on an old image.
+  docker compose "${args[@]}" up -d --no-deps --wait --wait-timeout 90 "${dns_build_options[@]}" ha-docker-dns
 fi
 exec docker compose "${args[@]}" "$@"
