@@ -20,13 +20,18 @@ for overlay in "${overlays[@]}"; do
   args+=(-f "$overlay")
 done
 args+=(-f "$ROOT/docker/bluetooth/compose.final.yaml")
-# Fail before touching running services if a legacy bridge cannot reserve DNS.
-for arg in "$@"; do
-  case "$arg" in
-    up|create|run)
-      python3 "$ROOT/scripts/ha_bluetooth_network_check.py" "${args[@]}"
-      break
-      ;;
-  esac
-done
+# Machine/global options belong in the settings or COMPOSE_PROFILES. Requiring
+# the verb first also prevents an `exec SERVICE run` payload from acting as `run`.
+case "${1:-}" in
+  up|create|run)
+    python3 "$ROOT/scripts/ha_bluetooth_network_check.py" "${args[@]}"
+    ;;
+  -h|--help|--version|"") ;;
+  -*) echo 'Pass the Compose command first; use deployment settings for global options.' >&2; exit 2 ;;
+esac
+if [[ "${1:-}" == up && " $* " != *" --no-start "* ]]; then
+  # Reserve the static address and prove forwarding BEFORE other services can
+  # be recreated. A concurrent claimant can only fail this isolated DNS step.
+  docker compose "${args[@]}" up -d --no-deps --wait --wait-timeout 90 ha-docker-dns
+fi
 exec docker compose "${args[@]}" "$@"

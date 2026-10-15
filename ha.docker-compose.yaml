@@ -30,9 +30,10 @@ services:
 
   ha-docker-dns:
     build: ./docker/bluetooth
+    # Bump this tag when Dockerfile pins change, or explicitly apply with --build.
     image: ha-docker-dns:1.14.7-probed
     healthcheck:
-      test: ["CMD", "/bin/busybox", "nslookup", "homeassistant.", "127.0.0.1"]
+      test: ["CMD", "/bin/busybox", "nslookup", "ha-docker-dns.", "127.0.0.1"]
       interval: 10s
       timeout: 3s
       retries: 3

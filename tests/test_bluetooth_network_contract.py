@@ -69,6 +69,7 @@ class NetworkContractTests(unittest.TestCase):
         )
         probe = services["ha-docker-dns"].get("healthcheck", {}).get("test", [])
         self.assertIn("nslookup", " ".join(probe))
+        self.assertIn("ha-docker-dns.", probe)
         self.assertIn("127.0.0.1", probe)
         build = services["ha-docker-dns"].get("build")
         self.assertIsNotNone(build, "Health probe must exist in the pinned DNS image")
