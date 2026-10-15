@@ -58,7 +58,14 @@ def simulated_host(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(mod.os, "getuid", lambda: 1000)
     actual_exists = mod.Path.exists
-    prerequisites = {"/usr/bin/bwrap", "/usr/libexec/gnome-remote-desktop-daemon"}
+    prerequisites = {
+        "/usr/bin/bwrap",
+        "/usr/libexec/gnome-remote-desktop-daemon",
+        "/usr/bin/xauth",
+        "/usr/bin/xsetroot",
+        "/usr/bin/openssl",
+        "/usr/bin/python3",
+    }
     monkeypatch.setattr(
         mod.Path,
         "exists",
@@ -134,3 +141,28 @@ def test_missing_runtime_is_rejected_before_service_changes(tmp_path, monkeypatc
     with pytest.raises(RuntimeError, match="dependency is absent"):
         mod.install("100.74.26.95", "100.116.57.66", 6081)
     assert calls == []
+
+
+@pytest.mark.parametrize("missing", ["/usr/bin/xauth", "/usr/bin/xsetroot"])
+def test_missing_capture_utility_is_rejected_before_service_changes(
+    simulated_host, monkeypatch, missing
+):
+    mod, _, _, _, calls = simulated_host
+    exists = mod.Path.exists
+    monkeypatch.setattr(
+        mod.Path, "exists", lambda p: False if str(p) == missing else exists(p)
+    )
+    with pytest.raises(RuntimeError, match="dependency is absent"):
+        mod.install("100.74.26.95", "100.116.57.66", 6081)
+    assert calls == []
+
+
+def test_previous_keyring_credentials_are_preserved_privately(simulated_host):
+    mod, base, _, _, calls = simulated_host
+    mod.install("100.74.26.95", "100.116.57.66", 6082)
+    backup = next((base / "backups").iterdir()) / "rdp-credentials.txt"
+    assert backup.read_text() == "old-settings"
+    assert backup.stat().st_mode & 0o777 == 0o600
+    assert calls.index(("grdctl", "status", "--show-credentials")) < next(
+        i for i, c in enumerate(calls) if c[:3] == ("grdctl", "rdp", "set-credentials")
+    )

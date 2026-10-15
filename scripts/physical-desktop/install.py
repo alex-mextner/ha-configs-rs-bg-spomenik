@@ -60,6 +60,10 @@ def install(listen, peer, port):
     dependencies = [
         base / "runtime/usr/bin/xfreerdp",
         Path("/usr/bin/bwrap"),
+        Path("/usr/bin/xauth"),
+        Path("/usr/bin/xsetroot"),
+        Path("/usr/bin/openssl"),
+        Path("/usr/bin/python3"),
         Path("/usr/libexec/gnome-remote-desktop-daemon"),
     ]
     gui = Path.home() / ".local/share/chatgpt-native-ha/gui-runtime/root"
@@ -82,6 +86,17 @@ def install(listen, peer, port):
         text=True,
     )
     (backup / "rdp-settings.txt").write_text(before.stdout)
+    previous_credentials = command(
+        "grdctl",
+        "status",
+        "--show-credentials",
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    credentials_backup = backup / "rdp-credentials.txt"
+    credentials_backup.write_text(previous_credentials.stdout)
+    credentials_backup.chmod(0o600)
     saved_files = {}
     snapshot = [(base / name, name) for name in ("session.py", "run.sh", "bridge.py")]
     snapshot.extend(

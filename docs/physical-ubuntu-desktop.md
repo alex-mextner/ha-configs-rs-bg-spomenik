@@ -12,7 +12,7 @@ RDP uses a generated password stored privately in the desktop user's keyring and
 
 ## Installation and restart
 
-The desktop host needs GNOME Remote Desktop, Bubblewrap, FreeRDP X11, Xvfb, x11vnc, noVNC and Python aiohttp. The existing extracted GUI runtime remains at `~/.local/share/chatgpt-native-ha/gui-runtime/root`; the new FreeRDP client is under `~/.local/share/ha-physical-desktop/runtime`.
+The desktop host needs GNOME Remote Desktop, Bubblewrap, FreeRDP X11, Xvfb, x11vnc, noVNC, xauth, xsetroot, OpenSSL and Python aiohttp. The existing extracted GUI runtime remains at `~/.local/share/chatgpt-native-ha/gui-runtime/root`; the new FreeRDP client is under `~/.local/share/ha-physical-desktop/runtime`.
 
 To obtain the FreeRDP client without changing system packages:
 
@@ -66,3 +66,5 @@ The live verification authenticates with the existing HA token, obtains the actu
 Disable `ha-physical-desktop-web`, stop `gnome-remote-desktop`, restore the saved service/settings from `~/.local/share/ha-physical-desktop/backups`, and daemon-reload the user manager. The old separate desktop service remains installed but disabled; re-enable it only when explicitly restoring the old behavior. Never delete existing user profiles or runtime backups.
 
 Child process output goes to capped systemd journald rather than append-only files in `/run/user`. Repeated connection failures back off from 5 seconds to at most 30 seconds and reset after a stable connection. The VNC transport uses X DAMAGE change detection.
+
+Rollback also requires restoring the old GNOME keyring login: its pre-install `grdctl status --show-credentials` snapshot is retained privately as `rdp-credentials.txt` (0600) in the installer backup. Use those saved credentials with `grdctl rdp set-credentials` or clear credentials if the snapshot reports none. Do not publish this snapshot.
