@@ -13,3 +13,10 @@ def test_native_desktop_declares_http_and_documentation():
     )
     assert "http" in manifest["dependencies"]
     assert manifest["documentation"].endswith("/docs/physical-ubuntu-desktop.md")
+
+    assert manifest.get("issue_tracker", "").endswith("/issues")
+    assert list(manifest) == [
+        "domain",
+        "name",
+        *sorted(set(manifest) - {"domain", "name"}),
+    ]
