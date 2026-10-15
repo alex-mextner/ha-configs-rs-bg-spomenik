@@ -615,3 +615,41 @@ def test_git_hook_parent_index_does_not_poison_submodule_commands(repo, monkeypa
         ]
         == "2.0.0"
     )
+
+
+def test_repeating_a_parent_transition_is_idempotent(repo):
+    root, _ = repo
+    install(root, pinned=True)
+    previous = git(root, "rev-parse", "HEAD")
+    git(root / "submodules/demo", "checkout", "v2.0.0")
+    git(root, "add", "submodules/demo")
+    git(root, "commit", "-m", "new pin")
+    first = run_setup(root, "--previous-revision", previous)
+    assert first.returncode == 0, first.stderr
+    backups = list((root / "backups/integration-updates").iterdir())
+    second = run_setup(root, "--previous-revision", previous)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)[0]["unchanged"] is True
+    assert list((root / "backups/integration-updates").iterdir()) == backups
+
+
+@pytest.mark.parametrize("length", [7, 40])
+def test_hacs_commit_version_uses_verified_default_branch_head(repo, length):
+    root, source = repo
+    expected = git(source, "rev-parse", "main")
+    result = install(root, ref=expected[:length])
+    assert result["commit"] == expected
+    assert result["requested_is_branch"] is True
+
+
+def test_stale_commit_update_is_rejected_before_deployment(repo):
+    root, source = repo
+    stale = git(source, "rev-parse", "v1.0.0")
+    with pytest.raises(RuntimeError, match="commit"):
+        install(root, ref=stale[:7])
+    assert (
+        json.loads((root / "custom_components/demo/manifest.json").read_text())[
+            "version"
+        ]
+        == "1.0.0"
+    )

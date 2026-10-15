@@ -138,3 +138,5 @@ Sources must already contain the newly recorded commits for offline hooks.
 An unrecorded source checkout is never force-reset. Missing clone sources require
 explicit `--initialize`. Public branch names are recorded in `integration-sources.json`;
 YandexDialogs and WebRTC use `master`, Yandex Smart Home uses `dev`.
+
+HACS commit-version updates (repositories without tagged releases) resolve the approved default branch and verify its SHA prefix against the requested version before deployment. Stale commit notifications fail safely and ask for a refresh rather than installing an unrelated revision.
