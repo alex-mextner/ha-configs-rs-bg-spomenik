@@ -1,0 +1,7 @@
+# Always LAST: old machine overlays must not put HA back into a bridge namespace.
+# Docker Compose >= 2.24.0 is required for !reset.
+services:
+  homeassistant:
+    network_mode: host
+    networks: !reset {}
+    ports: !reset []
