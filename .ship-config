@@ -1,0 +1,2 @@
+# Full maintained suites plus live base comparison of unchanged HGA snapshots.
+SHIP_LOCAL_TEST_CMD=make test-regressions

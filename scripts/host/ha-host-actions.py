@@ -1026,7 +1026,7 @@ def health() -> dict[str, Any]:
 
 # Voice stack controls. The HA container has no docker CLI, so HA's
 # shell_command.voice_* call these endpoints instead (fixed allow-list, no args).
-COMPOSE = ["docker", "compose", "-f", "/home/ultra/homeassistant/ha.docker-compose.yaml"]
+COMPOSE = ["/home/ultra/homeassistant/scripts/ha_compose.sh"]
 SATELLITE = "homeassistant-wyoming-satellite-1"
 APLAY = "aplay -D plughw:CARD=ArrayUAC10,DEV=0"
 VOICE_COMMANDS: dict[str, list[str]] = {

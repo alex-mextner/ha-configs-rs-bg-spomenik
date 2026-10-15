@@ -1,15 +1,20 @@
 [Unit]
-Description=Home Assistant Docker Compose
-After=docker.service
-Requires=docker.service
+Description=Home Assistant Docker Compose with Bluetooth host prerequisites
+After=docker.service network-online.target dbus.service bluetooth.service
+Requires=docker.service dbus.service
+Wants=network-online.target bluetooth.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/ultra/homeassistant
-ExecStart=/usr/bin/docker compose -f /home/ultra/homeassistant/ha.docker-compose.yaml up -d
-ExecStop=/usr/bin/docker compose -f /home/ultra/homeassistant/ha.docker-compose.yaml down
-User=ultra
+WorkingDirectory=@HA_ROOT@
+ExecStartPre=+@HA_BLUETOOTH_HELPER@
+ExecStart=@HA_ROOT@/scripts/ha_compose.sh up -d
+ExecReload=@HA_ROOT@/scripts/ha_compose.sh up -d
+ExecStop=@HA_ROOT@/scripts/ha_compose.sh stop
+User=@HA_USER@
+TimeoutStartSec=300
+TimeoutStopSec=180
 
 [Install]
 WantedBy=multi-user.target

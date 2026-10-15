@@ -7,8 +7,6 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - /home/ultra/wyoming-debug:/config/wyoming-debug
       - /home/ultra/oww-dataset:/config/oww-dataset
-    ports:
-      - "8123:8123"
     restart: unless-stopped
     privileged: true
     stop_grace_period: 2m
@@ -18,14 +16,48 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
+    # Linux HCI sockets exist only in the host network namespace.
+    network_mode: host
+    # Explicit Bluetooth requirements; privileged is retained for existing USB users.
+    cap_add: [NET_ADMIN, NET_RAW]
+    # Preserve dynamic Compose service names without pinning every container IP.
+    dns: [172.20.0.53]
+    # Host/VPN search suffixes must not replace unqualified Docker service names.
+    dns_search: ["."]
+    depends_on:
+      ha-docker-dns:
+        condition: service_healthy
+
+  ha-docker-dns:
+    build: ./docker/bluetooth
+    # Bump this tag when Dockerfile pins change, or explicitly apply with --build.
+    image: ha-docker-dns:1.14.7-probed
+    healthcheck:
+      test: ["CMD", "/bin/busybox", "nslookup", "ha-docker-dns.", "127.0.0.1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./docker/bluetooth/Corefile:/etc/coredns/Corefile:ro
     networks:
-      # ha-net only. No LAN (macvlan) leg: it broke 192.168.0.39:8123 for LAN clients.
-      # See docs/network.md.
       ha-net:
-        aliases:
-          - homeassistant.local
+        ipv4_address: 172.20.0.53
+    # No published ports: accessible only via the private Docker bridge.
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    pids_limit: 64
 
   esphome:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: ghcr.io/esphome/esphome:latest
     user: "1000:1000"
     environment:
@@ -41,8 +73,8 @@ services:
   music-assistant:
     # Host network (the documented MA requirement; approved 2026-09-25): players fetch audio from
     # the stream server MA announces by IP; on ha-net it announced 172.20.0.10:8097, which no
-    # player could reach, so nothing ever played. Only MA moves; HA stays on ha-net and reaches
-    # MA at the ha-net gateway http://172.20.0.1:8095; MA reaches HA at http://127.0.0.1:8123.
+    # player could reach, so nothing ever played. HA and MA now both use host networking;
+    # the bridge gateway and localhost endpoints continue to work.
     image: ghcr.io/music-assistant/server:2.10.4
     user: "1000:1000"
     network_mode: host
@@ -59,6 +91,10 @@ services:
           cpus: "2"
 
   go2rtc:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: alexxit/go2rtc:1.9.9
     user: "1000:1000"
     volumes:
@@ -73,6 +109,10 @@ services:
       - ha-net
 
   printer-proxy:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: nginx:1.27-alpine
     volumes:
       - /home/ultra/homeassistant/printer-proxy.nginx.conf:/etc/nginx/nginx.conf:ro
@@ -83,6 +123,10 @@ services:
       - ha-net
 
   u1-camera-proxy:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: ghcr.io/home-assistant/home-assistant:stable
     user: "1000:1000"
     command: ["python", "/config/scripts/u1_mjpeg_proxy.py"]
@@ -103,6 +147,10 @@ services:
       - ha-net
 
   ssh-server:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: linuxserver/openssh-server:latest
     environment:
       - PUID=1000
@@ -121,6 +169,10 @@ services:
       - ha-net
 
   wyoming-openwakeword:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: rhasspy/wyoming-openwakeword
     user: "1000:1000"
     volumes:
@@ -149,6 +201,10 @@ services:
       - ha-net
 
   wyoming-faster-whisper:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: wyoming-faster-whisper-cuda
     user: "1000:1000"
     volumes:
@@ -176,6 +232,10 @@ services:
       - ha-net
 
   wyoming-satellite:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: lunyaadev/rhasspy-wyoming-satellite:latest
     user: "1000:1000"
     group_add:
@@ -233,6 +293,10 @@ services:
       options: {max-size: "10m", max-file: "2"}
 
   ollama:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: ollama/ollama:latest
     user: "1000:1000"
     environment:
@@ -262,6 +326,10 @@ services:
       - ha-net
 
   ollama-embed:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     # CPU-only Ollama for HGA embeddings (mxbai-embed-large). With one GPU Ollama, every HGA request
     # swapped the chat model out for the embedder and back (18 s + up to 82 s of loading per turn).
     image: ollama/ollama:latest
@@ -308,6 +376,10 @@ services:
           cpus: "1"
 
   bgutil-pot:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     # PO-token server for the Music Assistant YouTube Music provider. 2.0.0 fixes an RCE; the
     # server is unauthenticated, so it is published on host loopback only (MA runs on the host
     # network and uses http://127.0.0.1:4416).
@@ -325,6 +397,10 @@ services:
       - ha-net
 
   hga-postgres:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     # Long-term memory for Home Generative Agent (LangGraph checkpoints + pgvector store).
     # ha-net only, no published ports; password in .env (HGA_DB_PASSWORD).
     image: pgvector/pgvector:pg17
@@ -380,6 +456,8 @@ services:
     security_opt:
       - no-new-privileges:true
     extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "node", "dist/docker-healthcheck.js"]
@@ -442,6 +520,10 @@ services:
       - chatgpt-web
 
   code-server:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     image: codercom/code-server:latest
     user: "1000:1000"
     environment:
@@ -462,6 +544,10 @@ services:
       - ha-net
 
   avahi-reflector:
+    # Preserve callbacks to HA after HA leaves the bridge network.
+    extra_hosts:
+      - "homeassistant:host-gateway"
+      - "homeassistant.local:host-gateway"
     # mDNS relay LAN <-> ha-net, so HA (bridge network, no LAN leg) discovers Yandex stations,
     # Cast and ESPHome by name although their IPs are plain DHCP. Only this container has a LAN
     # leg (macvlan 192.168.0.5): putting HA itself on the LAN broke access to 192.168.0.39:8123
@@ -489,6 +575,12 @@ services:
 networks:
   ha-net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+          # Reserve the lower half for infrastructure (DNS at .53).
+          ip_range: 172.20.128.0/17
   chatgpt-web:
     driver: bridge
   lan:
