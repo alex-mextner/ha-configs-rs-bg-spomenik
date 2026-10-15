@@ -42,7 +42,14 @@ class BluetoothDeploymentTests(unittest.TestCase):
         self.assertIn("ha-docker-dns", self.ha["depends_on"])
         self.assertEqual(dns["restart"], "unless-stopped")
         self.assertTrue(dns["read_only"])
-        self.assertIn("@sha256:", dns["image"])
+        dockerfile = (ROOT / "docker/bluetooth/Dockerfile").read_text()
+        self.assertTrue(
+            all(
+                "@sha256:" in line
+                for line in dockerfile.splitlines()
+                if line.startswith("FROM ")
+            )
+        )
         ipam = self.compose["networks"]["ha-net"]["ipam"]["config"][0]
         self.assertIn(
             ipaddress.ip_address(self.ha["dns"][0]),
@@ -87,6 +94,7 @@ class BluetoothDeploymentTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             service = json.loads(result.stdout)["services"]["homeassistant"]
@@ -120,6 +128,7 @@ class BluetoothDeploymentTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=False,
+            timeout=30,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Missing Compose overlay", result.stderr)
