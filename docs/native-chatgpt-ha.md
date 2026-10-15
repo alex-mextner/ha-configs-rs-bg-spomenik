@@ -1,3 +1,5 @@
+> Superseded for current deployment by [Physical Ubuntu desktop](physical-ubuntu-desktop.md). The separate session below is historical and disabled.
+
 # Separate native GUI through HA
 
 A dedicated `ultra:ultra`, mode 0700 directory exists at `/run/media/ultra/WD500/ultra-work` on `/dev/sdc1` (ext4). Only that new directory was created; the disk was not reformatted and other data was not modified.
