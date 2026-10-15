@@ -1,1 +1,15 @@
-{"domain":"chatgpt_native","name":"Native ChatGPT admin session","version":"1.0.0","dependencies":["ingress"],"codeowners":[],"iot_class":"local_push"}
+{
+  "domain": "chatgpt_native",
+  "name": "Native ChatGPT admin session",
+  "codeowners": [
+    "@alex-mextner"
+  ],
+  "dependencies": [
+    "http",
+    "ingress"
+  ],
+  "documentation": "https://github.com/alex-mextner/ha-configs-rs-bg-spomenik/blob/main/docs/physical-ubuntu-desktop.md",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/alex-mextner/ha-configs-rs-bg-spomenik/issues",
+  "version": "1.0.0"
+}

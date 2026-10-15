@@ -45,6 +45,15 @@ rest_command:
   printer_u1_emergency_stop:
     url: "http://192.168.0.26:7125/printer/emergency_stop"
     method: post
+  # K1 SE (rooted, Helper Script Moonraker): real Klipper e-stop and USB camera restart;
+  # state/pause/resume/stop entities stay on ha_creality_ws (ws :9999).
+  printer_k1se_emergency_stop:
+    url: "http://192.168.0.27:7125/printer/emergency_stop"
+    method: post
+  printer_k1se_restart_camera:
+    url: "http://192.168.0.27:7125/printer/gcode/script?script=RESTART_CAMERA"
+    method: post
+    timeout: 30
 
 script:
   printer_send_notification:
@@ -226,11 +235,10 @@ template:
         state_class: measurement
         icon: mdi:timer-sand
         state: >
-          {% set progress = states('sensor.printer_u1_progress') | float(0) %}
-          {% set print_stats = state_attr('sensor.printer_u1_raw', 'print_stats') or {} %}
-          {% set duration = print_stats.get('print_duration', 0) | float(0) %}
-          {% if progress > 0 and progress < 100 and duration > 0 %}
-            {{ (((duration / (progress / 100)) - duration) / 60) | round(0) }}
+          {# Slicer-based estimate (h): progress-extrapolation overshoots ~2x early in a print. #}
+          {% set left_h = states('sensor.snapmaker_u1_slicer_print_time_left_estimate') | float(0) %}
+          {% if states('sensor.printer_u1_status') in ['printing', 'paused'] and left_h > 0 %}
+            {{ (left_h * 60) | round(0) }}
           {% else %}
             0
           {% endif %}
@@ -389,12 +397,16 @@ automation:
     trigger:
       - platform: state
         entity_id: sensor.printer_k1_se_status
+        # Reloads/reconnects pass through unavailable; not a real printer state change.
+        not_from: ["unknown", "unavailable"]
+        not_to: ["unknown", "unavailable"]
     condition:
+      # ha_creality_ws reports completed/stopped, not Klipper's complete/cancelled.
       - condition: template
         value_template: >
           {{ trigger.from_state is not none
              and trigger.to_state.state != trigger.from_state.state
-             and trigger.to_state.state in ['printing', 'paused', 'complete', 'cancelled', 'error'] }}
+             and trigger.to_state.state in ['printing', 'paused', 'completed', 'stopped', 'error'] }}
     action:
       - action: script.printer_send_notification
         data:
@@ -410,6 +422,9 @@ automation:
     trigger:
       - platform: state
         entity_id: sensor.printer_u1_status
+        # Reloads/reconnects pass through unavailable; not a real printer state change.
+        not_from: ["unknown", "unavailable"]
+        not_to: ["unknown", "unavailable"]
     condition:
       - condition: template
         value_template: >
@@ -433,7 +448,7 @@ automation:
     trigger:
       - platform: state
         entity_id: sensor.printer_k1_se_status
-        to: "complete"
+        to: "completed"
         for:
           seconds: 10
     action:

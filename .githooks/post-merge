@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Merge sync refuses mismatched pins and locally patched deployments.
+set -euo pipefail
+if [[ -x "$HOME/.config/git/run-global-hooks" ]]; then
+    "$HOME/.config/git/run-global-hooks" post-merge "$@"
+fi
+ROOT="$(git rev-parse --show-toplevel)"
+if PREVIOUS="$(git rev-parse --verify ORIG_HEAD 2>/dev/null)"; then
+    exec "$ROOT/scripts/sync-submodule-to-custom-components.sh" --previous-revision "$PREVIOUS" --changed-only
+fi
+exec "$ROOT/scripts/sync-submodule-to-custom-components.sh"

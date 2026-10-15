@@ -1,0 +1,111 @@
+{
+  "dataplicity": {
+    "submodule": "submodules/dataplicity",
+    "repository": "alex-mextner/Dataplicity",
+    "branch": "prod",
+    "protected_branch": "prod",
+    "aliases": [
+      "AlexxIT/Dataplicity"
+    ]
+  },
+  "home_generative_agent": {
+    "submodule": "submodules/home-generative-agent",
+    "repository": "goruck/home-generative-agent",
+    "branch": "main"
+  },
+  "hacs": {
+    "submodule": "submodules/hacs",
+    "repository": "alex-mextner/hacs-integration",
+    "branch": "local/hacs-frontend",
+    "protected_branch": "local/hacs-frontend",
+    "aliases": [
+      "hacs/integration"
+    ],
+    "required_files": [
+      "utils/submodule_update.py",
+      "hacs_frontend/__init__.py"
+    ]
+  },
+  "mcp_server_http_transport": {
+    "submodule": "submodules/hass-mcp-server",
+    "repository": "ganhammar/hass-mcp-server",
+    "branch": "main"
+  },
+  "wifi_sensor_tracker": {
+    "submodule": "submodules/HA-WiFi-Sensor-Tracker",
+    "repository": "5a2v0/HA-WiFi-Sensor-Tracker",
+    "branch": "main"
+  },
+  "xtend_tuya": {
+    "submodule": "submodules/xtend_tuya",
+    "repository": "azerty9971/xtend_tuya",
+    "branch": "main"
+  },
+  "yandex_dialogs": {
+    "submodule": "submodules/YandexDialogs",
+    "repository": "AlexxIT/YandexDialogs",
+    "branch": "master"
+  },
+  "yandex_smart_home": {
+    "submodule": "submodules/yandex_smart_home",
+    "repository": "dext0r/yandex_smart_home",
+    "branch": "dev"
+  },
+  "yandex_station": {
+    "submodule": "submodules/YandexStation",
+    "repository": "alex-mextner/YandexStation",
+    "branch": "master",
+    "aliases": [
+      "AlexxIT/YandexStation"
+    ]
+  },
+  "ingress": {
+    "submodule": "submodules/hass-ingress-fork",
+    "repository": "alex-mextner/hass_ingress",
+    "branch": "local-patches",
+    "protected_branch": "local-patches",
+    "aliases": [
+      "lovelylain/hass_ingress"
+    ]
+  },
+  "fish_audio": {
+    "submodule": "submodules/fish-audio-ru",
+    "repository": "alex-mextner/ha-fish-audio-ru",
+    "branch": "main"
+  },
+  "mass": {
+    "submodule": "submodules/hass-music-assistant",
+    "repository": "music-assistant/hass-music-assistant",
+    "branch": "main"
+  },
+  "dhcp_monitor": {
+    "submodule": "submodules/dhcp-monitor",
+    "repository": "jonnybergdahl/HomeAssistant_Dhcp_Monitor_Integration",
+    "branch": "main"
+  },
+  "cover_time_based": {
+    "submodule": "submodules/ha-cover-time-based",
+    "repository": "Sese-Schneider/ha-cover-time-based",
+    "branch": "main"
+  },
+  "moonraker": {
+    "submodule": "submodules/moonraker-home-assistant",
+    "repository": "marcolivierarsenault/moonraker-home-assistant",
+    "branch": "main"
+  },
+  "webrtc": {
+    "submodule": "submodules/webrtc-camera",
+    "repository": "AlexxIT/WebRTC",
+    "branch": "master"
+  },
+  "ha_washdata": {
+    "submodule": "submodules/ha_washdata",
+    "repository": "3dg1luk43/ha_washdata",
+    "branch": "main"
+  },
+  "ha_creality_ws": {
+    "submodule": "submodules/ha_creality_ws",
+    "repository": "3dg1luk43/ha_creality_ws",
+    "branch": "main"
+  }
+}
