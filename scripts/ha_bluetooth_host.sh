@@ -20,7 +20,10 @@ systemctl enable --now bluetooth.service
 [[ -S /run/dbus/system_bus_socket ]] || { echo 'System D-Bus socket is missing.' >&2; exit 1; }
 # Do not restart BlueZ, reset adapters, or interrupt existing Bluetooth connections.
 if command -v rfkill >/dev/null; then rfkill unblock bluetooth; fi
-if bluetoothctl --timeout 8 list | grep -q '^Controller '; then
+# Read the complete result before matching. With pipefail, grep -q can close
+# early while bluetoothctl still writes discovery events and cause false absence.
+controllers=$(bluetoothctl --timeout 8 list)
+if [[ "$controllers" == *"Controller "* ]]; then
   bluetoothctl --timeout 8 power on
 else
   echo 'No Bluetooth adapter detected yet; BlueZ AutoEnable will handle hotplug.' >&2
