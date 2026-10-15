@@ -469,6 +469,9 @@ def test_git_hooks_sync_offline_recorded_pin(repo, event, args):
         shutil.copy(SCRIPT.with_name(name), scripts / name)
     source.rename(source.with_name("offline-source"))
     hook = SCRIPT.parents[1] / ".githooks" / event
+    if event == "post-checkout":
+        current = git(root, "rev-parse", "HEAD")
+        args = [current, current, "1"]
     result = subprocess.run(
         ["bash", str(hook), *args],
         cwd=root,
@@ -483,14 +486,119 @@ def test_git_hooks_sync_offline_recorded_pin(repo, event, args):
         },
     )
     assert result.returncode == 0, result.stderr
-    assert not (root / "custom_components/demo").is_symlink()
+    assert (root / "custom_components/demo").is_symlink() == (event == "post-checkout")
     assert (
         json.loads((root / "custom_components/demo/manifest.json").read_text())[
             "version"
         ]
         == "1.0.0"
     )
-    assert (
-        len(list((root / "backups/integration-updates").glob("*/transaction.json")))
-        == 1
+    assert len(
+        list((root / "backups/integration-updates").glob("*/transaction.json"))
+    ) == (0 if event == "post-checkout" else 1)
+
+
+@pytest.mark.parametrize(
+    "domain,branch",
+    [("webrtc", "master"), ("yandex_dialogs", "master"), ("yandex_smart_home", "dev")],
+)
+def test_configured_default_branch_is_fetched_as_branch(repo, domain, branch):
+    root, source = repo
+    git(source, "branch", "-m", "main", branch)
+    policy = json.loads((root / "integration-sources.json").read_text())
+    project_policy = json.loads(
+        (SCRIPT.parents[1] / "integration-sources.json").read_text()
     )
+    policy["demo"]["branch"] = project_policy[domain]["branch"]
+    (root / "integration-sources.json").write_text(json.dumps(policy))
+    result = install(root, ref=branch)
+    assert result["commit"] == git(source, "rev-parse", branch)
+    assert result["requested_is_branch"] is True
+
+
+def test_offline_sync_uses_the_previous_parent_pin_for_plain_copy(repo):
+    root, _ = repo
+    install(root, pinned=True)
+    previous = git(root, "rev-parse", "HEAD")
+    git(root / "submodules/demo", "checkout", "v2.0.0")
+    git(root, "add", "submodules/demo")
+    git(root, "commit", "-m", "advance recorded pin")
+    result = run_setup(root, "--previous-revision", previous)
+    assert result.returncode == 0, result.stderr
+    assert (
+        json.loads((root / "custom_components/demo/manifest.json").read_text())[
+            "version"
+        ]
+        == "2.0.0"
+    )
+
+
+def test_offline_sync_still_preserves_patches_against_the_previous_pin(repo):
+    root, _ = repo
+    install(root, pinned=True)
+    previous = git(root, "rev-parse", "HEAD")
+    (root / "custom_components/demo/__init__.py").write_text(
+        "preserve_my_patch = True\n"
+    )
+    git(root / "submodules/demo", "checkout", "v2.0.0")
+    git(root, "add", "submodules/demo")
+    git(root, "commit", "-m", "new pin")
+    result = run_setup(root, "--previous-revision", previous)
+    assert result.returncode != 0
+    assert "deployed local changes" in result.stderr
+    assert (
+        root / "custom_components/demo/__init__.py"
+    ).read_text() == "preserve_my_patch = True\n"
+
+
+def test_unchanged_pinned_sync_does_not_replace_files_or_add_backup(repo):
+    root, _ = repo
+    install(root, pinned=True)
+    deployed = root / "custom_components/demo"
+    before = deployed.stat().st_ino
+    backups = list((root / "backups/integration-updates").iterdir())
+    result = install(root, pinned=True)
+    assert result.get("unchanged") is True
+    assert deployed.stat().st_ino == before
+    assert list((root / "backups/integration-updates").iterdir()) == backups
+
+
+def test_checkout_hook_applies_a_changed_pin_without_touching_unrelated_files(repo):
+    import shutil, os
+
+    root, _ = repo
+    install(root, pinned=True)
+    git(root, "switch", "-c", "new-pins")
+    git(root / "submodules/demo", "checkout", "v2.0.0")
+    git(root, "add", "submodules/demo")
+    git(root, "commit", "-m", "new pin")
+    target = git(root, "rev-parse", "HEAD")
+    git(root, "switch", "main")
+    git(root / "submodules/demo", "checkout", "v1.0.0")
+    (root / "scripts").mkdir()
+    (root / ".githooks").mkdir()
+    for name in [
+        "ha_setup_integrations.py",
+        "ha_submodule_update.py",
+        "sync-submodule-to-custom-components.sh",
+    ]:
+        shutil.copy(SCRIPT.with_name(name), root / "scripts" / name)
+    shutil.copy(
+        SCRIPT.parents[1] / ".githooks/post-checkout", root / ".githooks/post-checkout"
+    )
+    git(root, "config", "core.hooksPath", ".githooks")
+    proc = subprocess.run(
+        ["git", "-C", str(root), "switch", "new-pins"],
+        env={**os.environ, "HOME": str(root), "HA_VERSION": "2026.9.3"},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert git(root, "rev-parse", "HEAD") == target
+    assert (
+        json.loads((root / "custom_components/demo/manifest.json").read_text())[
+            "version"
+        ]
+        == "2.0.0"
+    )
+    assert (root / "unrelated.txt").read_text() == "original"

@@ -152,6 +152,7 @@ def install(
     ref: str,
     ha_version: str,
     pinned: bool = False,
+    previous_revision: str | None = None,
 ) -> dict:
     root = Path(root).resolve()
     policies_path = root / "integration-sources.json"
@@ -202,7 +203,19 @@ def install(
                 "Submodule pointer has staged work; refusing to overwrite it"
             )
         before = git(submodule, "rev-parse", "HEAD")
-        if pinned and before != git(root, "rev-parse", f"HEAD:{subpath}"):
+        recorded = git(root, "rev-parse", f"HEAD:{subpath}")
+        baseline = before
+        permitted = {recorded}
+        if pinned and previous_revision:
+            checked_ref(previous_revision)
+            previous_pin = git(
+                root, "rev-parse", f"{previous_revision}:{subpath}", optional=True
+            )
+            if previous_pin:
+                permitted.add(previous_pin)
+                if not (root / "custom_components" / domain).is_symlink():
+                    baseline = previous_pin
+        if pinned and before not in permitted:
             raise RuntimeError(
                 f"{domain}: checkout differs from the recorded pin; commit or restore it before syncing"
             )
@@ -214,7 +227,7 @@ def install(
         )
         fetch_ref = ("refs/heads/" if is_branch else "refs/tags/") + selected
         if pinned:
-            target = before
+            target = recorded
         else:
             git(submodule, "fetch", "--no-tags", url, fetch_ref)
             target = git(submodule, "rev-parse", "FETCH_HEAD^{commit}")
@@ -226,7 +239,7 @@ def install(
                 f"{domain} requires Home Assistant {minimum}; running {ha_version}"
             )
         verify_deployed(
-            root, submodule, domain, before, metadata.get("persistent_directory")
+            root, submodule, domain, baseline, metadata.get("persistent_directory")
         )
         component_path = f"custom_components/{domain}"
         archive = git(
@@ -281,11 +294,27 @@ def install(
                 + uuid4().hex[:8]
             )
             backup = root / "backups/integration-updates" / stamp
-            backup.mkdir(parents=True)
             had_deployment = deployed.exists() or deployed.is_symlink()
             tracked_link = deployed.is_symlink() and git(
                 root, "ls-files", "-s", "--", component_path
             ).startswith("120000 ")
+            if (
+                pinned
+                and target == before
+                and baseline == target
+                and had_deployment
+                and (not deployed.is_symlink() or tracked_link)
+            ):
+                return {
+                    "managed": True,
+                    "domain": domain,
+                    "commit": target,
+                    "version": str(manifest["version"]),
+                    "unchanged": True,
+                    "selected_ref": selected,
+                    "requested_is_branch": True,
+                }
+            backup.mkdir(parents=True)
             if deployed.exists():
                 shutil.copytree(
                     deployed,
@@ -376,6 +405,10 @@ def main() -> int:
         action="store_true",
         help="Deploy the currently checked-out commit without fetching",
     )
+    parser.add_argument(
+        "--previous-revision",
+        help="Previous parent Git revision for a pinned deployment transition",
+    )
     args = parser.parse_args()
 
     def interrupted(_signum, _frame):
@@ -393,6 +426,7 @@ def main() -> int:
                     ref=args.ref,
                     ha_version=args.ha_version,
                     pinned=args.pinned,
+                    previous_revision=args.previous_revision,
                 )
             )
         )

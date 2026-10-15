@@ -44,12 +44,12 @@
   "yandex_dialogs": {
     "submodule": "submodules/YandexDialogs",
     "repository": "AlexxIT/YandexDialogs",
-    "branch": "main"
+    "branch": "master"
   },
   "yandex_smart_home": {
     "submodule": "submodules/yandex_smart_home",
     "repository": "dext0r/yandex_smart_home",
-    "branch": "main"
+    "branch": "dev"
   },
   "yandex_station": {
     "submodule": "submodules/YandexStation",
@@ -96,7 +96,7 @@
   "webrtc": {
     "submodule": "submodules/webrtc-camera",
     "repository": "AlexxIT/WebRTC",
-    "branch": "main"
+    "branch": "master"
   },
   "ha_washdata": {
     "submodule": "submodules/ha_washdata",

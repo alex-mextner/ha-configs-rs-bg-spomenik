@@ -17,22 +17,47 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ha_submodule_update import git, install, run_as_owner
+from ha_submodule_update import checked_ref, git, install, run_as_owner
 
 
 def setup(
-    root: Path, target: str | None, ha_version: str, initialize: bool
+    root: Path,
+    target: str | None,
+    ha_version: str,
+    initialize: bool,
+    previous_revision: str | None = None,
+    changed_only: bool = False,
 ) -> list[dict]:
     policies = json.loads((root / "integration-sources.json").read_text())
     if not isinstance(policies, dict) or not policies:
         raise RuntimeError("Integration policies must be a nonempty mapping")
+    changed = None
+    if changed_only:
+        if not previous_revision:
+            raise RuntimeError("Changed-only sync needs the previous parent revision")
+        checked_ref(previous_revision)
+        changed = set(
+            git(
+                root,
+                "diff",
+                "--name-only",
+                previous_revision,
+                "HEAD",
+                "--",
+                "submodules/",
+            ).splitlines()
+        )
     selected = []
     for domain, policy in policies.items():
         if not isinstance(policy, dict):
             raise RuntimeError(f"Invalid policy for {domain}")
         subpath = policy["submodule"]
+        if changed is not None and subpath not in changed:
+            continue
         if target is None or target in (domain, subpath, Path(subpath).name):
             selected.append((domain, policy))
+    if not selected and changed is not None:
+        return []
     if not selected:
         raise RuntimeError(f"Unknown integration target: {target}")
     results = []
@@ -55,6 +80,7 @@ def setup(
                 ref="HEAD",
                 ha_version=ha_version,
                 pinned=True,
+                previous_revision=previous_revision,
             )
         )
     return results
@@ -138,6 +164,15 @@ def main() -> int:
         type=Path,
         help="Provision this host scanner for container commit hooks",
     )
+    parser.add_argument(
+        "--previous-revision",
+        help="Previous parent Git revision supplied by checkout/merge hooks",
+    )
+    parser.add_argument(
+        "--changed-only",
+        action="store_true",
+        help="Sync only submodule pins changed from the previous revision",
+    )
     args = parser.parse_args()
     try:
         root = args.root.resolve()
@@ -155,7 +190,19 @@ def main() -> int:
             install_secret_scanner(root, args.gitleaks)
         if args.install_hooks:
             install_hooks(root)
-        print(json.dumps(setup(root, args.target, version, args.initialize), indent=2))
+        print(
+            json.dumps(
+                setup(
+                    root,
+                    args.target,
+                    version,
+                    args.initialize,
+                    args.previous_revision,
+                    args.changed_only,
+                ),
+                indent=2,
+            )
+        )
         return 0
     except Exception as exc:
         print(f"Integration setup failed: {exc}", file=sys.stderr)

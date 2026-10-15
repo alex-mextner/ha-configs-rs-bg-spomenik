@@ -118,3 +118,23 @@ python3 scripts/ha_setup_integrations.py --target xtend_tuya --ha-version 2026.9
 ```
 
 The scanner is version-probed, atomically copied into ignored `.tools/bin/gitleaks`, and its version/checksum recorded alongside it. The Git installer puts this verified tools directory on PATH for the existing pre-commit secret scan; the hook itself is unchanged. A missing scanner still refuses the commit; no hook is bypassed. Re-provision after changing host architecture.
+
+## Parent pin transitions
+
+Checkout and merge hooks pass the previous parent revision and touch only changed
+submodule pins. A legitimate old plain-copy deployment is verified against that
+previous pin before replacing it with the new recorded version. Any user patch
+still refuses the operation. Unrelated branch switches do not deploy or create
+backups; unchanged pinned setup validates content and leaves deployment inodes
+and backup history unchanged.
+
+For a deliberate manual parent-pin transition use:
+
+```sh
+python3 scripts/ha_setup_integrations.py --previous-revision <old-parent-sha> --ha-version 2026.9.3
+```
+
+Sources must already contain the newly recorded commits for offline hooks.
+An unrecorded source checkout is never force-reset. Missing clone sources require
+explicit `--initialize`. Public branch names are recorded in `integration-sources.json`;
+YandexDialogs and WebRTC use `master`, Yandex Smart Home uses `dev`.
