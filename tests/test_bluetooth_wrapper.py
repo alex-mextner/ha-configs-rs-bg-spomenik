@@ -49,7 +49,11 @@ elif "up" in args and "ha-docker-dns" in args:
                 check=False,
                 timeout=30,
             )
-            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            calls = (
+                [json.loads(line) for line in log.read_text().splitlines()]
+                if log.exists()
+                else []
+            )
         return result, calls
 
     def test_dns_reservation_failure_prevents_other_service_changes(self) -> None:
@@ -120,6 +124,25 @@ elif "up" in args and "ha-docker-dns" in args:
         result, calls = self.run_wrapper("up", "--", "--dry-run")
         self.assertEqual(result.returncode, 23, result.stderr)
         self.assertIn("--wait", calls[-1])
+
+    def test_help_booleans_obey_the_last_explicit_value(self) -> None:
+        for option in ("--help", "-h"):
+            result, calls = self.run_wrapper(
+                "up", f"{option}=true", "wyoming-satellite"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(calls), 1)
+            result, calls = self.run_wrapper(
+                "up", option, f"{option}=false", "wyoming-satellite"
+            )
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertIn("--wait", calls[-1])
+
+    def test_invalid_boolean_is_rejected_without_any_docker_call(self) -> None:
+        for option in ("--dry-run", "--no-start", "--help", "-h"):
+            result, calls = self.run_wrapper("up", f"{option}=maybe")
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls, [])
 
     def test_exec_command_payload_is_not_a_compose_verb(self) -> None:
         result, calls = self.run_wrapper("exec", "wyoming-satellite", "run")

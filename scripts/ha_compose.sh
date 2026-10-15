@@ -38,16 +38,20 @@ if [[ "${1:-}" == up ]]; then
   for arg in "$@"; do
     case "$arg" in
       --) break ;;
-      -h|--help) show_help=1 ;;
+      -h|--help|-h=*|--help=*)
+        value=true
+        [[ "$arg" != *=* ]] || value=${arg#*=}
+        show_help=$(compose_bool "$value") || exit 2
+        ;;
       --dry-run|--dry-run=*)
         value=true
         [[ "$arg" != *=* ]] || value=${arg#*=}
-        dry_run=$(compose_bool "$value")
+        dry_run=$(compose_bool "$value") || exit 2
         ;;
       --no-start|--no-start=*)
         value=true
         [[ "$arg" != *=* ]] || value=${arg#*=}
-        no_start=$(compose_bool "$value")
+        no_start=$(compose_bool "$value") || exit 2
         ;;
       --build|--build=*|--no-build|--no-build=*) dns_build_options+=("$arg") ;;
     esac
