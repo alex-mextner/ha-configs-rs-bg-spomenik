@@ -1,0 +1,13 @@
+# Forward from the host-networked HA to Docker's dynamic service-name resolver.
+# This resolver is reachable only on the private ha-net; no host ports are published.
+.:53 {
+    errors
+    hosts {
+        172.20.0.1 homeassistant homeassistant.local
+        fallthrough
+    }
+    forward . 127.0.0.11
+    # Do not retain stale IPs when another Compose service is recreated.
+    cache 5
+    loop
+}
