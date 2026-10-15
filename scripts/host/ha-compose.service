@@ -7,12 +7,12 @@ Wants=network-online.target bluetooth.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/ultra/homeassistant
-ExecStartPre=+/home/ultra/homeassistant/scripts/ha_bluetooth_host.sh
-ExecStart=/home/ultra/homeassistant/scripts/ha_compose.sh up -d
-ExecReload=/home/ultra/homeassistant/scripts/ha_compose.sh up -d
-ExecStop=/home/ultra/homeassistant/scripts/ha_compose.sh stop
-User=ultra
+WorkingDirectory=@HA_ROOT@
+ExecStartPre=+@HA_BLUETOOTH_HELPER@
+ExecStart=@HA_ROOT@/scripts/ha_compose.sh up -d
+ExecReload=@HA_ROOT@/scripts/ha_compose.sh up -d
+ExecStop=@HA_ROOT@/scripts/ha_compose.sh stop
+User=@HA_USER@
 TimeoutStartSec=300
 TimeoutStopSec=180
 

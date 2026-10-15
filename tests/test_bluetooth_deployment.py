@@ -112,7 +112,8 @@ class BluetoothDeploymentTests(unittest.TestCase):
         self.assertIn("dbus.service", after)
         self.assertIn("ha_compose.sh up -d", unit)
         self.assertIn("ExecStartPre=+", unit)
-        self.assertIn("ha_bluetooth_host.sh", unit)
+        self.assertIn("ExecStartPre=+@HA_BLUETOOTH_HELPER@", unit)
+        self.assertNotIn("ExecStartPre=+@HA_ROOT@", unit)
 
     def test_missing_machine_overlay_fails_before_docker_changes(self) -> None:
         wrapper = ROOT / "scripts/ha_compose.sh"

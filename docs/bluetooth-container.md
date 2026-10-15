@@ -17,13 +17,35 @@ HA still needs Docker names such as `wyoming-satellite`, `wyoming-vosk`,
 `printer-proxy`, `u1-camera-proxy` and `hga-postgres`. The private `ha-docker-dns`
 CoreDNS service forwards requests to Docker's dynamic resolver at 127.0.0.11.
 Only DNS has a reserved IP (172.20.0.53); other containers may be recreated or
-receive new addresses. No DNS port or database port is published on the host.
+receive new addresses. When changing the Dockerfile base pins, bump the local image tag or rebuild it
+with `scripts/ha_compose.sh build ha-docker-dns` before applying. The Corefile is
+bind-mounted and does not require an image rebuild.
+The small DNS image copies the official CoreDNS binary
+into a BusyBox runtime; both multi-architecture base image indexes are pinned.
+Its health check resolves `ha-docker-dns.` through Docker's forwarding path,
+not the static HA hosts entry; HA waits for `service_healthy`.
+Crash/OOM recovery retains Docker's `unless-stopped` restart policy. No public
+secondary resolver is injected: that would leak private service names and cannot
+resolve them. A stopped DNS service must be restored, not hidden by a fallback.
+HA uses `dns_search: ["."]` so a host/VPN suffix does not rewrite Docker names.
+Bridge services retain callbacks via `homeassistant` and `homeassistant.local`
+using `host-gateway`; HA-to-service resolution remains dynamic through CoreDNS. No DNS port or database port is published on the host.
 The subnet matches the existing Odroid deployment. A site using another subnet
 must change the Compose IPAM, HA DNS IP, DNS static IP and Corefile gateway together.
+Before `up`, `create`, or `run`, the wrapper compares the existing network's
+actual IPAM with the rendered configuration and checks the DNS address owner.
+For normal `up`, the wrapper first reserves and starts only DNS and waits for
+its health check before other services can be recreated. DNS failure therefore
+stops the apply before touching unrelated services. `up --no-start` keeps its
+no-start meaning. Commands go first; use deployment settings and
+`COMPOSE_PROFILES` for global options.
+Docker does not safely reallocate a live bridge merely because YAML changed;
+a mismatch is refused before changing services. The wrapper never tears down a
+shared network automatically. A fresh host creates the specified network directly.
 
 ## Deployment and migration
 
-Use `scripts/ha_compose.sh` instead of invoking raw Compose. It loads optional
+Use `scripts/ha_compose.sh` instead of invoking raw Compose, including voice-stack maintenance. It loads optional
 machine overlays from the root-owned `/etc/default/ha-compose`, then always
 applies `docker/bluetooth/compose.final.yaml` last. The final overlay removes
 legacy bridge attachments and published HA ports, but preserves machine image
@@ -46,6 +68,10 @@ The installer backs up the previous unit/settings, installs missing BlueZ/D-Bus
 packages, starts Bluetooth, and enables the tracked `ha-compose.service`.
 Every boot repeats the idempotent host prerequisites before bringing up Compose.
 It does not bind configuration to a MAC, hci index, hostname or network-card name.
+The privileged boot helper is installed as a root-owned system copy at
+`/usr/local/libexec/ha-bluetooth-host`, not executed from a writable checkout.
+Candidate settings and units are checked before they replace active files;
+failed installation preserves the previous deployment configuration.
 An already running BlueZ daemon is not restarted. The installer itself does not
 interrupt HA: the explicit Compose apply above recreates HA when needed.
 
