@@ -58,88 +58,68 @@ Runtime dependencies are sourced from
 
 ## custom_components/ management
 
-All third-party integrations are managed as **Git submodules** cloned into `submodules/`,
-with **symlinks** from `custom_components/<domain>/` pointing to
-`submodules/<repo>/custom_components/<domain>/`. This keeps the repo clean while
-allowing HA to load integrations normally.
+Third-party integration sources are managed as **Git submodules** in `submodules/`.
+Deployments in `custom_components/<domain>/` may be tracked symlinks to their source
+or plain copies. The policy-driven updater preserves tracked symlinks and existing
+plain copies, and refuses to overwrite local patches.
 
 ### Current submodules
 
 | Submodule | Symlink | Repository | Pin |
 |---|---|---|---|
-| `submodules/dataplicity` | `custom_components/dataplicity` | `alex-mextner/Dataplicity` | branch `fix/dataplicity-modern-api` |
-| `submodules/hacs` | `custom_components/hacs` | `hacs/integration` | tag `2.0.5` |
+| `submodules/dataplicity` | `custom_components/dataplicity` | `alex-mextner/Dataplicity` | protected branch `prod` |
+| `submodules/hacs` | `custom_components/hacs` | `alex-mextner/hacs-integration` | protected branch `local/hacs-frontend` |
 | `submodules/home-generative-agent` | `custom_components/home_generative_agent` | `goruck/home-generative-agent` | branch `main` |
 | `submodules/hass-mcp-server` | `custom_components/mcp_server_http_transport` | `ganhammar/hass-mcp-server` | tag `v1.8.0` |
 | `submodules/HA-WiFi-Sensor-Tracker` | `custom_components/wifi_sensor_tracker` | `5a2v0/HA-WiFi-Sensor-Tracker` | tag `2.2.5` |
 | `submodules/xtend_tuya` | `custom_components/xtend_tuya` | `azerty9971/xtend_tuya` | tag `v4.4.7` |
 | `submodules/YandexDialogs` | `custom_components/yandex_dialogs` | `AlexxIT/YandexDialogs` | tag `v1.3.2` |
 | `submodules/yandex_smart_home` | `custom_components/yandex_smart_home` | `dext0r/yandex_smart_home` | tag `v1.1.2` |
-| `submodules/YandexStation` | `custom_components/yandex_station` | `AlexxIT/YandexStation` | tag `v3.21.0` |
-| `submodules/hass-ingress-fork` | `custom_components/ingress` | `lovelylain/hass_ingress` | local fork (patched) |
+| `submodules/YandexStation` | `custom_components/yandex_station` | `alex-mextner/YandexStation` | branch `master` |
+| `submodules/hass-ingress-fork` | `custom_components/ingress` | `alex-mextner/hass_ingress` | protected branch `local-patches` |
 
 ### Rules
 - **Do not copy third-party code directly** into this repo. Always add it as a submodule.
-- `dataplicity` is a **patched fork** — upstream fixes live in `fix/dataplicity-modern-api`.
+- `dataplicity` is a **patched fork** — maintained patches live in the protected `prod` branch.
   Never replace it with vanilla upstream without checking the patch delta.
 - `home_generative_agent` is tracked on upstream `goruck/home-generative-agent`.
   If local patches are needed, either fork upstream or patch here and push to the fork.
 - `ingress` (`hass-ingress-fork`) is a **local patched fork** of `lovelylain/hass_ingress`.
   Patches: removed donate button, removed header/title, added loading spinner CSS.
   Never replace it with vanilla upstream without re-applying patches.
-- **HACS special case:** upstream `.gitignore` excludes `hacs_frontend`. After cloning,
-  copy the `hacs_frontend` pip package into `submodules/hacs/custom_components/hacs/hacs_frontend/`
-  and commit inside the submodule so HA can import it.
-- To update a submodule: `cd submodules/<repo> && git fetch --tags && git checkout <new-tag>`.
-  Then commit the submodule pointer change and symlink in the parent repo.
+- **HACS special case:** upstream `.gitignore` excludes `hacs_frontend`. The protected
+  HACS fork pin must already contain `custom_components/hacs/hacs_frontend/` and the
+  Git update adapter. Preserve both when maintaining the fork; clone setup validates
+  their required files and never replaces the fork with upstream.
+- Prefer HACS Update or public `update.install` for integration updates so Git pins,
+  deployments, and HACS metadata stay in sync. For Git-only maintenance preserve
+  patches, commit the source/pointer deliberately, then reconcile the exact release
+  through HA; see the update guide below.
 - **Verify the exact `<domain>` directory name inside the submodule** before creating the symlink. The repo name (e.g. `hass_ingress`) often differs from the actual integration domain (e.g. `ingress`). Always run `ls submodules/<repo>/custom_components/` to confirm the exact folder name, then symlink `custom_components/<domain>` to `../submodules/<repo>/custom_components/<domain>`.
-- When cloning this repo on a new machine, use `git clone --recurse-submodules` or run
-  `git submodule update --init --recursive` afterwards.
+- After cloning, use `scripts/ha_setup_integrations.py --initialize --ha-version <running-version>`
+  to initialize missing sources at their recorded pins and validate/deploy them safely.
+  Add `--install-hooks` if no existing hook manager is active.
 
-### HACS version cache mismatch
-When submodules are updated via `git` (not through the HACS UI), HACS still shows the old version in its `update.*` entities because it caches `installed_commit` and `version_installed` in `.storage/hacs.repositories`.
+### Git-managed HACS updates and version reconciliation
 
-**Fix:** Update the cached values in `.storage/hacs.repositories` to match the current submodule HEAD and manifest version, then restart HA (or call `update.clear_skipped` if you previously skipped the stale notifications).
+Use HACS Update or the public `update.install` service for managed integrations.
+The patched HACS installer runs `scripts/ha_submodule_update.py`, preserves protected
+forks, deploys exact refs, and commits the parent Git pointer. HACS's normal
+post-install flow maintains its own installed-version state. Managed errors never
+fall back to ZIP installation.
 
-Example quick-fix (run from repo root after updating submodules):
-```python
-import json, subprocess
+**Never edit `.storage/hacs.repositories` or `.storage/hacs.data` or force-kill HA to
+retain a cache edit.** After a Git-only update, reconcile through the same HACS UI/API
+release installation. `update.clear_skipped` only clears skip flags.
 
-repo_map = {
-    "goruck/home-generative-agent": ("submodules/home-generative-agent", "home_generative_agent"),
-    "5a2v0/HA-WiFi-Sensor-Tracker": ("submodules/HA-WiFi-Sensor-Tracker", "wifi_sensor_tracker"),
-    "azerty9971/xtend_tuya": ("submodules/xtend_tuya", "xtend_tuya"),
-    "AlexxIT/Dataplicity": ("submodules/dataplicity", "dataplicity"),
-    "dext0r/yandex_smart_home": ("submodules/yandex_smart_home", "yandex_smart_home"),
-    "AlexxIT/YandexStation": ("submodules/YandexStation", "yandex_station"),
-    "ganhammar/hass-mcp-server": ("submodules/hass-mcp-server", "mcp_server_http_transport"),
-    "hacs/integration": ("submodules/hacs", "hacs"),
-}
+Clone setup: `python3 scripts/ha_setup_integrations.py --initialize --ha-version <running-version> --install-hooks`.
+Existing hook managers are preserved; the command reports how to wire the tracked
+post-checkout/post-merge hooks if one is active. Offline sync refuses unrecorded pins,
+dirty sources, and local deployment patches. It preserves tracked symlinks, existing
+plain copies, and the bundled HACS frontend.
 
-with open('.storage/hacs.repositories') as f:
-    data = json.load(f)
-
-for repo_key, repo_val in data['data'].items():
-    full_name = repo_val.get('full_name')
-    if full_name not in repo_map:
-        continue
-    submodule_path, domain = repo_map[full_name]
-    head = subprocess.check_output(
-        ['git', '-C', submodule_path, 'rev-parse', '--short', 'HEAD']
-    ).decode().strip()
-    with open(f"{submodule_path}/custom_components/{domain}/manifest.json") as mf:
-        manifest = json.load(mf)
-    version = manifest.get('version', '')
-    repo_val['installed_commit'] = head
-    repo_val['version_installed'] = str(version) if version else repo_val.get('last_version', '')
-
-with open('.storage/hacs.repositories', 'w') as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
-```
-
-Then restart HA: `docker restart homeassistant-homeassistant-1`.
-
-**Note:** `.storage/hacs.data` and `.storage/hacs.repositories` are HA runtime state files. Always back them up (`cp .storage/hacs.repositories /tmp/hacs.repositories.backup.$(date +%Y%m%d_%H%M%S).json`) before editing.
+See [Git-managed integration updates](docs/git-managed-integration-updates.md) for
+policy, setup, API commands, branch limitations, backups, and deployment prerequisites.
 
 ## Notes
 - The integration is a Home Assistant service integration (`manifest.json`).
