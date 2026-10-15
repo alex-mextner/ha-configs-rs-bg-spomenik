@@ -31,7 +31,7 @@ if "config" in args:
 elif args[:2] == ["network","ls"]:
  pass
 elif "up" in args and "ha-docker-dns" in args:
- sys.exit(0 if "--build" in args or "--dry-run" in args else 23)
+ sys.exit(0 if any(a in args for a in ("--build", "--build=true", "--dry-run", "--dry-run=true", "--dry-run=1", "--dry-run=t", "--dry-run=T", "--dry-run=True", "--dry-run=TRUE")) else 23)
 """)
             docker.chmod(0o755)
             env = dict(
@@ -81,6 +81,45 @@ elif "up" in args and "ha-docker-dns" in args:
         mutations = [call for call in calls if "up" in call]
         self.assertEqual(len(mutations), 1)
         self.assertIn("--no-start", mutations[0])
+
+    def test_explicit_true_preview_values_never_start_dns(self) -> None:
+        for value in ("true", "True", "TRUE", "t", "T", "1"):
+            with self.subTest(value=value):
+                result, calls = self.run_wrapper(
+                    "up", f"--dry-run={value}", "ha-docker-dns"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len([call for call in calls if "up" in call]), 1)
+
+    def test_last_boolean_value_controls_whether_safety_gates_run(self) -> None:
+        for option in ("--dry-run", "--no-start"):
+            for value in ("false", "False", "FALSE", "f", "F", "0"):
+                with self.subTest(option=option, value=value):
+                    result, calls = self.run_wrapper(
+                        "up", option, f"{option}={value}", "wyoming-satellite"
+                    )
+                    self.assertEqual(result.returncode, 23, result.stderr)
+                    self.assertIn("--wait", calls[-1])
+
+    def test_explicit_no_start_and_build_values_are_preserved(self) -> None:
+        result, calls = self.run_wrapper("up", "--no-start=true", "wyoming-satellite")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len([call for call in calls if "up" in call]), 1)
+        result, calls = self.run_wrapper("up", "--build=true", "ha-docker-dns")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "--build=true", next((call for call in calls if "--wait" in call), [])
+        )
+
+    def test_help_is_read_only_and_argument_separator_stops_option_parsing(
+        self,
+    ) -> None:
+        result, calls = self.run_wrapper("up", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 1)
+        result, calls = self.run_wrapper("up", "--", "--dry-run")
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("--wait", calls[-1])
 
     def test_exec_command_payload_is_not_a_compose_verb(self) -> None:
         result, calls = self.run_wrapper("exec", "wyoming-satellite", "run")
