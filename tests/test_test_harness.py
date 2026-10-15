@@ -12,6 +12,7 @@ an incompatible dependency set.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,3 +58,8 @@ def test_ship_uses_the_local_test_entrypoint() -> None:
     )
     assert "$(PY) scripts/ha_hga_regression_check.py" in makefile
     assert "$(wildcard tests/test_*.py)" in makefile
+
+
+def test_typechecker_uses_the_same_environment_as_the_makefile() -> None:
+    config = json.loads((ROOT / "pyrightconfig.json").read_text())
+    assert Path(config["venvPath"]) / config["venv"] == Path(".venv/hga")

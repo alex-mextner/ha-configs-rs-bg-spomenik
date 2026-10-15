@@ -31,7 +31,7 @@ if "config" in args:
 elif args[:2] == ["network","ls"]:
  pass
 elif "up" in args and "ha-docker-dns" in args:
- sys.exit(23)
+ sys.exit(0 if "--build" in args or "--dry-run" in args else 23)
 """)
             docker.chmod(0o755)
             env = dict(
@@ -59,6 +59,28 @@ elif "up" in args and "ha-docker-dns" in args:
         self.assertEqual(len(mutations), 1)
         self.assertEqual(mutations[0][-1], "ha-docker-dns")
         self.assertIn("--wait", mutations[0])
+
+    def test_dry_run_does_not_start_the_dns_container(self) -> None:
+        result, calls = self.run_wrapper("up", "--dry-run", "ha-docker-dns")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mutations = [call for call in calls if "up" in call]
+        self.assertEqual(len(mutations), 1)
+        self.assertIn("--dry-run", mutations[0])
+
+    def test_build_can_repair_dns_before_waiting_for_health(self) -> None:
+        result, calls = self.run_wrapper("up", "-d", "--build", "ha-docker-dns")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mutations = [call for call in calls if "up" in call]
+        self.assertEqual(len(mutations), 2)
+        self.assertIn("--wait", mutations[0])
+        self.assertIn("--build", mutations[0])
+
+    def test_no_start_does_not_start_dns_as_a_side_effect(self) -> None:
+        result, calls = self.run_wrapper("up", "--no-start", "wyoming-satellite")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mutations = [call for call in calls if "up" in call]
+        self.assertEqual(len(mutations), 1)
+        self.assertIn("--no-start", mutations[0])
 
     def test_exec_command_payload_is_not_a_compose_verb(self) -> None:
         result, calls = self.run_wrapper("exec", "wyoming-satellite", "run")

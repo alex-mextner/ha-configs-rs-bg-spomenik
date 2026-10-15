@@ -36,8 +36,9 @@ Before `up`, `create`, or `run`, the wrapper compares the existing network's
 actual IPAM with the rendered configuration and checks the DNS address owner.
 For normal `up`, the wrapper first reserves and starts only DNS and waits for
 its health check before other services can be recreated. DNS failure therefore
-stops the apply before touching unrelated services. `up --no-start` keeps its
-no-start meaning. Commands go first; use deployment settings and
+stops the apply before touching unrelated services. `up --no-start` and `up --dry-run` keep their
+no-start/preview meaning; a requested `--build` also repairs DNS before waiting
+for its health check. Commands go first; use deployment settings and
 `COMPOSE_PROFILES` for global options.
 Docker does not safely reallocate a live bridge merely because YAML changed;
 a mismatch is refused before changing services. The wrapper never tears down a

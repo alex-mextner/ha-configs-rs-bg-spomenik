@@ -19,7 +19,7 @@ Home Assistant custom integration providing a generative agent. Core code lives 
 
 ## Development environment
 - Python: 3.14
-- Virtualenv: `hga/` (managed by Makefile)
+- Virtualenvs: `.venv/hga/` and `.venv/entity-note/` (managed by Makefile)
 - Primary tools: `ruff` (format + lint), `pyright` (types), `pytest`
 
 ## Common commands (Makefile)

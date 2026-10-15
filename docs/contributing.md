@@ -22,13 +22,13 @@ make runtimedeps # Regenerate requirements_runtime_manifest.txt and install runt
 Run a single test file:
 
 ```bash
-PYTHONPATH=$(pwd) hga/bin/pytest tests/custom_components/home_generative_agent/test_foo.py
+(cd submodules/home-generative-agent && PYTHONPATH=$(pwd) ../../.venv/hga/bin/pytest tests/custom_components/home_generative_agent/test_foo.py)
 ```
 
 Run tests matching a pattern:
 
 ```bash
-PYTHONPATH=$(pwd) hga/bin/pytest -k "test_name_pattern"
+(cd submodules/home-generative-agent && PYTHONPATH=$(pwd) ../../.venv/hga/bin/pytest -k "test_name_pattern")
 ```
 
 ---
