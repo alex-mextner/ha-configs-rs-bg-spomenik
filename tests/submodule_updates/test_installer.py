@@ -602,3 +602,16 @@ def test_checkout_hook_applies_a_changed_pin_without_touching_unrelated_files(re
         == "2.0.0"
     )
     assert (root / "unrelated.txt").read_text() == "original"
+
+
+def test_git_hook_parent_index_does_not_poison_submodule_commands(repo, monkeypatch):
+    root, source = repo
+    monkeypatch.setenv("GIT_INDEX_FILE", str(root / ".git/index"))
+    result = install(root)
+    assert result["version"] == "2.0.0"
+    assert (
+        json.loads((root / "custom_components/demo/manifest.json").read_text())[
+            "version"
+        ]
+        == "2.0.0"
+    )

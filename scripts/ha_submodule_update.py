@@ -57,6 +57,18 @@ def git(
     path: Path, *args: str, binary: bool = False, optional: bool = False
 ) -> str | bytes | None:
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    # Git exports repository-local variables to hooks. A nested -C must not
+    # reuse the parent merge's temporary index or object database.
+    for key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+    ):
+        env.pop(key, None)
     tools = path / ".tools/bin"
     if (tools / "gitleaks").is_file():
         env["PATH"] = str(tools) + os.pathsep + env.get("PATH", os.defpath)
