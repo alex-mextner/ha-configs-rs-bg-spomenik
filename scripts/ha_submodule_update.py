@@ -231,8 +231,14 @@ def install(
             raise RuntimeError(
                 f"{domain}: checkout differs from the recorded pin; commit or restore it before syncing"
             )
+        commit_version = (
+            not pinned and re.fullmatch(r"[0-9a-fA-F]{7,40}", ref) is not None
+        )
+        requested_ref = policy.get("branch", "main") if commit_version else ref
         selected = (
-            before if pinned else checked_ref(policy.get("protected_branch", ref))
+            before
+            if pinned
+            else checked_ref(policy.get("protected_branch", requested_ref))
         )
         is_branch = (
             selected == policy.get("branch", "main") or "protected_branch" in policy
@@ -243,6 +249,10 @@ def install(
         else:
             git(submodule, "fetch", "--no-tags", url, fetch_ref)
             target = git(submodule, "rev-parse", "FETCH_HEAD^{commit}")
+            if commit_version and not target.lower().startswith(ref.lower()):
+                raise RuntimeError(
+                    "The requested commit is no longer the approved branch head; refresh HACS and retry"
+                )
         hacs_text = git(submodule, "show", target + ":hacs.json", optional=True)
         metadata = json.loads(hacs_text) if hacs_text else {}
         minimum = metadata.get("homeassistant")
@@ -250,9 +260,30 @@ def install(
             raise RuntimeError(
                 f"{domain} requires Home Assistant {minimum}; running {ha_version}"
             )
-        verify_deployed(
-            root, submodule, domain, baseline, metadata.get("persistent_directory")
-        )
+        # A hook or explicit transition can be repeated after deployment already
+        # reached the new pin. Accept either exact baseline, never arbitrary drift.
+        if baseline != before:
+            try:
+                verify_deployed(
+                    root,
+                    submodule,
+                    domain,
+                    before,
+                    metadata.get("persistent_directory"),
+                )
+                baseline = before
+            except RuntimeError:
+                verify_deployed(
+                    root,
+                    submodule,
+                    domain,
+                    baseline,
+                    metadata.get("persistent_directory"),
+                )
+        else:
+            verify_deployed(
+                root, submodule, domain, baseline, metadata.get("persistent_directory")
+            )
         component_path = f"custom_components/{domain}"
         archive = git(
             submodule, "archive", "--format=tar", target, component_path, binary=True
@@ -381,6 +412,7 @@ def install(
                 "version": str(manifest["version"]),
                 "selected_ref": selected,
                 "requested_is_branch": pinned
+                or commit_version
                 or ref
                 in {policy.get("branch", "main"), policy.get("protected_branch")},
                 "backup": str(backup),
