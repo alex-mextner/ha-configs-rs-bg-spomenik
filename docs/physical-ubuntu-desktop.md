@@ -45,9 +45,9 @@ The GNOME service override lives in `~/.config/systemd/user/gnome-remote-desktop
 
 ## Limitations
 
-Screen locking closes the GNOME Desktop Sharing connection. The transport blanks and reconnects after the actual local session is unlocked; it does not bypass the screen lock. A logged-in GNOME session is required.
+With the pinned locked-desktop extension enabled, the real GNOME password screen remains accessible. Without that extension, GNOME closes Desktop Sharing on lock. Neither mode bypasses password authentication. A logged-in GNOME session is required.
 
-RDP clipboard redirection is disabled: GNOME's file-clipboard FUSE helper aborts inside this unprivileged namespace. Keyboard and mouse control work; cross-device clipboard copying is not implemented by this transport. This does not disable the local Ubuntu clipboard.
+RDP file-clipboard redirection stays disabled because its FUSE helper fails in this namespace. Cross-device text copying is implemented through the separate authenticated clipboard channel described below; the local Ubuntu clipboard is not disabled.
 
 GNOME's on-screen screen-sharing indicator is deliberately retained.
 
@@ -68,3 +68,43 @@ Disable `ha-physical-desktop-web`, stop `gnome-remote-desktop`, restore the save
 Child process output goes to capped systemd journald rather than append-only files in `/run/user`. Repeated connection failures back off from 5 seconds to at most 30 seconds and reset after a stable connection. The VNC transport uses X DAMAGE change detection.
 
 Rollback also requires restoring the old GNOME keyring login: its pre-install `grdctl status --show-credentials` snapshot is retained privately as `rdp-credentials.txt` (0600) in the installer backup. Use those saved credentials with `grdctl rdp set-credentials` or clear credentials if the snapshot reports none. Do not publish this snapshot.
+
+## Clipboard and locked access (2026-10-16)
+
+The HA panel's top **Буфер обмена** button opens a text field and explicit actions:
+**Вставить с устройства → На Ubuntu**, and **С Ubuntu → Копировать на устройство**.
+Use the normal paste command in the destination Ubuntu application. Unicode, emoji,
+newlines, and up to 64 KiB of text are supported. When HTTP or browser permissions
+prevent the Clipboard API, the same field supports ordinary manual paste/copy.
+No clipboard is automatically read, transmitted, stored, or logged in the background.
+Clipboard access is denied while the native desktop is locked, including to HA admins.
+
+The RDP file clipboard remains disabled deliberately: GNOME 50 creates a FUSE clipboard
+mount when that channel is enabled, which failed in this deployment's isolated namespace.
+The text-only path uses `xclip` on the **real Xwayland display**, not the RDP framebuffer.
+The existing private Tailnet peer restriction and per-request HA administrator checks
+remain in place. No RDP/VNC port is opened on the host network.
+
+Provision xclip using the distribution package (the same architecture as the desktop):
+
+```sh
+cd ~/.local/share/ha-physical-desktop/downloads
+apt-get download xclip
+for package in xclip_*.deb; do dpkg-deb -x "$package" ../runtime; done
+cd /path/to/this/checkout
+python3 scripts/physical-desktop/install.py --listen <desktop-tailnet-IP> --peer <HA-tailnet-IP>
+python3 scripts/physical-desktop/install-lock-screen.py
+```
+
+Locked access uses the pinned `submodules/allow-locked-remote-desktop` extension.
+It preserves GNOME's normal lock screen and password authentication. It does **not**
+log out, unlock automatically, change the password, or disable the screen lock.
+An unchanged known extension enables in place; a new or changed extension may require the next
+normal graphical login, which the installer reports rather than forcing logout.
+The first live installation can also use GNOME's official extension-install dialog.
+
+To undo locked access, disable `allowlockedremotedesktop@kamens.us` using GNOME
+Extensions. Previous extension files and the enabled-extension setting are backed up.
+The native lock and desktop session remain intact. To undo the text bridge, restore
+its saved `bridge.env` and `bridge.py` from the private host backup and restart only
+`ha-physical-desktop-web.service`.

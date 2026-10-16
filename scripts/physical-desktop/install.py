@@ -59,6 +59,7 @@ def install(listen, peer, port):
     config.chmod(0o700)
     dependencies = [
         base / "runtime/usr/bin/xfreerdp",
+        base / "runtime/usr/bin/xclip",
         Path("/usr/bin/bwrap"),
         Path("/usr/bin/xauth"),
         Path("/usr/bin/xsetroot"),
@@ -98,7 +99,10 @@ def install(listen, peer, port):
     credentials_backup.write_text(previous_credentials.stdout)
     credentials_backup.chmod(0o600)
     saved_files = {}
-    snapshot = [(base / name, name) for name in ("session.py", "run.sh", "bridge.py")]
+    snapshot = [
+        (base / name, name)
+        for name in ("session.py", "run.sh", "bridge.py", "text_clipboard.py")
+    ]
     snapshot.extend(
         [
             (config / "bridge.env", "bridge.env"),
@@ -120,7 +124,7 @@ def install(listen, peer, port):
     # Stop the old daemon before changing RDP settings; daemon-reload alone
     # does not move a running process into the private network namespace.
     command("systemctl", "--user", "stop", "gnome-remote-desktop.service")
-    for name in ("session.py", "run.sh"):
+    for name in ("session.py", "run.sh", "text_clipboard.py"):
         shutil.copy2(source / name, base / name)
     shutil.copy2(source.parent / "chatgpt-native/bridge.py", base / "bridge.py")
     (base / "run.sh").chmod(0o700)
@@ -170,6 +174,10 @@ def install(listen, peer, port):
     (config / "bridge.env").write_text(
         f"CHATGPT_NATIVE_LISTEN_HOST={listen}\nCHATGPT_NATIVE_LISTEN_PORT={port}\nCHATGPT_NATIVE_ALLOWED_PEERS={peer}\nCHATGPT_NATIVE_VNC_SOCKET={runtime}/ha-physical-desktop/vnc.sock\n"
     )
+    with (config / "bridge.env").open("a") as handle:
+        handle.write(
+            f"CHATGPT_NATIVE_CLIPBOARD_EXECUTABLE={base}/runtime/usr/bin/xclip\n"
+        )
     (config / "bridge.env").chmod(0o600)
     command("systemctl", "--user", "daemon-reload")
     command("grdctl", "rdp", "set-tls-cert", str(cert))

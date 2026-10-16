@@ -12,6 +12,7 @@ function fixture() {
     HTMLElement: Element, customElements: {define: (key, value) => registry[key] = value},
     setInterval: fn => { timers.set(++next, fn); return next; }, clearInterval: id => timers.delete(id),
   });
+  registry['chatgpt-native-panel'].prototype.bindClipboard = () => {};
   return {panel: new registry['ubuntu-desktop-panel'](), timers};
 }
 const ready = () => ({callWS: async () => ({session:'test'}), callApi: async () => ({ready:true})});
@@ -21,7 +22,7 @@ const ready = () => ({callWS: async () => ({session:'test'}), callApi: async () 
     p.isConnected=false; p.hass={...ready(),callWS:async()=>{calls++;return {session:'test'};}};
     await flush(); assert.equal(calls,0,'detached panel must not start authorization');
     p.isConnected=true; p.connectedCallback(); await flush();
-    assert.match(p.innerHTML,/основной/); assert.equal(timers.size,1);
+    assert.match(p.innerHTML,/основной|Основной/); assert.equal(timers.size,1);
     p.hass=ready();p.connectedCallback();await flush();assert.equal(timers.size,1,'startup is idempotent');
     const params=new URL(p.iframe.src,'https://ha.example').searchParams;
     assert.equal(params.get('reconnect'),'true');
