@@ -59,12 +59,11 @@ test: test-standalone test-entity-note test-home-generative-agent test-copied-ho
 test-regressions: test-standalone test-entity-note test-home-generative-agent
 	$(PY) scripts/ha_hga_regression_check.py
 
-test-standalone: test-entity-note-deps 3d-cli/integrations/homeassistant/tests/u1_print_inspector
-	PYTHONPATH=$(CURDIR):$(CURDIR)/scripts $(ENTITY_NOTE_PYTEST) $(PYTEST_ARGS) $(wildcard tests/test_*.py) 3d-cli/integrations/homeassistant/tests/u1_print_inspector
+test-standalone: test-entity-note-deps
+	PYTHONPATH=$(CURDIR):$(CURDIR)/scripts $(ENTITY_NOTE_PYTEST) $(PYTEST_ARGS) $(wildcard tests/test_*.py)
 
-# The U1 inspector tests live in the 3d-cli submodule (alex-mextner/3d-cli#156).
-3d-cli/integrations/homeassistant/tests/u1_print_inspector:
-	git submodule update --init 3d-cli
+# The U1 inspector/ghost tests live in 3d-cli (integrations/homeassistant/tests) and run in its
+# gate; this repo's HA pytest plugin blocks the sockets and threads they use (alex-mextner/3d-cli#156).
 
 $(ENTITY_NOTE_VENV)/bin/python:
 	$(UV) venv --python $(PYTHON_BIN) $(ENTITY_NOTE_VENV)
