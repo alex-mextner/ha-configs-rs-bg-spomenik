@@ -1,3 +1,27 @@
+/* Tabler Icons outline SVG paths: https://github.com/tabler/tabler-icons
+MIT License
+
+Copyright (c) 2020-2026 Paweł Kuna
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 class NativeChatGPTPanel extends HTMLElement {
   constructor() {
     super();
@@ -47,6 +71,9 @@ class NativeChatGPTPanel extends HTMLElement {
       const collapsed = shell.dataset.toolbarCollapsed !== 'true';
       shell.dataset.toolbarCollapsed = String(collapsed);
       toolbarToggle.setAttribute('aria-expanded', String(!collapsed));
+      const label = collapsed ? 'Развернуть панель' : 'Свернуть панель';
+      toolbarToggle.setAttribute('aria-label', label);
+      toolbarToggle.setAttribute('title', label);
       toolbarToggle.innerHTML = collapsed ? NativeChatGPTPanel.tabler('chevron-down') : NativeChatGPTPanel.tabler('chevron-up');
       if (collapsed) { drawer.hidden = true; this.querySelector('[data-clip-text]').value = ''; }
     };
@@ -103,6 +130,8 @@ class NativeChatGPTPanel extends HTMLElement {
         status.textContent = 'Сначала разблокируйте Ubuntu на экране ниже. Буфер заблокирован вместе с экраном.';
       } else if (error.message === 'size') {
         status.textContent = 'Слишком большой текст: максимум 64 КБ.';
+      } else if (action === 'ctrl-c' || action === 'ctrl-v') {
+        status.textContent = 'Нет подключения к Ubuntu или включён режим только просмотра.';
       } else if (action === 'copy' || action === 'local') {
         status.textContent = 'Браузер не дал доступ к буферу. Скопируйте или вставьте текст в это поле вручную.';
       } else {
@@ -131,8 +160,23 @@ class NativeChatGPTPanel extends HTMLElement {
       if (!current()) return;
       const icon = NativeChatGPTPanel.tabler;
       const shortcut = key => `<button type="button" data-clip-action="ctrl-${key}" aria-label="Ctrl+${key.toUpperCase()} в Ubuntu" title="Ctrl+${key.toUpperCase()} в Ubuntu" style="display:inline-flex;align-items:center;gap:2px;height:24px;padding:0 6px">${icon('chevron-up')}${key.toUpperCase()}</button>`;
-      this.innerHTML = '<div data-desktop-shell data-toolbar-collapsed="false" style="position:relative;height:100%;--ha-toolbar-height:28px">'
-        + '<div style="height:var(--ha-toolbar-height);display:flex;align-items:center;gap:4px;padding:0 4px;box-sizing:border-box;background:var(--card-background-color);color:var(--primary-text-color);font:12px sans-serif">'
+      this.innerHTML = `<style>
+        chatgpt-native-panel,ubuntu-desktop-panel{display:block;position:relative;height:100vh;height:100dvh;min-width:0}
+        [data-desktop-shell]{position:absolute;inset:0;min-height:0;--ha-toolbar-height:28px}
+        [data-desktop-shell][data-toolbar-collapsed="true"]{--ha-toolbar-height:0px}
+        [data-desktop-shell] [data-toolbar]{border-bottom:1px solid var(--divider-color,#ddd)}
+        [data-desktop-shell] [data-toolbar] button{min-width:32px;border:0;border-radius:4px;background:transparent;color:inherit;cursor:pointer;touch-action:manipulation;font:500 13px sans-serif}
+        [data-desktop-shell] [data-toolbar] button:hover{background:var(--secondary-background-color,#eee)}
+        [data-desktop-shell] button:focus-visible{outline:2px solid var(--primary-color,#039be5);outline-offset:-2px}
+        [data-desktop-shell] svg{flex:none;pointer-events:none}
+        [data-desktop-shell] [data-clipboard]{box-sizing:border-box;max-height:calc(100% - 36px);overflow:auto;overscroll-behavior:contain}
+        [data-desktop-shell] [data-clipboard] button{min-height:30px;border:1px solid var(--divider-color,#bbb);border-radius:4px;padding:4px 8px;color:inherit;background:var(--secondary-background-color,#f5f5f5);cursor:pointer;touch-action:manipulation}
+        [data-desktop-shell] [data-clip-status]{margin:8px 0 0}
+        [data-desktop-shell][data-toolbar-collapsed="true"] [data-toolbar]{border:0;padding:0!important}
+        [data-desktop-shell][data-toolbar-collapsed="true"] [data-toolbar]>:not([data-toolbar-toggle]){display:none!important}
+        [data-desktop-shell][data-toolbar-collapsed="true"] [data-toolbar-toggle]{position:absolute;top:2px;left:4px;z-index:12;background:var(--card-background-color,#fff);box-shadow:0 1px 4px #0003}
+      </style><div data-desktop-shell data-toolbar-collapsed="false">`
+        + '<div data-toolbar role="toolbar" aria-label="Управление Ubuntu" style="height:var(--ha-toolbar-height);display:flex;align-items:center;gap:4px;padding:0 4px;box-sizing:border-box;background:var(--card-background-color);color:var(--primary-text-color);font:12px sans-serif">'
         + '<button type="button" data-toolbar-toggle aria-expanded="true" aria-label="Свернуть панель основного экрана Ubuntu" style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0">'+icon('chevron-up')+'</button>'
         + '<button type="button" data-clipboard-toggle aria-label="Буфер обмена" title="Буфер обмена" style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0">'+icon('clipboard')+'</button>'
         + shortcut('c') + shortcut('v') + '</div>'

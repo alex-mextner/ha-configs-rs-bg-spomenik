@@ -108,3 +108,20 @@ Extensions. Previous extension files and the enabled-extension setting are backe
 The native lock and desktop session remain intact. To undo the text bridge, restore
 its saved `bridge.env` and `bridge.py` from the private host backup and restart only
 `ha-physical-desktop-web.service`.
+
+### Compact toolbar and remote shortcuts
+
+The top strip is 28 px high. Its Tabler chevron collapses the strip completely,
+leaving a small restore tab over the desktop. This changes layout only: the noVNC
+iframe and its connection are retained. The Tabler clipboard icon opens the text
+transfer drawer; collapsing also closes the drawer and clears its text preview.
+The caret before C/V is a Tabler `chevron-up` SVG, not a text symbol or emoji.
+
+The C/V shortcut buttons send Ctrl+C / Ctrl+V to the active Ubuntu application.
+They do not read or overwrite the phone/browser clipboard. Transfer text first
+using the existing drawer actions when copying between devices. Shortcut buttons
+refuse disconnected or view-only sessions and release pressed modifiers even if
+an input error occurs. The real-browser regression can be run from the repository
+root with a Python environment containing Playwright:
+`python tests/physical_desktop/check_toolbar_browser.py` (uses installed Chrome).
+It checks desktop, portrait-phone and landscape-phone viewport sizes.
