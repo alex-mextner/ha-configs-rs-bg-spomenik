@@ -75,3 +75,6 @@ custom_components/ha_creality_ws/
 
 # TLS private keys (ssl/key.pem was public until 2026-09-25)
 ssl/*.pem
+
+# Written by `3d ha deploy` (3d-cli SHA + time of the last deploy).
+.3d-cli-deployed

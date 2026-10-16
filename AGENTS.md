@@ -56,6 +56,27 @@ Runtime dependencies are sourced from
 - Keep tests under `tests/` and mirror integration module structure where
   practical.
 
+## 3D printers: source lives in 3d-cli
+
+Every 3D artifact of this config (printer packages, the «3D Printers» dashboard, U1 camera /
+inspector / share scripts and cards, the printer ingress proxy, go2rtc config, docs) lives in
+[alex-mextner/3d-cli](https://github.com/alex-mextner/3d-cli) under
+`integrations/homeassistant/`, with its history. This repo includes 3d-cli as the submodule
+`3d-cli/`; the files HA and the containers read are relative symlinks into it, `www/u1-share/*`
+are byte-identical copies (HA serves `/local` only from files inside `www/`). The 3D services
+`go2rtc`, `printer-proxy` and `u1-camera-proxy` come from
+`3d-cli/integrations/homeassistant/compose/3d.docker-compose.yaml` via `include:` in
+`ha.docker-compose.yaml`.
+
+- Do not edit those files here: change them in 3d-cli and run `3d ha deploy` (backup,
+  check_config, targeted reloads, rollback, then a `3d-deploy/<sha>` PR here with the new
+  submodule pointer). Mapping: `3d-cli/integrations/homeassistant/manifest.yaml`.
+- The 3D keys of `configuration.yaml` (ingress `k1_se_printer`/`u1_printer`, Lovelace
+  dashboard `3d-printers` and its resources) stay here; `3d ha deploy` checks them against
+  `snippets/configuration.3d.yaml` in 3d-cli.
+- Merge `3d-deploy/*` PRs with a merge commit so the live checkout fast-forwards.
+- A fresh clone needs `git submodule update --init 3d-cli` before HA starts.
+
 ## custom_components/ management
 
 All third-party integrations are managed as **Git submodules** cloned into `submodules/`,

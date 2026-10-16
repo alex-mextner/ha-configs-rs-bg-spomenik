@@ -1,1 +1,1 @@
-websockets>=15.0.1,<18
+../3d-cli/integrations/homeassistant/requirements/u1-share.txt
