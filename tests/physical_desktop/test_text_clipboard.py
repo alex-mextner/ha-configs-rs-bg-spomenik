@@ -100,3 +100,51 @@ async def test_backend_reports_lock_without_returning_clipboard(tmp_path):
         response = await client.get("/clipboard")
         assert response.status == 423
         assert "text" not in await response.json()
+
+
+@pytest.mark.asyncio
+async def test_expired_queued_write_never_changes_the_clipboard():
+    import asyncio
+
+    mod = clip_module()
+    clipboard = mod.DesktopClipboard(Path("/missing/xclip"))
+    clipboard.operation_timeout = 0.05
+    clipboard.locked = AsyncMock(return_value=False)
+    clipboard._write = AsyncMock()
+    async with clipboard._mutex:
+        pending = asyncio.create_task(clipboard.set_text("must expire in the queue"))
+        await asyncio.sleep(0.08)
+    with pytest.raises(TimeoutError):
+        await pending
+    clipboard._write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lock_during_write_revokes_the_owned_selection():
+    mod = clip_module()
+    clipboard = mod.DesktopClipboard(Path("/missing/xclip"))
+    clipboard.locked = AsyncMock(side_effect=[False, True])
+
+    async def acquire(text):
+        clipboard._owner = object()
+
+    clipboard._write = AsyncMock(side_effect=acquire)
+    clipboard.close = AsyncMock()
+    with pytest.raises(mod.DesktopLocked):
+        await clipboard.set_text("in-flight text")
+    clipboard.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_write_failure_before_acquiring_clipboard_preserves_previous_owner():
+    mod = clip_module()
+    clipboard = mod.DesktopClipboard(Path("/missing/xclip"))
+    previous = object()
+    clipboard._owner = previous
+    clipboard.locked = AsyncMock(return_value=False)
+    clipboard._write = AsyncMock(side_effect=RuntimeError("Display unavailable"))
+    clipboard.close = AsyncMock()
+    with pytest.raises(RuntimeError, match="Display unavailable"):
+        await clipboard.set_text("not delivered")
+    assert clipboard._owner is previous
+    clipboard.close.assert_not_awaited()

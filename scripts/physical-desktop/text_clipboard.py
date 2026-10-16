@@ -57,6 +57,7 @@ class DesktopClipboard:
         self.executable = executable
         self._owner = None
         self._mutex = asyncio.Lock()
+        self.operation_timeout = 8
 
     async def locked(self):
         status = await capture(
@@ -88,8 +89,9 @@ class DesktopClipboard:
             raise RuntimeError("Real desktop display is not ready")
         return env
 
-    async def _read(self):
-        env = await self._environment()
+    async def _read(self, env=None):
+        if env is None:
+            env = await self._environment()
         proc = await asyncio.create_subprocess_exec(
             str(self.executable),
             "-selection",
@@ -116,6 +118,8 @@ class DesktopClipboard:
 
     async def _write(self, text):
         env = await self._environment()
+        if await self.locked():
+            raise DesktopLocked()
         proc = await asyncio.create_subprocess_exec(
             str(self.executable),
             "-selection",
@@ -139,7 +143,7 @@ class DesktopClipboard:
                 await asyncio.sleep(0.03)
                 if proc.returncode is not None:
                     raise RuntimeError("Clipboard writer failed")
-                if await self._read() == text:
+                if await self._read(env) == text:
                     break
             else:
                 raise RuntimeError("Clipboard ownership was not confirmed")
@@ -150,28 +154,44 @@ class DesktopClipboard:
             raise
         previous, self._owner = self._owner, proc
         if previous is not None and previous.returncode is None:
-            previous.terminate()
+            try:
+                previous.terminate()
+            except ProcessLookupError:
+                pass
             await previous.wait()
 
     async def get_text(self):
-        async with self._mutex:
-            if await self.locked():
-                raise DesktopLocked()
-            text = await self._read()
-            if await self.locked():
-                raise DesktopLocked()
-            return text
+        async with asyncio.timeout(self.operation_timeout):
+            async with self._mutex:
+                if await self.locked():
+                    raise DesktopLocked()
+                text = await self._read()
+                if await self.locked():
+                    raise DesktopLocked()
+                return text
 
     async def set_text(self, text):
         validate_text(text)
-        async with self._mutex:
-            if await self.locked():
-                raise DesktopLocked()
-            await self._write(text)
-            if await self.locked():
-                raise DesktopLocked()
+        async with asyncio.timeout(self.operation_timeout):
+            async with self._mutex:
+                if await self.locked():
+                    raise DesktopLocked()
+                previous_owner = self._owner
+                try:
+                    await self._write(text)
+                    if await self.locked():
+                        raise DesktopLocked()
+                except BaseException:
+                    # The pending writer cleans itself up before ownership.
+                    # Revoke only a new owner, never a pre-existing selection.
+                    if self._owner is not previous_owner:
+                        await self.close()
+                    raise
 
     async def close(self):
         if self._owner is not None and self._owner.returncode is None:
-            self._owner.terminate()
+            try:
+                self._owner.terminate()
+            except ProcessLookupError:
+                pass
             await self._owner.wait()
