@@ -57,3 +57,6 @@
 [submodule "submodules/ha_creality_ws"]
 	path = submodules/ha_creality_ws
 	url = https://github.com/3dg1luk43/ha_creality_ws
+[submodule "submodules/ha-tinyprint"]
+	path = submodules/ha-tinyprint
+	url = https://github.com/alex-mextner/ha-tinyprint.git
