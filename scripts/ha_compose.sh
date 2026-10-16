@@ -5,7 +5,9 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd -- "$ROOT"
 # The 3D printer services are included from the 3d-cli submodule (alex-mextner/3d-cli#156);
 # `git pull` does not check out a newly added submodule, and Compose fails on the missing include.
-if [[ ! -f "$ROOT/3d-cli/integrations/homeassistant/compose/3d.docker-compose.yaml" ]]; then
+# Copies of this script outside a checkout (installer tests) have no .gitmodules and skip it.
+if [[ ! -f "$ROOT/3d-cli/integrations/homeassistant/compose/3d.docker-compose.yaml" ]] \
+  && git -C "$ROOT" config -f .gitmodules --get submodule.3d-cli.path >/dev/null 2>&1; then
   git -C "$ROOT" submodule update --init 3d-cli
 fi
 ENV_FILE=${HA_COMPOSE_ENV_FILE:-/etc/default/ha-compose}
