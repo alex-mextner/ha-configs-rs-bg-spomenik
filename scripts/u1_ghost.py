@@ -1,0 +1,1 @@
+../3d-cli/integrations/homeassistant/scripts/u1_ghost.py
