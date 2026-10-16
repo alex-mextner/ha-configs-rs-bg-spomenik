@@ -3,10 +3,15 @@ Description=Home Assistant Docker Compose with Bluetooth host prerequisites
 After=docker.service network-online.target dbus.service bluetooth.service
 Requires=docker.service dbus.service
 Wants=network-online.target bluetooth.service
+# Cold-boot DNS health can lag behind Docker startup; retries stay bounded.
+StartLimitIntervalSec=infinity
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=30s
 WorkingDirectory=@HA_ROOT@
 ExecStartPre=+@HA_BLUETOOTH_HELPER@
 ExecStart=@HA_ROOT@/scripts/ha_compose.sh up -d
