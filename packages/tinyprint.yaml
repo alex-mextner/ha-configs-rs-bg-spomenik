@@ -5,6 +5,8 @@ tinyprint:
     - address: !secret tinyprint_ble_address
       name: "X6h-2A4C"
       font_path: "/config/custom_components/yandex_station/core/fonts/DejaVuSans.ttf"
+      transport: local_le
+      adapter_mac: "00:1A:7D:DA:71:11"
 
 script:
   tinyprint_test_ticket:
