@@ -1,0 +1,98 @@
+# Спальня: люстра (light.liustra, лампа Яндекса, голос идёт в облако Яндекса мимо HA).
+# Правило: любое включение БЕЗ явной яркости/цвета возвращает белый свет по времени суток
+# (custom_templates/light_defaults.jinja: день 06:00-22:59 → 100 %, 4000 K;
+# ночь 23:00-05:59 → 50 %, 2700 K).
+#
+# HA не видит параметры команды, пришедшей через облако, только смену состояния. А при
+# выключении лампа теряет brightness/цвет в атрибутах. Поэтому:
+#  1. on→off: запоминаем яркость/цвет из from_state в input_text.liustra_last_on_state;
+#  2. off→on (любой источник: пульт-автоматизация, голос, приложение): ждём, пока атрибуты
+#     заполнятся, и сравниваем с запомненными. Совпали — лампа просто вспомнила прошлое
+#     состояние, значит явной команды не было → применяем сброс. Отличаются — это явная
+#     команда, не трогаем.
+# Сравнение: яркость ±2, effect (сцена) и hs_color ±2 равны, color_temp_kelvin ±50 K, если
+# он есть. Лампа Яндекса белый отдаёт как сцену («Белый» ≈ 4000 K, «Мягкий белый» ≈ 2700 K)
+# с hs_color, а color_temp_kelvin остаётся None, поэтому сравниваем и по effect/hs.
+# Сброс — light.turn_on на уже включённую лампу, off→on он не вызывает, петли нет.
+# yandex_station игнорирует brightness в вызове с color_temp_kelvin, поэтому цвет и яркость
+# отправляются двумя вызовами. Автоматизация пульта (automations.yaml, light.toggle)
+# остаётся как есть.
+# Ограничение: если облако Яндекса применит команду «включи на N %» позже, чем через
+# ~5 с после включения, сброс успеет раньше.
+
+input_text:
+  liustra_last_on_state:
+    name: "Люстра: состояние перед выключением"
+    icon: mdi:lightbulb-on-outline
+    max: 255
+    # initial не задаём: значение должно переживать перезапуск HA.
+
+automation:
+  - id: liustra_remember_before_off
+    alias: "Люстра: запомнить яркость и цвет перед выключением"
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: light.liustra
+        from: "on"
+        to: "off"
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.liustra_last_on_state
+        data:
+          value: >-
+            {% set a = trigger.from_state.attributes %}
+            {{ {'b': a.brightness, 'k': a.color_temp_kelvin, 'h': a.hs_color, 'e': a.effect} | tojson }}
+
+  - id: liustra_reset_on_turn_on
+    alias: "Люстра: белый по времени суток при включении без явной яркости"
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: light.liustra
+        from: "off"
+        to: "on"
+    actions:
+      - wait_template: "{{ state_attr('light.liustra', 'brightness') is not none }}"
+        timeout: "00:00:06"
+        continue_on_timeout: true
+      - delay: "00:00:05"
+      - variables:
+          explicit: >-
+            {% set o = states('input_text.liustra_last_on_state') | from_json({}) %}
+            {% set nb = state_attr('light.liustra', 'brightness') %}
+            {% set nk = state_attr('light.liustra', 'color_temp_kelvin') %}
+            {% set nh = state_attr('light.liustra', 'hs_color') %}
+            {% set ne = state_attr('light.liustra', 'effect') %}
+            {% if nb is none or o is not mapping or not o %}
+              false
+            {% else %}
+              {% set b_diff = o.b is not none and (nb - o.b) | abs > 2 %}
+              {% set k_diff = nk is not none and o.k is not none and (nk - o.k) | abs > 50 %}
+              {% set e_diff = ne != o.e %}
+              {% set h_diff = nh is not none and o.h is not none
+                 and ((nh[0] - o.h[0]) | abs > 2 or (nh[1] - o.h[1]) | abs > 2) %}
+              {{ b_diff or k_diff or e_diff or h_diff }}
+            {% endif %}
+      - if:
+          - condition: state
+            entity_id: light.liustra
+            state: "on"
+          - condition: template
+            value_template: "{{ not explicit }}"
+        then:
+          - action: light.turn_on
+            target:
+              entity_id: light.liustra
+            data:
+              color_temp_kelvin: >-
+                {% from 'light_defaults.jinja' import kelvin %}
+                {{ kelvin(state_attr('light.liustra', 'min_color_temp_kelvin')) | int }}
+          - action: light.turn_on
+            target:
+              entity_id: light.liustra
+            data:
+              brightness_pct: >-
+                {% from 'light_defaults.jinja' import brightness_pct %}
+                {{ brightness_pct() | int }}

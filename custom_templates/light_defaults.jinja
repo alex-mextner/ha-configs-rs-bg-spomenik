@@ -1,0 +1,17 @@
+{#
+  Единое правило «яркость и белый по времени суток» для света в студии и спальне
+  (packages/studio_light.yaml, packages/bedroom_light_reset.yaml).
+  День 06:00-22:59: 100 %, 4000 K. Ночь 23:00-05:59: 50 %, 2700 K.
+  Использование: {% from 'light_defaults.jinja' import brightness_pct, kelvin %}
+                 {{ brightness_pct() | int }}   {{ kelvin(min_kelvin) | int }}
+  Макросы возвращают строку, поэтому на месте вызова нужен | int.
+  Перечитывается без рестарта: homeassistant.reload_custom_templates.
+#}
+{% macro brightness_pct() -%}
+{{ 50 if (now().hour >= 23 or now().hour < 6) else 100 }}
+{%- endmacro %}
+
+{# min_kelvin — нижняя граница лампы (атрибут min_color_temp_kelvin), тёплый белый ей ограничивается. #}
+{% macro kelvin(min_kelvin=1500) -%}
+{{ [2700 if (now().hour >= 23 or now().hour < 6) else 4000, min_kelvin | int(1500)] | max }}
+{%- endmacro %}

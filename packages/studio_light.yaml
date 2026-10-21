@@ -1,0 +1,161 @@
+# Студия: одна лампа Яндекса (light.studiia), питание которой режет реле Aqara
+# (light.studio_sw). При выключении реле лампа уходит в unavailable, при включении
+# возвращается с прошлой яркостью/цветом. Этот пакет склеивает их в одну сущность
+# light.studio ("Студия") и после каждого включения питания возвращает белый свет
+# по времени суток (правило — custom_templates/light_defaults.jinja):
+#   день 06:00-22:59 → 100 %, 4000 K; ночь 23:00-05:59 → 50 %, 2700 K.
+# light.studio_sw и light.studiia скрыты в реестре сущностей (hidden_by=user), в Алису
+# уходит только light.studio (options фильтра интеграции yandex_smart_home).
+#
+# Как избегаем гонки «сброс против явной яркости»: ВСЯ логика включения живёт в одном
+# скрипте script.studio_light_set (mode: restart). Шаблонный свет только запускает его
+# (с явными brightness/color_temp_kelvin, если они пришли в вызове), а автоматизация
+# «реле off→on» (физический щелчок, что угодно ещё) запускает его БЕЗ явных значений и
+# только если скрипт сейчас не выполняется. Реле включает сам скрипт, поэтому его
+# собственное off→on автоматизацию не запускает (скрипт уже работает). Явный вызов во
+# время сброса перезапускает скрипт и выигрывает. Явные значения применяются на лампу
+# после ожидания возвращения лампы из unavailable.
+#
+# Особенности yandex_station (light.py): light.turn_on с color_temp_kelvin ИГНОРИРУЕТ
+# brightness из того же вызова (early return), поэтому цвет и яркость отправляются двумя
+# отдельными вызовами. Лампа не отдаёт color_temp_kelvin обратно — белый приходит как
+# сцена (effect «Белый» ≈ 4000 K, «Мягкий белый» ≈ 2700 K) с hs_color, поэтому у
+# light.studio температура в UI остаётся неизвестной. Облако отстаёт: после выключения
+# реле лампа остаётся "on" ещё секунд 10-15 и только потом уходит в unavailable, а
+# после включения возвращается с памятью лампы. Поэтому ждём именно переход лампы
+# из unavailable (а не просто "не unavailable"), иначе команды уходят в обесточенную
+# лампу и теряются; если перехода не будет (реле щёлкнули на секунду) — таймаут.
+
+script:
+  studio_light_set:
+    alias: "Студия: включить и применить яркость/белый"
+    description: >-
+      Включает реле, ждёт возвращения лампы Яндекса, применяет яркость и цвет.
+      Явные brightness/color_temp_kelvin (0 = не заданы) побеждают сброс по времени суток.
+      Сброс (белый + яркость по времени) делается только после подачи питания
+      (реле было выключено, лампа unavailable, лампа выключена или power_reset).
+    mode: restart
+    fields:
+      brightness:
+        description: "Яркость 1-255; 0 или не задано — без явной яркости"
+        example: 128
+      color_temp_kelvin:
+        description: "Цветовая температура, K; 0 или не задано — без явной"
+        example: 3000
+      power_reset:
+        description: "true — реле только что включили снаружи (физическая кнопка и т.п.)"
+        example: false
+    sequence:
+      - variables:
+          want_b: "{{ brightness | default(0) | int(0) }}"
+          want_k: "{{ color_temp_kelvin | default(0) | int(0) }}"
+          powering_up: >-
+            {{ (power_reset | default(false))
+               or is_state('light.studio_sw', 'off')
+               or is_state('light.studiia', 'unavailable') }}
+          reset_defaults: >-
+            {{ powering_up or is_state('light.studiia', 'off') }}
+          # Лампа уже unavailable — вернётся наверняка (до 30 с); иначе, возможно, облако
+          # ещё не заметило обесточивание или не заметит вовсе — ждём не так долго.
+          bulb_wait_s: "{{ 30 if is_state('light.studiia', 'unavailable') else 15 }}"
+      - if:
+          - condition: state
+            entity_id: light.studio_sw
+            state: "off"
+        then:
+          - action: light.turn_on
+            target:
+              entity_id: light.studio_sw
+      - if: "{{ powering_up }}"
+        then:
+          - wait_for_trigger:
+              - trigger: state
+                entity_id: light.studiia
+                from: unavailable
+            timeout: "{{ bulb_wait_s }}"
+            continue_on_timeout: true
+          # Лампа загружается и ещё может проигнорировать первую команду.
+          - delay: "00:00:03"
+      - variables:
+          # 0 = ничего не применять. Явное значение побеждает сброс по времени суток.
+          apply_k: >-
+            {% from 'light_defaults.jinja' import kelvin %}
+            {{ want_k if want_k > 0 else
+               (kelvin(state_attr('light.studiia', 'min_color_temp_kelvin')) | int
+                if reset_defaults else 0) }}
+          apply_b: >-
+            {% from 'light_defaults.jinja' import brightness_pct %}
+            {{ want_b if want_b > 0 else
+               ((brightness_pct() | int * 255 / 100) | round(0)
+                if reset_defaults else 0) }}
+      # Сначала цвет, потом яркость — см. оговорку про early return в шапке.
+      - if: "{{ apply_k > 0 }}"
+        then:
+          - action: light.turn_on
+            target:
+              entity_id: light.studiia
+            data:
+              color_temp_kelvin: "{{ apply_k }}"
+      - if: "{{ apply_b > 0 }}"
+        then:
+          - action: light.turn_on
+            target:
+              entity_id: light.studiia
+            data:
+              brightness: "{{ apply_b | int }}"
+
+template:
+  - light:
+      - unique_id: studio_light_wrapper
+        name: Студия
+        default_entity_id: light.studio
+        # Состояние и доступность — только по реле: лампа в unavailable при обесточенном реле.
+        state: "{{ is_state('light.studio_sw', 'on') }}"
+        availability: "{{ not is_state('light.studio_sw', ['unavailable', 'unknown']) }}"
+        level: >-
+          {{ state_attr('light.studiia', 'brightness') | int(255)
+             if is_state('light.studiia', 'on') else 255 }}
+        temperature: >-
+          {% set k = state_attr('light.studiia', 'color_temp_kelvin') %}
+          {{ [[(1000000 / k) | round(0), 153] | max, 500] | min if k else none }}
+        turn_on: &studio_light_on
+          - action: script.turn_on
+            target:
+              entity_id: script.studio_light_set
+            data:
+              variables:
+                brightness: "{{ brightness | default(0) }}"
+                color_temp_kelvin: "{{ color_temp_kelvin | default(0) }}"
+        set_level: *studio_light_on
+        set_temperature: *studio_light_on
+        turn_off:
+          - action: script.turn_off
+            target:
+              entity_id: script.studio_light_set
+          - action: light.turn_off
+            target:
+              entity_id: light.studio_sw
+
+automation:
+  - id: studio_light_reset_on_power
+    alias: "Студия: белый по времени суток при включении реле"
+    description: >-
+      Реле light.studio_sw off→on из любого источника (кроме самого скрипта/шаблонного света):
+      ждёт лампу и применяет сброс. Явные значения шаблонного света запускают скрипт сами.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: light.studio_sw
+        from: "off"
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: script.studio_light_set
+        state: "off"
+    actions:
+      - action: script.turn_on
+        target:
+          entity_id: script.studio_light_set
+        data:
+          variables:
+            power_reset: true
