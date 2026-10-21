@@ -1,17 +1,21 @@
 {#
   Единое правило «яркость и белый по времени суток» для света в студии и спальне
-  (packages/studio_light.yaml, packages/bedroom_light_reset.yaml).
-  День 06:00-22:59: 100 %, 4000 K. Ночь 23:00-05:59: 50 %, 2700 K.
-  Использование: {% from 'light_defaults.jinja' import brightness_pct, kelvin %}
-                 {{ brightness_pct() | int }}   {{ kelvin(min_kelvin) | int }}
-  Макросы возвращают строку, поэтому на месте вызова нужен | int.
+  (packages/studio_light.yaml, packages/bedroom_light_reset.yaml, автоматизация пульта спальни).
+  День 06:00-22:59: 100 % (255), белый 4000 K. Ночь 23:00-05:59: 50 % (128), тёплый белый 2700 K.
+  Белый задаётся готовой сценой лампы Яндекса, а не color_temp_kelvin: так цвет и яркость
+  уходят ОДНИМ запросом (yandex_station теряет brightness в вызове с color_temp_kelvin).
+  Сцена «Белый» = hs [33,28] — лампа показывает то же самое после color_temp_kelvin: 4000;
+  «Мягкий белый» = hs [32,67] — то же, что после 2700.
+  Использование: {% from 'light_defaults.jinja' import white_effect, brightness255 %}
+                 {{ white_effect() }}   {{ brightness255() | int }}
+  Необязательный аргумент hour (0-23) нужен только для проверки правила в Developer Tools.
+  Макрос яркости возвращает строку, поэтому на месте вызова нужен | int.
   Перечитывается без рестарта: homeassistant.reload_custom_templates.
 #}
-{% macro brightness_pct() -%}
-{{ 50 if (now().hour >= 23 or now().hour < 6) else 100 }}
+{% macro white_effect(hour=now().hour) -%}
+{{ 'Мягкий белый' if (hour >= 23 or hour < 6) else 'Белый' }}
 {%- endmacro %}
 
-{# min_kelvin — нижняя граница лампы (атрибут min_color_temp_kelvin), тёплый белый ей ограничивается. #}
-{% macro kelvin(min_kelvin=1500) -%}
-{{ [2700 if (now().hour >= 23 or now().hour < 6) else 4000, min_kelvin | int(1500)] | max }}
+{% macro brightness255(hour=now().hour) -%}
+{{ 128 if (hour >= 23 or hour < 6) else 255 }}
 {%- endmacro %}

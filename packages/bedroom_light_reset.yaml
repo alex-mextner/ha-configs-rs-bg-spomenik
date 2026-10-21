@@ -3,22 +3,33 @@
 # (custom_templates/light_defaults.jinja: день 06:00-22:59 → 100 %, 4000 K;
 # ночь 23:00-05:59 → 50 %, 2700 K).
 #
-# HA не видит параметры команды, пришедшей через облако, только смену состояния. А при
-# выключении лампа теряет brightness/цвет в атрибутах. Поэтому:
-#  1. on→off: запоминаем яркость/цвет из from_state в input_text.liustra_last_on_state;
-#  2. off→on (любой источник: пульт-автоматизация, голос, приложение): ждём, пока атрибуты
-#     заполнятся, и сравниваем с запомненными. Совпали — лампа просто вспомнила прошлое
-#     состояние, значит явной команды не было → применяем сброс. Отличаются — это явная
-#     команда, не трогаем.
-# Сравнение: яркость ±2, effect (сцена) и hs_color ±2 равны, color_temp_kelvin ±50 K, если
-# он есть. Лампа Яндекса белый отдаёт как сцену («Белый» ≈ 4000 K, «Мягкий белый» ≈ 2700 K)
-# с hs_color, а color_temp_kelvin остаётся None, поэтому сравниваем и по effect/hs.
-# Сброс — light.turn_on на уже включённую лампу, off→on он не вызывает, петли нет.
-# yandex_station игнорирует brightness в вызове с color_temp_kelvin, поэтому цвет и яркость
-# отправляются двумя вызовами. Автоматизация пульта (automations.yaml, light.toggle)
-# остаётся как есть.
-# Ограничение: если облако Яндекса применит команду «включи на N %» позже, чем через
-# ~5 с после включения, сброс успеет раньше.
+# Два пути включения:
+#  1. Пульт (automations.yaml, id 1775259577858): если люстра выключена, ПЕРВЫМ и единственным
+#     действием уходит light.turn_on с готовой сценой белого и яркостью по времени суток —
+#     один запрос, без ожидания и сравнений; если включена — turn_off. Лампа сразу включается
+#     в нужном цвете, красной/прежней фазы нет.
+#  2. Облако (голос Алисы, приложение Яндекса): HA видит только смену состояния off→on, а
+#     лампа включается с запомненным цветом. Автоматизация ниже реагирует на off→on без
+#     задержек: как только атрибуты заполнены, сравнивает их с запомненными перед
+#     выключением и, если явной команды не было, одним запросом ставит целевой белый.
+#     Физически неустранимо: пока облако доложит HA о включении и придёт наш запрос, лампа
+#     успевает показать запомненный цвет (замерено ≈ 1 с на отчёт + ≈ 0,35 с на применение).
+#     Полностью убрать это можно только если голос идёт через HA (light-обёртка, как
+#     light.studio), а не мимо него.
+#
+# Как отличаем явную команду: при on→off запоминаем яркость/цвет из from_state в
+# input_text.liustra_last_on_state. При off→on совпало с запомненным (яркость ±2, effect и
+# hs_color ±2, color_temp_kelvin ±50 K если есть) — лампа просто вспомнила прошлое, значит
+# явной команды не было → сброс. Отличается — это явная команда, не трогаем. Если лампа уже
+# в целевом состоянии (например, после пульта) — тоже ничего не делаем: так пульт не
+# запускает повторный сброс и цикла нет (сброс на уже включённой лампе off→on не вызывает).
+# Лампа Яндекса отдаёт белый как сцену (effect «Белый»/«Мягкий белый» с hs_color), а
+# color_temp_kelvin остаётся None, поэтому сравниваем по effect/hs. Облако временами
+# присылает устаревшее состояние (off или прежний цвет) вслед за свежим — это даёт
+# лишнюю итерацию, которая сводится к «уже целевое» либо к повторному, идемпотентному
+# применению того же белого.
+# Ограничение: если облако Яндекса применит команду «включи на N %» позже, чем мы прочитаем
+# состояние (≈ сразу после отчёта о включении), сброс может её перебить.
 
 input_text:
   liustra_last_on_state:
@@ -54,11 +65,17 @@ automation:
         from: "off"
         to: "on"
     actions:
+      # Обычно атрибуты уже заполнены и ожидания нет; таймаут — только страховка.
       - wait_template: "{{ state_attr('light.liustra', 'brightness') is not none }}"
-        timeout: "00:00:06"
+        timeout: "00:00:03"
         continue_on_timeout: true
-      - delay: "00:00:05"
       - variables:
+          target_effect: >-
+            {% from 'light_defaults.jinja' import white_effect %}
+            {{ white_effect() }}
+          target_b: >-
+            {% from 'light_defaults.jinja' import brightness255 %}
+            {{ brightness255() | int }}
           explicit: >-
             {% set o = states('input_text.liustra_last_on_state') | from_json({}) %}
             {% set nb = state_attr('light.liustra', 'brightness') %}
@@ -75,24 +92,19 @@ automation:
                  and ((nh[0] - o.h[0]) | abs > 2 or (nh[1] - o.h[1]) | abs > 2) %}
               {{ b_diff or k_diff or e_diff or h_diff }}
             {% endif %}
+          already_target: >-
+            {{ state_attr('light.liustra', 'effect') == target_effect
+               and (state_attr('light.liustra', 'brightness') | int(0) - target_b) | abs <= 5 }}
       - if:
           - condition: state
             entity_id: light.liustra
             state: "on"
           - condition: template
-            value_template: "{{ not explicit }}"
+            value_template: "{{ not explicit and not already_target }}"
         then:
           - action: light.turn_on
             target:
               entity_id: light.liustra
             data:
-              color_temp_kelvin: >-
-                {% from 'light_defaults.jinja' import kelvin %}
-                {{ kelvin(state_attr('light.liustra', 'min_color_temp_kelvin')) | int }}
-          - action: light.turn_on
-            target:
-              entity_id: light.liustra
-            data:
-              brightness_pct: >-
-                {% from 'light_defaults.jinja' import brightness_pct %}
-                {{ brightness_pct() | int }}
+              effect: "{{ target_effect }}"
+              brightness: "{{ target_b }}"
