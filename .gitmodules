@@ -60,3 +60,6 @@
 [submodule "submodules/allow-locked-remote-desktop"]
 	path = submodules/allow-locked-remote-desktop
 	url = https://github.com/jikamens/allow-locked-remote-desktop.git
+[submodule "submodules/ha-tinyprint"]
+	path = submodules/ha-tinyprint
+	url = https://github.com/alex-mextner/ha-tinyprint.git
