@@ -4,8 +4,9 @@
 # 74% of the daily rows came from 3D-printer telemetry (positions, power, fan rpm, time estimates),
 # ESPHome diagnostics (uptime, loop time, heap) and the Yandex Station media player. Those have no
 # useful history, so they are excluded; their live state in the UI is unaffected.
-# Temperatures, print status and progress keep their history (the duplicate k1se_85b6 print status
-# is excluded, sensor.printer_k1_se_status keeps the history).
+# Nozzle, bed and chamber temperatures, print status and progress keep their history. Stepper and
+# MCU temperatures are diagnostic noise and are excluded on purpose. The duplicate k1se_85b6 print
+# status is excluded, sensor.printer_k1_se_status keeps the history.
 #
 # Keep one `recorder:` block: purge_keep_days and commit_interval must not be set in two packages.
 recorder:
