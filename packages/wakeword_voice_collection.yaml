@@ -4,11 +4,7 @@
 # live mic/DOA state, noise session, phrase screening, phrase recording, review.
 wakeword_studio:
 
-recorder:
-  exclude:
-    entities:
-      - sensor.wakeword_mic_direction
-      - sensor.wakeword_mic_level
+# The recorder exclusions for these sensors live in packages/recorder.yaml (one recorder block only).
 
 input_select:
   wakeword_collection_phrase:
