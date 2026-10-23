@@ -1,0 +1,44 @@
+# Recorder tuning for the odroidn2 host (SD/eMMC, 3.7 GB RAM, 3 GB SQLite database).
+#
+# Measured 2026-10-23: 842k state rows per day (~10 per second), 12M rows / 3.1 GB in the database,
+# 74% of the daily rows came from 3D-printer telemetry (positions, power, fan rpm, time estimates),
+# ESPHome diagnostics (uptime, loop time, heap) and the Yandex Station media player. Those have no
+# useful history, so they are excluded; their live state in the UI is unaffected.
+# Temperatures, print status and progress keep their history (the duplicate k1se_85b6 print status
+# is excluded, sensor.printer_k1_se_status keeps the history).
+#
+# Keep one `recorder:` block: purge_keep_days and commit_interval must not be set in two packages.
+recorder:
+  purge_keep_days: 7
+  commit_interval: 30
+  exclude:
+    entities:
+      - sensor.wakeword_mic_direction
+      - sensor.wakeword_mic_level
+      - sensor.printer_k1_se_z_position
+      - sensor.printer_u1_raw
+      - sensor.sentinel_health_2
+      - sensor.k1se_85b6_print_status
+      - sensor.k1se_85b6_print_time_left
+      - sensor.k1se_85b6_print_job_time
+      - sensor.k1se_85b6_used_material_length
+      - sensor.k1se_85b6_real_time_flow
+      - sensor.snapmaker_u1_memory_used
+      - sensor.snapmaker_u1_system_load
+      - sensor.snapmaker_u1_extruder3_power
+      - sensor.snapmaker_u1_bed_power
+      - sensor.snapmaker_u1_print_duration
+      - sensor.snapmaker_u1_print_projected_total_duration
+      - sensor.snapmaker_u1_print_time_left
+      - sensor.snapmaker_u1_slicer_print_time_left_estimate
+      - sensor.snapmaker_u1_filament_used
+      - sensor.snapmaker_u1_print_speed
+    entity_globs:
+      - sensor.snapmaker_u1_toolhead_position_*
+      - sensor.k1se_85b6_position_*
+      - sensor.snapmaker_u1_*fan_rpm
+      - sensor.snapmaker_u1_stepper_*_temp
+      - sensor.snapmaker_u1_mcu_*
+      - sensor.ir_controller_esp32_c3_*
+      - sensor.motion_light_*
+      - media_player.yandex_station_*
