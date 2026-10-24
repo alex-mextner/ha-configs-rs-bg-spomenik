@@ -10,7 +10,10 @@ rest:
       - name: "Strelitzia Soil ADC"
         unique_id: strelitzia_soil_n2_adc
         icon: mdi:flower
-        value_template: "{{ value_json.adc_raw }}"
+        availability: >-
+          {{ value_json is defined and value_json.adc_raw is defined
+             and is_number(value_json.adc_raw) }}
+        value_template: "{{ value_json.adc_raw | int(0) }}"
         state_class: measurement
         json_attributes:
           - voltage_v
@@ -46,6 +49,13 @@ input_number:
     step: 1
     mode: box
 
+# A valid dry value may itself be zero, so the numeric helpers alone do not
+# distinguish the unset default from an intentional calibration value.
+input_boolean:
+  strelitzia_soil_dry_calibrated:
+    name: "Стрелиция: сухая точка откалибрована"
+    icon: mdi:check-circle-outline
+
 template:
   - sensor:
       - name: "Strelitzia Soil Moisture Index"
@@ -54,7 +64,8 @@ template:
         unit_of_measurement: "%"
         state_class: measurement
         availability: >-
-          {{ is_number(states('sensor.strelitzia_soil_adc'))
+          {{ is_state('input_boolean.strelitzia_soil_dry_calibrated', 'on')
+             and is_number(states('sensor.strelitzia_soil_adc'))
              and (states('input_number.strelitzia_soil_wet_adc') | float(0)) >
                  (states('input_number.strelitzia_soil_dry_adc') | float(0)) }}
         state: >-
@@ -103,17 +114,23 @@ script:
                  and (soil_sample.content.adc_raw | float(0)) >=
                      (states('input_number.strelitzia_soil_wet_adc') | float(0)) }}
         then:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.strelitzia_soil_wet_adc
+            data:
+              value: 0
           - action: persistent_notification.create
             data:
-              title: "Калибровка стрелиции не сохранена"
-              message: "Новая сухая точка не ниже уже записанной мокрой. Проверь грунт и измерения."
-          - stop: "Сухой ADC должен быть ниже мокрого"
-            error: true
+              title: "Калибровка стрелиции: мокрая точка сброшена"
+              message: "Новая сухая точка выше прежней мокрой: сухое значение сохранено, повтори мокрую калибровку после полива."
       - action: input_number.set_value
         target:
           entity_id: input_number.strelitzia_soil_dry_adc
         data:
           value: "{{ soil_sample.content.adc_raw | int }}"
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.strelitzia_soil_dry_calibrated
 
   strelitzia_soil_capture_wet:
     alias: "Стрелиция: запомнить политую точку (100%)"
@@ -129,6 +146,17 @@ script:
                  not is_number(soil_sample.content.adc_raw) }}
         then:
           - stop: "Нет свежих показаний датчика"
+            error: true
+      - if:
+          - condition: template
+            value_template: >-
+              {{ not is_state('input_boolean.strelitzia_soil_dry_calibrated', 'on') }}
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "Калибровка стрелиции не сохранена"
+              message: "Сначала запиши сухую точку (0%)."
+          - stop: "Сначала нужна сухая точка"
             error: true
       - if:
           - condition: template
