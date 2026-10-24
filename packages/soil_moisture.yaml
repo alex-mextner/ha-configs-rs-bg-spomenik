@@ -30,6 +30,13 @@ rest_command:
     method: get
     timeout: 4
 
+  # Waits up to 15 seconds if a scheduled REST poll just sampled the probe;
+  # this always obtains a new physical sample before saving calibration.
+  strelitzia_soil_measure_fresh:
+    url: "http://127.0.0.1:8768/reading/fresh"
+    method: get
+    timeout: 25
+
 # Two writable calibration settings appear in Settings -> Devices & services -> Helpers.
 # No 'initial': HA restores manual calibration settings across restarts.
 input_number:
@@ -98,7 +105,7 @@ script:
     description: "Когда пора поливать: получить свежий ADC и сохранить его как 0%."
     mode: single
     sequence:
-      - action: rest_command.strelitzia_soil_measure
+      - action: rest_command.strelitzia_soil_measure_fresh
         response_variable: soil_sample
       - if:
           - condition: template
@@ -132,13 +139,35 @@ script:
       - action: input_boolean.turn_on
         target:
           entity_id: input_boolean.strelitzia_soil_dry_calibrated
+      # Reflect the new calibration sample in the dashboard rather than waiting
+      # up to five minutes for the REST sensor's scheduled poll.
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.strelitzia_soil_adc
+      - wait_template: >-
+          {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+             as_timestamp(soil_sample.content.sampled_at, 0) }}
+        timeout: "00:00:10"
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          - action: homeassistant.update_entity
+            target:
+              entity_id: sensor.strelitzia_soil_adc
+          - wait_template: >-
+              {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+                 as_timestamp(soil_sample.content.sampled_at, 0) }}
+            timeout: "00:00:10"
+            continue_on_timeout: true
 
   strelitzia_soil_capture_wet:
     alias: "Стрелиция: запомнить политую точку (100%)"
     description: "Через 20–40 минут после полива возле щупа: сохранить ADC как 100%."
     mode: single
     sequence:
-      - action: rest_command.strelitzia_soil_measure
+      - action: rest_command.strelitzia_soil_measure_fresh
         response_variable: soil_sample
       - if:
           - condition: template
@@ -176,3 +205,23 @@ script:
           entity_id: input_number.strelitzia_soil_wet_adc
         data:
           value: "{{ soil_sample.content.adc_raw | int }}"
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.strelitzia_soil_adc
+      - wait_template: >-
+          {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+             as_timestamp(soil_sample.content.sampled_at, 0) }}
+        timeout: "00:00:10"
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          - action: homeassistant.update_entity
+            target:
+              entity_id: sensor.strelitzia_soil_adc
+          - wait_template: >-
+              {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+                 as_timestamp(soil_sample.content.sampled_at, 0) }}
+            timeout: "00:00:10"
+            continue_on_timeout: true
