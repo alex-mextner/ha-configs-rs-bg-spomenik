@@ -85,7 +85,8 @@ template:
         unit_of_measurement: "Ω"
         state_class: measurement
         availability: >-
-          {{ is_number(state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm')) }}
+          {{ is_number(states('sensor.strelitzia_soil_adc'))
+             and is_number(state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm')) }}
         state: >-
           {{ state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm') | int(0) }}
 
