@@ -1,0 +1,113 @@
+# Native HA REST + Template + Helpers; no custom integration or sidebar entry.
+# Bridge: /opt/ha-soil-moisture/soil_bridge.py on the ODROID N2+ host.
+# Physical wiring: pin 22 -> 10k -> probe; probe -> pin 37 ADC and 10k -> pin 39 GND.
+
+rest:
+  - resource: "http://127.0.0.1:8768/reading"
+    scan_interval: 300
+    timeout: 4
+    sensor:
+      - name: "Strelitzia Soil ADC"
+        unique_id: strelitzia_soil_n2_adc
+        icon: mdi:flower
+        value_template: "{{ value_json.adc_raw }}"
+        state_class: measurement
+        json_attributes:
+          - voltage_v
+          - soil_resistance_ohm
+          - sampled_at
+          - physical_pin
+          - samples
+
+# Two writable calibration settings appear in Settings -> Devices & services -> Helpers.
+# No 'initial': HA restores manual calibration settings across restarts.
+input_number:
+  strelitzia_soil_dry_adc:
+    name: "Стрелиция: сухая почва — ADC (0%)"
+    icon: mdi:water-off
+    min: 0
+    max: 4095
+    step: 1
+    mode: box
+
+  strelitzia_soil_wet_adc:
+    name: "Стрелиция: политая почва — ADC (100%)"
+    icon: mdi:water
+    min: 0
+    max: 4095
+    step: 1
+    mode: box
+
+template:
+  - sensor:
+      - name: "Strelitzia Soil Moisture Index"
+        unique_id: strelitzia_soil_moisture_index
+        icon: mdi:water-percent
+        unit_of_measurement: "%"
+        state_class: measurement
+        availability: >-
+          {{ is_number(states('sensor.strelitzia_soil_adc'))
+             and (states('input_number.strelitzia_soil_wet_adc') | float(0)) >
+                 (states('input_number.strelitzia_soil_dry_adc') | float(0)) }}
+        state: >-
+          {% set raw = states('sensor.strelitzia_soil_adc') | float(0) %}
+          {% set dry = states('input_number.strelitzia_soil_dry_adc') | float(0) %}
+          {% set wet = states('input_number.strelitzia_soil_wet_adc') | float(0) %}
+          {% set pct = 100 * (raw - dry) / (wet - dry) if wet > dry else 0 %}
+          {{ ([0, [pct, 100] | min] | max) | round(1) }}
+        attributes:
+          meaning: "Relative index between two substrate calibration points, not volumetric water %."
+          dry_adc: "{{ states('input_number.strelitzia_soil_dry_adc') }}"
+          wet_adc: "{{ states('input_number.strelitzia_soil_wet_adc') }}"
+
+      - name: "Strelitzia Soil Resistance"
+        unique_id: strelitzia_soil_resistance_ohm
+        icon: mdi:resistor
+        unit_of_measurement: "Ω"
+        state_class: measurement
+        availability: >-
+          {{ is_number(state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm')) }}
+        state: >-
+          {{ state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm') | int(0) }}
+
+# These two scripts are buttons in Settings -> Automations & scenes -> Scripts.
+# They copy the newest ADC measurement into one of the calibration helpers.
+script:
+  strelitzia_soil_capture_dry:
+    alias: "Стрелиция: запомнить сухую точку (0%)"
+    description: "Когда пора поливать: получить свежий ADC и сохранить его как 0%."
+    mode: single
+    sequence:
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.strelitzia_soil_adc
+      - delay:
+          milliseconds: 600
+      - condition: template
+        value_template: "{{ is_number(states('sensor.strelitzia_soil_adc')) }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.strelitzia_soil_dry_adc
+        data:
+          value: "{{ states('sensor.strelitzia_soil_adc') | int }}"
+
+  strelitzia_soil_capture_wet:
+    alias: "Стрелиция: запомнить политую точку (100%)"
+    description: "Через 20–40 минут после полива возле щупа: сохранить ADC как 100%."
+    mode: single
+    sequence:
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.strelitzia_soil_adc
+      - delay:
+          milliseconds: 600
+      - condition: template
+        value_template: >-
+          {{ is_number(states('sensor.strelitzia_soil_adc'))
+             and (states('sensor.strelitzia_soil_adc') | float(0)) >
+                 (states('input_number.strelitzia_soil_dry_adc') | float(0)) }}
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.strelitzia_soil_wet_adc
+        data:
+          value: "{{ states('sensor.strelitzia_soil_adc') | int }}"
