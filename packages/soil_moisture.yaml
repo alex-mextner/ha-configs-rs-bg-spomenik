@@ -19,6 +19,14 @@ rest:
           - physical_pin
           - samples
 
+# A direct REST action returns a fresh reading synchronously. HA's REST sensor
+# update_entity can be debounced, so it is unsuitable as a calibration trigger.
+rest_command:
+  strelitzia_soil_measure:
+    url: "http://127.0.0.1:8768/reading"
+    method: get
+    timeout: 4
+
 # Two writable calibration settings appear in Settings -> Devices & services -> Helpers.
 # No 'initial': HA restores manual calibration settings across restarts.
 input_number:
@@ -71,43 +79,71 @@ template:
           {{ state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm') | int(0) }}
 
 # These two scripts are buttons in Settings -> Automations & scenes -> Scripts.
-# They copy the newest ADC measurement into one of the calibration helpers.
+# They take a fresh reading directly (not a potentially cached REST sensor state).
 script:
   strelitzia_soil_capture_dry:
     alias: "Стрелиция: запомнить сухую точку (0%)"
     description: "Когда пора поливать: получить свежий ADC и сохранить его как 0%."
     mode: single
     sequence:
-      - action: homeassistant.update_entity
-        target:
-          entity_id: sensor.strelitzia_soil_adc
-      - delay:
-          milliseconds: 600
-      - condition: template
-        value_template: "{{ is_number(states('sensor.strelitzia_soil_adc')) }}"
+      - action: rest_command.strelitzia_soil_measure
+        response_variable: soil_sample
+      - if:
+          - condition: template
+            value_template: >-
+              {{ soil_sample.status != 200 or
+                 not is_number(soil_sample.content.adc_raw) }}
+        then:
+          - stop: "Нет свежих показаний датчика"
+            error: true
+      - if:
+          - condition: template
+            value_template: >-
+              {{ (states('input_number.strelitzia_soil_wet_adc') | float(0)) > 0
+                 and (soil_sample.content.adc_raw | float(0)) >=
+                     (states('input_number.strelitzia_soil_wet_adc') | float(0)) }}
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "Калибровка стрелиции не сохранена"
+              message: "Новая сухая точка не ниже уже записанной мокрой. Проверь грунт и измерения."
+          - stop: "Сухой ADC должен быть ниже мокрого"
+            error: true
       - action: input_number.set_value
         target:
           entity_id: input_number.strelitzia_soil_dry_adc
         data:
-          value: "{{ states('sensor.strelitzia_soil_adc') | int }}"
+          value: "{{ soil_sample.content.adc_raw | int }}"
 
   strelitzia_soil_capture_wet:
     alias: "Стрелиция: запомнить политую точку (100%)"
     description: "Через 20–40 минут после полива возле щупа: сохранить ADC как 100%."
     mode: single
     sequence:
-      - action: homeassistant.update_entity
-        target:
-          entity_id: sensor.strelitzia_soil_adc
-      - delay:
-          milliseconds: 600
-      - condition: template
-        value_template: >-
-          {{ is_number(states('sensor.strelitzia_soil_adc'))
-             and (states('sensor.strelitzia_soil_adc') | float(0)) >
+      - action: rest_command.strelitzia_soil_measure
+        response_variable: soil_sample
+      - if:
+          - condition: template
+            value_template: >-
+              {{ soil_sample.status != 200 or
+                 not is_number(soil_sample.content.adc_raw) }}
+        then:
+          - stop: "Нет свежих показаний датчика"
+            error: true
+      - if:
+          - condition: template
+            value_template: >-
+              {{ (soil_sample.content.adc_raw | float(0)) <=
                  (states('input_number.strelitzia_soil_dry_adc') | float(0)) }}
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "Калибровка стрелиции не сохранена"
+              message: "Мокрая точка не выше сухой. Дождись, когда вода дойдёт до датчика."
+          - stop: "Мокрый ADC должен быть выше сухого"
+            error: true
       - action: input_number.set_value
         target:
           entity_id: input_number.strelitzia_soil_wet_adc
         data:
-          value: "{{ states('sensor.strelitzia_soil_adc') | int }}"
+          value: "{{ soil_sample.content.adc_raw | int }}"
