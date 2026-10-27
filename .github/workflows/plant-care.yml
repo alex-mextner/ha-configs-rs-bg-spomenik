@@ -1,0 +1,52 @@
+name: Plant Care
+
+on:
+  pull_request:
+    paths:
+      - custom_components/plant_care_alerts/**
+      - tests/plant_care/**
+      - www/plant-care/**
+      - blueprints/automation/plant_care/**
+      - packages/plant_care.yaml
+      - .github/workflows/plant-care.yml
+  push:
+    branches: [main, feat/plant-care-alerts]
+    paths:
+      - custom_components/plant_care_alerts/**
+      - tests/plant_care/**
+      - www/plant-care/**
+      - blueprints/automation/plant_care/**
+      - packages/plant_care.yaml
+      - .github/workflows/plant-care.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plant-care:
+    name: Plant tests and installed-HA compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.14'
+      - name: Install lint dependencies
+        run: python -m pip install ruff==0.15.13
+      - name: Lint scoped implementation
+        run: |
+          ruff check custom_components/plant_care_alerts tests/plant_care
+          ruff format --check custom_components/plant_care_alerts tests/plant_care
+          node --check www/plant-care/plant-care-card.js
+      - name: Card behavior
+        run: node tests/plant_care/test_card.cjs
+      - name: All tests in the deployed Home Assistant version
+        # Matches the verified production version, not the moving stable tag.
+        run: >-
+          docker run --rm --entrypoint python3
+          -v "$PWD:/workspace:ro" -w /workspace
+          -e PYTHONPATH=/workspace -e PYTHONDONTWRITEBYTECODE=1
+          ghcr.io/home-assistant/home-assistant:2026.9.3
+          -m unittest discover -s tests/plant_care -v

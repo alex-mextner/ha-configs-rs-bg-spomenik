@@ -65,6 +65,17 @@ class DeliveryTests(unittest.TestCase):
             "sensor.strelitzia_soil_adc",
         )
 
+    def test_manifest_uses_hassfest_key_order(self) -> None:
+        data = self.load("custom_components/plant_care_alerts/manifest.json")
+        self.assertEqual(
+            list(data),
+            [
+                "domain",
+                "name",
+                *sorted(key for key in data if key not in {"domain", "name"}),
+            ],
+        )
+
     def test_card_is_own_mit_code(self) -> None:
         p = ROOT / "www/plant-care/plant-care-card.js"
         self.assertTrue(p.exists(), "Plant card missing")
