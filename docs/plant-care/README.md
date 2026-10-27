@@ -60,8 +60,6 @@ Wet threshold = 100 (upstream требует строгое превышение
 
 Источники/обновления зарегистрированы в `integration-sources.json`.
 При новом клонировании выполни `git submodule update --init submodules/adaptive-plant`.
-На production с policy-driven updater также поддерживается
-`scripts/ha_setup_integrations.py --initialize`.
 В `configuration.yaml` нужны ресурсы `/local/plant-care/plant-care-card.js`
 и `/adaptive_plant/adaptive-plant-card.js`, оба `type: module`.
 Пакет из `packages/` загружается существующим include_dir_named.

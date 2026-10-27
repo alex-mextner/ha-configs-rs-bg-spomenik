@@ -133,6 +133,10 @@ actions:
                           message: clear_notification
                           data:
                             tag: "{{ notification_tag }}"
+                      - action: plant_care_alerts.acknowledge
+                        data:
+                          entity_id: "{{ change_entity }}"
+                          status: sensor_error
                   - if: "{{ trigger.event.data.get('notify', false) and change_status in ['due','overdue'] and (notify_target == '' or has_service('notify', notify_target)) }}"
                     then:
                       - action: plant_care_alerts.acknowledge

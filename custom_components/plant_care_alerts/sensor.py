@@ -5,6 +5,7 @@
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
+from homeassistant.helpers.start import async_at_started
 
 from . import DOMAIN
 
@@ -34,9 +35,14 @@ class PlantCareSensor(SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Publish initial state before emitting its delivery event."""
         await super().async_added_to_hass()
-        self.async_write_ha_state()
-        previous = self.manager.pending_initial.pop(self.plant_id, None)
-        self.manager.emit_transition(self.plant_id, previous)
+
+        async def publish_initial(_hass: Any) -> None:
+            """Wait until startup automation listeners can receive the transition."""
+            self.async_write_ha_state()
+            previous = self.manager.pending_initial.pop(self.plant_id, None)
+            self.manager.emit_transition(self.plant_id, previous)
+
+        self.async_on_remove(async_at_started(self.hass, publish_initial))
 
     @property
     def available(self) -> bool:

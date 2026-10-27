@@ -63,6 +63,18 @@ def needs_notification(record: Any) -> bool:
     )
 
 
+def acknowledge_delivery(record: dict[str, Any], status: str) -> None:
+    """Record delivery, or allow a new warning after a fault cleared the phone tag."""
+    # A completed clear removed the phone tag even if the sensor recovered
+    # while notify awaited delivery. Re-arm that current warning for retry.
+    if status == "sensor_error":
+        record["notified_status"] = None
+        record["delivery_attempts"] = 0
+    elif record["status"] == status:
+        record["notified_status"] = status
+        record["delivery_attempts"] = 0
+
+
 async def async_setup(hass: Any, config: Any) -> bool:
     """Register the companion sensor, persistence and internal delivery services."""
     manager = CareManager(hass, config[DOMAIN])
@@ -103,10 +115,8 @@ async def async_setup(hass: Any, config: Any) -> bool:
         for key, entity in manager.entities.items():
             if entity.entity_id == call.data["entity_id"]:
                 record = manager.records[key]
-                if record["status"] == call.data["status"]:
-                    record["notified_status"] = call.data["status"]
-                    record["delivery_attempts"] = 0
-                    manager.store.async_delay_save(lambda: manager.records, 1)
+                acknowledge_delivery(record, call.data["status"])
+                manager.store.async_delay_save(lambda: manager.records, 1)
                 break
 
     hass.services.async_register(
@@ -116,7 +126,7 @@ async def async_setup(hass: Any, config: Any) -> bool:
         schema=vol.Schema(
             {
                 vol.Required("entity_id"): cv.entity_id,
-                vol.Required("status"): vol.In(["due", "overdue"]),
+                vol.Required("status"): vol.In(["due", "overdue", "sensor_error"]),
             }
         ),
     )
@@ -160,40 +170,44 @@ class CareManager:
         self.button_cache[entry_id] = result
         return result
 
+    def _source_reading(self, source_id: str | None) -> tuple[Any, Any, Any]:
+        """Return source value, freshness entity and physical sample timestamp."""
+        source = self.hass.states.get(source_id) if source_id else None
+        fresh_id = self.config["freshness_sources"].get(source_id, source_id)
+        fresh = self.hass.states.get(fresh_id) if fresh_id else None
+        stamp = None
+        if fresh is not None:
+            stamp = timestamp(fresh.attributes.get("sampled_at")) or timestamp(
+                fresh.last_reported
+            )
+        valid = (
+            source is not None and fresh is not None and finite(fresh.state) is not None
+        )
+        return source.state if valid else None, fresh_id, stamp
+
+    @staticmethod
+    def _scheduled_time(value: Any) -> float | None:
+        """Resolve a schedule-only plant's watering day at local 08:00."""
+        if not value:
+            return None
+        try:
+            day = datetime.fromisoformat(value).date()
+            return datetime.combine(day, time(8), dt_util.DEFAULT_TIME_ZONE).timestamp()
+        except (ValueError, TypeError):
+            return None
+
     def _reading(self, plant: Any, now: Any) -> dict[str, Any]:
         """Combine moisture with independently verified source freshness."""
         buttons = self._buttons(plant.entry_id)
         source_id = plant.moisture_sensor
-        source = self.hass.states.get(source_id) if source_id else None
-        fresh_id = self.config["freshness_sources"].get(source_id, source_id)
-        fresh = self.hass.states.get(fresh_id) if fresh_id else None
-        stamp = (
-            (
-                timestamp(fresh.attributes.get("sampled_at"))
-                or timestamp(fresh.last_reported)
-            )
-            if fresh
-            else None
-        )
-        next_at = None
-        if plant.next_watering:
-            try:
-                day = datetime.fromisoformat(plant.next_watering).date()
-                next_at = datetime.combine(
-                    day, time(8), dt_util.DEFAULT_TIME_ZONE
-                ).timestamp()
-            except (ValueError, TypeError):
-                pass
-        valid = (
-            source is not None and fresh is not None and finite(fresh.state) is not None
-        )
+        moisture, fresh_id, stamp = self._source_reading(source_id)
         reading = {
             "has_sensor": bool(source_id),
             "source_identity": source_id,
-            "moisture": source.state if valid else None,
+            "moisture": moisture,
             "sample_at": stamp,
             "dry_threshold": plant.dry_threshold,
-            "next_watering_at": next_at,
+            "next_watering_at": self._scheduled_time(plant.next_watering),
         }
         for action, field in [
             ("mark_watered", "watered_at"),
@@ -237,6 +251,7 @@ class CareManager:
             current["delivery_attempts"] = current.get("delivery_attempts", 0) + 1
         if status == "ok" and current.get("due_since") is None:
             current["notified_status"] = None
+            current["delivery_attempts"] = 0
         self.hass.bus.async_fire(
             "plant_care_status_changed",
             {
@@ -249,10 +264,73 @@ class CareManager:
         )
         self.store.async_delay_save(lambda: self.records, 10)
 
-    # Keep the lifecycle sequence together; its branches have regression coverage.
-    async def async_refresh(  # noqa: PLR0912, PLR0915
-        self, _event: Any = None
+    def _refresh_plant(self, entry_id: str, plant: Any, now: float) -> bool:
+        """Update one loaded plant, registering its entity on first discovery."""
+        from .sensor import PlantCareSensor  # noqa: PLC0415 - avoids platform cycle
+
+        was_active = entry_id in self.active_plants
+        self.active_plants.add(entry_id)
+        old = self.records.get(entry_id, {})
+        old_details = self.details.get(entry_id)
+        reading = self._reading(plant, now)
+        current = evaluate(old, reading, now, self.settings)
+        current["watered_date"] = plant.last_watered
+        self.records[entry_id] = current
+        meaningful = {k: v for k, v in old.items() if k != "updated_at"} != {
+            k: v for k, v in current.items() if k != "updated_at"
+        } or old_details != self.details[entry_id]
+        if entry_id not in self.entities:
+            entity = PlantCareSensor(self, entry_id)
+            self.entities[entry_id] = entity
+            self.pending_initial[entry_id] = old.get("status")
+            self.add_entities([entity])
+        else:
+            self._publish_existing(
+                entry_id, old, now, write_state=meaningful or not was_active
+            )
+        return meaningful
+
+    def _publish_existing(
+        self, entry_id: str, old: dict[str, Any], now: float, *, write_state: bool
     ) -> None:
+        """Publish state changes and retry only unacknowledged delivery."""
+        entity = self.entities[entry_id]
+        if entity.hass is None:
+            return
+        if write_state:
+            entity.async_write_ha_state()
+        current = self.records[entry_id]
+        attempt = max(0, current.get("delivery_attempts", 0) - 1)
+        delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+        retry_ready = now - self.last_attempt.get(entry_id, 0) >= delay
+        if old.get("status") != current["status"] or (
+            needs_notification(current) and retry_ready
+        ):
+            self.emit_transition(entry_id, old.get("status"))
+
+    async def _remove_missing(self, entry_id: str) -> bool:
+        """Preserve an options reload, but remove a truly deleted plant."""
+        was_active = entry_id in self.active_plants
+        self.active_plants.discard(entry_id)
+        if self.hass.config_entries.async_get_entry(entry_id) is not None:
+            entity = self.entities[entry_id]
+            if was_active and getattr(entity, "hass", None) is not None:
+                entity.async_write_ha_state()
+            return False
+        entity = self.entities.pop(entry_id)
+        self.hass.bus.async_fire("plant_care_removed", {"entity_id": entity.entity_id})
+        await entity.async_remove()
+        for records in (
+            self.records,
+            self.details,
+            self.button_cache,
+            self.last_attempt,
+            self.pending_initial,
+        ):
+            records.pop(entry_id, None)
+        return True
+
+    async def async_refresh(self, _event: Any = None) -> None:
         """Refresh loaded plants and preserve timers across options reloads."""
         if self.busy or self.add_entities is None:
             return
@@ -261,65 +339,14 @@ class CareManager:
             return
         self.busy = True
         try:
-            from .sensor import PlantCareSensor  # noqa: PLC0415 - avoids platform cycle
-
             now = dt_util.utcnow().timestamp()
             changed = False
             self.watched = set()
             for entry_id, plant in list(plants.items()):
-                if not hasattr(plant, "moisture_sensor"):
-                    continue
-                was_active = entry_id in self.active_plants
-                self.active_plants.add(entry_id)
-                old = self.records.get(entry_id, {})
-                old_details = self.details.get(entry_id)
-                reading = self._reading(plant, now)
-                current = evaluate(old, reading, now, self.settings)
-                current["watered_date"] = plant.last_watered
-                self.records[entry_id] = current
-                meaningful = {k: v for k, v in old.items() if k != "updated_at"} != {
-                    k: v for k, v in current.items() if k != "updated_at"
-                } or old_details != self.details[entry_id]
-                if meaningful:
-                    changed = True
-                if entry_id not in self.entities:
-                    entity = PlantCareSensor(self, entry_id)
-                    self.entities[entry_id] = entity
-                    self.pending_initial[entry_id] = old.get("status")
-                    self.add_entities([entity])
-                else:
-                    entity = self.entities[entry_id]
-                    if entity.hass is not None and (meaningful or not was_active):
-                        entity.async_write_ha_state()
-                    unacknowledged = needs_notification(current)
-                    attempt = max(0, current.get("delivery_attempts", 0) - 1)
-                    delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
-                    retry_ready = now - self.last_attempt.get(entry_id, 0) >= delay
-                    if entity.hass is not None and (
-                        old.get("status") != current["status"]
-                        or (unacknowledged and retry_ready)
-                    ):
-                        self.emit_transition(entry_id, old.get("status"))
+                if hasattr(plant, "moisture_sensor"):
+                    changed = self._refresh_plant(entry_id, plant, now) or changed
             for entry_id in set(self.entities) - set(plants):
-                was_active = entry_id in self.active_plants
-                self.active_plants.discard(entry_id)
-                if self.hass.config_entries.async_get_entry(entry_id) is not None:
-                    # Preserve timers on reload, but suppress delivery while unloaded.
-                    entity = self.entities[entry_id]
-                    if was_active and getattr(entity, "hass", None) is not None:
-                        entity.async_write_ha_state()
-                    continue
-                entity = self.entities.pop(entry_id)
-                self.hass.bus.async_fire(
-                    "plant_care_removed", {"entity_id": entity.entity_id}
-                )
-                await entity.async_remove()
-                self.records.pop(entry_id, None)
-                self.details.pop(entry_id, None)
-                self.button_cache.pop(entry_id, None)
-                self.last_attempt.pop(entry_id, None)
-                self.pending_initial.pop(entry_id, None)
-                changed = True
+                changed = await self._remove_missing(entry_id) or changed
             if changed:
                 self.store.async_delay_save(lambda: self.records, 10)
         except Exception:

@@ -49,3 +49,15 @@ Files: www/plant-care/plant-care-card.js; packages/plant_care.yaml; blueprints/a
 - Live blueprint tested with a temporary isolated test entity: orange persistent warning, red update, normal dismissal. Test entity removed in finally; real plant data untouched. Labelled phone push service completed.
 - HA condition.time boundary tests cover 07:59/08:00/21:59/22:00/01:00; no forced audio during quiet hours.
 - Additional review regression cases: durable delivery acknowledgements, notification cleanup on removal/failure, no retry loop after acknowledged red downgrades to orange, short ADC glitches pause rather than erase dry confirmation.
+
+## Resume, 2026-10-27 evening
+- Existing isolated delivery worktree and PR #35 resumed; unrelated production changes untouched.
+- Reproduced final review race with two failing tests in real installed HA Python: recovery during phone-tag clear suppressed its replacement warning.
+- Ruling: successful clear acknowledgement re-arms delivery regardless of current sensor status, since the phone tag was actually cleared; stale due/red acknowledgements still require matching status.
+
+- Resume verification: HA 2026.9.3 isolated-container suite 41 tests, no skips; card 10 assertions; Ruff check/format green. Strict production check_config exited 0 before safe reload.
+- Production refreshed after reload: plant status ok, relative moisture 70.2%, ADC 205; original calibration 67/221, voice switch and automation on. Source: read-only Recorder query at 2026-10-27T19:13Z.
+- Final focused review: author reviewed clearing race against the earlier independent review finding; both reproductions failed before fix and passed after. No unrelated production changes staged or overwritten.
+
+- Rig commit gate found existing adapter complexity above 15 cognitive / 20 cyclomatic. Split source reading, per-plant refresh, publication and removal; no behavior changes. Gate retained; no bypass. Full installed-HA suite re-run: 41 passed.
+- Full repository pytest attempted again: 54 collection errors in unrelated entity_note/home_generative_agent tests (missing awesomeversion, langchain_ollama and HGA submodule/environment). Not a green full-repository suite.

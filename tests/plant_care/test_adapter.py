@@ -1,5 +1,6 @@
 # Stdlib unittest runs inside the installed HA container without pytest.
-# ruff: noqa: PT009
+# ruff: noqa: PT009, PLC0415
+# HA imports stay inside tests so non-HA hosts can run the pure suite.
 # Copyright (c) 2026 Alex Ultra
 """Run in the installed Home Assistant container; no live service calls."""
 
@@ -19,7 +20,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     """Exercise plant-care regression scenarios."""
 
     def setUp(self) -> None:
-        from custom_components.plant_care_alerts import (  # noqa: PLC0415 - optional HA
+        from custom_components.plant_care_alerts import (
             CareManager,
         )
 
@@ -132,7 +133,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["watered_at"])
 
     def test_acknowledged_red_covers_orange_without_retry(self) -> None:
-        from custom_components.plant_care_alerts import (  # noqa: PLC0415 - optional HA
+        from custom_components.plant_care_alerts import (
             needs_notification,
         )
 
@@ -145,7 +146,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(needs_notification({"status": "due", "notified_status": None}))
 
     def test_quiet_hour_boundaries_use_real_ha_condition(self) -> None:
-        from homeassistant.helpers import (  # noqa: PLC0415 - optional HA
+        from homeassistant.helpers import (
             condition,
         )
 
@@ -163,6 +164,111 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     condition.time(self.hass, after=time(8), before=time(22)), expected
                 )
+
+    def test_cleared_fault_delivery_allows_a_new_recovery_push(self) -> None:
+        from custom_components.plant_care_alerts import (
+            acknowledge_delivery,
+            needs_notification,
+        )
+
+        record = {
+            "status": "sensor_error",
+            "notified_status": "due",
+            "delivery_attempts": 4,
+        }
+        acknowledge_delivery(record, "sensor_error")
+        self.assertIsNone(record["notified_status"])
+        self.assertEqual(record["delivery_attempts"], 0)
+        record["status"] = "due"
+        self.assertTrue(needs_notification(record))
+        acknowledge_delivery(record, "due")
+        self.assertFalse(needs_notification(record))
+
+    def test_recovery_during_clear_ack_requires_replacement_warning(self) -> None:
+        from custom_components.plant_care_alerts import (
+            acknowledge_delivery,
+            needs_notification,
+        )
+        from custom_components.plant_care_alerts.state_machine import (
+            evaluate,
+        )
+
+        record = {"status": "due", "due_since": 1000, "notified_status": "due"}
+        record = evaluate(record, {"has_sensor": True, "moisture": None}, 2000)
+        self.assertEqual(record["status"], "sensor_error")
+        # The actual phone-clear call yields; the sensor recovers before its ACK.
+        record = evaluate(
+            record, {"has_sensor": True, "moisture": 10, "sample_at": 2001}, 2001
+        )
+        self.assertEqual(record["status"], "due")
+        acknowledge_delivery(record, "sensor_error")
+        self.assertTrue(needs_notification(record))
+        self.assertEqual(record["delivery_attempts"], 0)
+
+    async def test_clear_ack_service_accepts_recovered_status(self) -> None:
+        from custom_components.plant_care_alerts import (
+            DOMAIN,
+            async_setup,
+        )
+
+        self.hass.services = SimpleNamespace(async_register=Mock())
+        self.hass.bus.async_listen = Mock(return_value=lambda: None)
+        self.hass.bus.async_listen_once = Mock()
+        self.manager.load = AsyncMock()
+        self.manager.records["a"] = {
+            "status": "overdue",
+            "notified_status": "overdue",
+            "delivery_attempts": 3,
+        }
+        self.manager.entities["a"] = SimpleNamespace(entity_id="sensor.test")
+        with (
+            patch(
+                "custom_components.plant_care_alerts.CareManager",
+                return_value=self.manager,
+            ),
+            patch(
+                "custom_components.plant_care_alerts.discovery.async_load_platform",
+                new=AsyncMock(),
+            ),
+            patch("custom_components.plant_care_alerts.async_track_time_interval"),
+        ):
+            await async_setup(self.hass, {DOMAIN: self.manager.config})
+        registration = next(
+            c
+            for c in self.hass.services.async_register.call_args_list
+            if c.args[1] == "acknowledge"
+        )
+        await registration.args[2](
+            SimpleNamespace(data={"entity_id": "sensor.test", "status": "sensor_error"})
+        )
+        self.assertIsNone(self.manager.records["a"]["notified_status"])
+        self.manager.store.async_delay_save.assert_called()
+
+    async def test_initial_transition_waits_for_home_assistant_start(self) -> None:
+        from custom_components.plant_care_alerts.sensor import (
+            PlantCareSensor,
+        )
+
+        self.manager.details["a"] = {"plant_name": "Тест"}
+        self.manager.emit_transition = Mock()
+        entity = PlantCareSensor(self.manager, "a")
+        entity.hass = self.hass
+        entity.async_write_ha_state = Mock()
+        with (
+            patch(
+                "homeassistant.components.sensor.SensorEntity.async_added_to_hass",
+                new=AsyncMock(),
+            ),
+            patch(
+                "custom_components.plant_care_alerts.sensor.async_at_started"
+            ) as deferred,
+        ):
+            await entity.async_added_to_hass()
+            self.manager.emit_transition.assert_not_called()
+            callback = deferred.call_args.args[1]
+            await callback(self.hass)
+        entity.async_write_ha_state.assert_called_once()
+        self.manager.emit_transition.assert_called_once_with("a", None)
 
 
 if __name__ == "__main__":

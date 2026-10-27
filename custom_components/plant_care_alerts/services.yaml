@@ -14,4 +14,4 @@ acknowledge:
       required: true
       selector:
         select:
-          options: [due, overdue]
+          options: [due, overdue, sensor_error]
