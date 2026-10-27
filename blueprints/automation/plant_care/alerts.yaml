@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: MIT
+blueprint:
+  name: "Растения — уведомления и почасовые напоминания"
+  description: >-
+    Автоматически включает все растения Adaptive Plant с Plant Care Alerts.
+    Оранжевое и красное предупреждения приходят один раз при смене состояния.
+    После суток просрочки колонка напоминает раз в час, только в разрешённые часы.
+    Не поливает растения. Не считает недоступный датчик сухой почвой.
+  domain: automation
+  author: Alex Ultra
+  input:
+    notify_target:
+      name: Сервис мобильных уведомлений (без notify.)
+      default: ""
+      selector:
+        text:
+    speaker:
+      name: Яндекс.Станция для напоминаний
+      selector:
+        entity:
+          domain: media_player
+    voice_toggle:
+      name: Переключатель голосовых напоминаний (необязательно)
+      default: ""
+      selector:
+        entity:
+          domain: input_boolean
+    voice_start:
+      name: Говорить начиная с
+      default: "08:00:00"
+      selector:
+        time:
+    voice_end:
+      name: Не говорить после
+      default: "22:00:00"
+      selector:
+        time:
+    dashboard_url:
+      name: Домашний экран
+      default: "/lovelace"
+      selector:
+        text:
+variables:
+  notify_target: !input notify_target
+  speaker: !input speaker
+  voice_toggle: !input voice_toggle
+  dashboard_url: !input dashboard_url
+  change_entity: >-
+    {{ trigger.event.data.entity_id if trigger is defined and trigger.id in ['change','removed'] else '' }}
+  change_status: >-
+    {{ trigger.event.data.get('status', '') if trigger is defined and trigger.id in ['change','removed'] else '' }}
+  plant_name: "{{ state_attr(change_entity, 'plant_name') or 'Растение' }}"
+  notification_tag: "{{ 'plant_care_' ~ (change_entity | replace('.', '_')) }}"
+  overdue_plants: >-
+    {% set ns = namespace(names=[]) %}
+    {% for s in states.sensor if s.attributes.get('plant_care') == true and s.state == 'overdue' %}
+      {% set source = s.attributes.get('source_entity') %}
+      {% set freshness = s.attributes.get('freshness_entity', source) %}
+      {% set max_age = s.attributes.get('stale_seconds', 1200) | float(1200) %}
+      {% set stamp = s.attributes.get('last_sample_at', 0) | float(0) %}
+      {% if not source or (is_number(states(source)) and is_number(states(freshness)) and as_timestamp(now()) - stamp < max_age) %}
+        {% set ns.names = ns.names + [s.attributes.plant_name] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.names }}
+triggers:
+  - trigger: event
+    event_type: plant_care_status_changed
+    id: change
+  - trigger: event
+    event_type: plant_care_removed
+    id: removed
+  - trigger: time_pattern
+    minutes: "0"
+    seconds: "0"
+    id: hourly
+actions:
+  - choose:
+      - conditions: "{{ trigger is defined and trigger.id == 'removed' }}"
+        sequence:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: "{{ notification_tag }}"
+          - if: "{{ notify_target != '' and has_service('notify', notify_target) }}"
+            then:
+              - action: "notify.{{ notify_target }}"
+                data:
+                  message: clear_notification
+                  data:
+                    tag: "{{ notification_tag }}"
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger is defined and trigger.id == 'change'
+                 and state_attr(change_entity, 'plant_care') == true
+                 and states(change_entity) == change_status }}
+        sequence:
+          - choose:
+              - conditions: "{{ change_status in ['due', 'overdue', 'sensor_error'] }}"
+                sequence:
+                  - variables:
+                      alert_title: >-
+                        {{ ('🔴 Полив просрочен: ' if change_status == 'overdue' else
+                            '🟠 Пора поливать: ' if change_status == 'due' else
+                            'Нет данных датчика: ') ~ plant_name }}
+                      alert_message: >-
+                        {% if change_status == 'sensor_error' %}
+                          Нет свежих показаний. Проверь датчик; это не команда поливать.
+                        {% elif change_status == 'overdue' %}
+                          Полив просрочен больше суток. Проверь грунт и отметь полив на карточке растения.
+                        {% else %}
+                          Сухость подтверждена. Проверь грунт и полей, если он действительно просох.
+                        {% endif %}
+                  - action: persistent_notification.create
+                    data:
+                      notification_id: "{{ notification_tag }}"
+                      title: "{{ alert_title }}"
+                      message: "{{ alert_message }}"
+                  - if: "{{ trigger.event.data.get('notify', false) and notify_target != '' and has_service('notify', notify_target) }}"
+                    then:
+                      - action: "notify.{{ notify_target }}"
+                        data:
+                          title: "{{ alert_title }}"
+                          message: "{{ alert_message }}"
+                          data:
+                            tag: "{{ notification_tag }}"
+                            url: "{{ dashboard_url }}"
+                            clickAction: "{{ dashboard_url }}"
+                  - if: "{{ change_status == 'sensor_error' and notify_target != '' and has_service('notify', notify_target) }}"
+                    then:
+                      - action: "notify.{{ notify_target }}"
+                        data:
+                          message: clear_notification
+                          data:
+                            tag: "{{ notification_tag }}"
+                  - if: "{{ trigger.event.data.get('notify', false) and change_status in ['due','overdue'] and (notify_target == '' or has_service('notify', notify_target)) }}"
+                    then:
+                      - action: plant_care_alerts.acknowledge
+                        data:
+                          entity_id: "{{ change_entity }}"
+                          status: "{{ change_status }}"
+              - conditions: "{{ change_status in ['ok','snoozed','checking'] }}"
+                sequence:
+                  - action: persistent_notification.dismiss
+                    data:
+                      notification_id: "{{ notification_tag }}"
+                  - if: >-
+                      {{ notify_target != '' and has_service('notify', notify_target)
+                         and trigger.event.data.get('previous') in ['due','overdue','sensor_error'] }}
+                    then:
+                      - action: "notify.{{ notify_target }}"
+                        data:
+                          message: clear_notification
+                          data:
+                            tag: "{{ notification_tag }}"
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger is defined and trigger.id == 'hourly' and overdue_plants | count > 0
+                 and (voice_toggle == '' or is_state(voice_toggle, 'on'))
+                 and states(speaker) not in ['unavailable','unknown'] }}
+          - condition: time
+            after: !input voice_start
+            before: !input voice_end
+        sequence:
+          - action: media_player.play_media
+            target:
+              entity_id: !input speaker
+            data:
+              media_content_type: text
+              media_content_id: >-
+                Напоминание о поливе. {{ overdue_plants | join(', ') | replace('<','') | replace('>','') }}.
+                Полив просрочен больше суток. Проверьте землю и полейте растения.
+mode: queued
+max: 10

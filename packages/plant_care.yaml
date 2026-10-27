@@ -1,0 +1,53 @@
+# Plant identity/photos: pinned MIT Adaptive Plant submodule.
+# Alert engine/card/blueprint: MIT; see custom_components/plant_care_alerts/LICENSE.
+plant_care_alerts:
+  confirmation_hours: 6
+  overdue_hours: 24
+  stale_minutes: 20
+  freshness_sources:
+    sensor.strelitzia_soil_smoothed: sensor.strelitzia_soil_adc
+
+# Upstream must not interpret individual resistive-probe spikes as watering.
+sensor:
+  - platform: statistics
+    name: Strelitzia Soil Smoothed
+    unique_id: strelitzia_soil_smoothed
+    entity_id: sensor.strelitzia_soil_moisture_index
+    state_characteristic: median
+    sampling_size: 20
+    max_age:
+      minutes: 30
+    precision: 1
+    keep_last_sample: false
+
+input_boolean:
+  plant_care_voice_enabled:
+    name: "Растения: голосовые напоминания"
+    icon: mdi:account-voice
+
+# One automation covers every plant, including newly created plants.
+automation:
+  - id: plant_care_notifications_and_voice
+    alias: "Растения — уведомления и Яндекс.Станция"
+    use_blueprint:
+      path: plant_care/alerts.yaml
+      input:
+        notify_target: mobile_app_echowhiskey536
+        speaker: media_player.yandex_station_m00zrw3008rajg
+        voice_toggle: input_boolean.plant_care_voice_enabled
+        voice_start: "08:00:00"
+        voice_end: "22:00:00"
+        dashboard_url: "/lovelace"
+
+script:
+  plant_care_test_notification:
+    alias: "Растения — проверить push-уведомление"
+    mode: single
+    sequence:
+      - action: notify.mobile_app_echowhiskey536
+        data:
+          title: "🌱 Растения — проверка уведомлений"
+          message: "Напоминания о поливе настроены. Это тест, поливать сейчас не требуется."
+          data:
+            tag: plant_care_test
+            url: "/lovelace"

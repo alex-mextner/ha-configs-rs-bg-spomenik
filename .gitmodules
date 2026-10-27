@@ -60,3 +60,6 @@
 [submodule "3d-cli"]
 	path = 3d-cli
 	url = https://github.com/alex-mextner/3d-cli.git
+[submodule "submodules/adaptive-plant"]
+	path = submodules/adaptive-plant
+	url = https://github.com/Big-Xan/adaptive_plant.git
