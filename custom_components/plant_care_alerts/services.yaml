@@ -1,0 +1,17 @@
+refresh:
+  name: Обновить состояние растений
+  description: Пересчитать предупреждения по текущим данным без полива и изменения калибровки.
+acknowledge:
+  name: Подтвердить доставку предупреждения
+  description: Внутреннее действие blueprint после отправки уведомления; обеспечивает повтор при пропуске события на старте HA.
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    status:
+      required: true
+      selector:
+        select:
+          options: [due, overdue, sensor_error]

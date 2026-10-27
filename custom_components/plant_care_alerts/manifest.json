@@ -1,0 +1,14 @@
+{
+  "domain": "plant_care_alerts",
+  "name": "Plant Care Alerts",
+  "after_dependencies": [
+    "adaptive_plant"
+  ],
+  "codeowners": [
+    "@alex-mextner"
+  ],
+  "documentation": "https://github.com/alex-mextner/ha-configs-rs-bg-stanka_vraza",
+  "iot_class": "local_push",
+  "requirements": [],
+  "version": "0.1.0"
+}
