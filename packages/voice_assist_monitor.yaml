@@ -96,7 +96,7 @@ template:
       - name: "Voice Pipeline Stage"
         unique_id: voice_pipeline_stage
         state: >
-          {{ states('assist_satellite.jarvis') | default('idle') }}
+          {{ states('assist_satellite.bracho') | default('idle') }}
         attributes:
           last_wake: "{{ state_attr('sensor.last_wake_word', 'last_detection') | default('never') }}"
 
@@ -210,7 +210,7 @@ automation:
     alias: "Voice: Track Pipeline Start"
     trigger:
       - platform: state
-        entity_id: assist_satellite.jarvis
+        entity_id: assist_satellite.bracho
         from: "idle"
         to: "listening"
     action:
@@ -225,7 +225,7 @@ automation:
     alias: "Voice: Track STT Done"
     trigger:
       - platform: state
-        entity_id: assist_satellite.jarvis
+        entity_id: assist_satellite.bracho
         from: "listening"
         to: "processing"
     action:
@@ -312,8 +312,10 @@ automation:
         target:
           entity_id: counter.wake_word_detections_today
 
+  # disabled 2026-11-09: restarts the removed wyoming stack (#977)
   - id: voice_tv_noise_mode_on
     alias: "Voice: TV Noise Mode ON"
+    initial_state: false
     trigger:
       - platform: state
         entity_id: media_player.televizor
@@ -348,8 +350,10 @@ automation:
       - service: shell_command.voice_restart_services
     mode: single
 
+  # disabled 2026-11-09: restarts the removed wyoming stack (#977)
   - id: voice_tv_noise_mode_off
     alias: "Voice: TV Noise Mode OFF"
+    initial_state: false
     trigger:
       - platform: state
         entity_id: media_player.televizor
@@ -389,14 +393,16 @@ command_line:
   - sensor:
       name: "Wyoming Satellite Health"
       unique_id: wyoming_satellite_health
-      command: "nc -z wyoming-satellite 10700 && echo running || echo stopped"
+      # wyoming stack removed 2026-11-09 (#977): host no longer resolves, report stopped
+      command: "echo stopped"
       scan_interval: 30
       value_template: "{{ value }}"
 
   - sensor:
       name: "Wyoming OpenWakeWord Health"
       unique_id: wyoming_porcupine1_health
-      command: "nc -z wyoming-openwakeword 10400 && echo running || echo stopped"
+      # wyoming stack removed 2026-11-09 (#977): host no longer resolves, report stopped
+      command: "echo stopped"
       scan_interval: 30
       value_template: "{{ value }}"
 

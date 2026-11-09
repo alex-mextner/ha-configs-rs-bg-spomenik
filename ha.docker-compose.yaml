@@ -81,7 +81,10 @@ services:
     # player could reach, so nothing ever played. HA and MA now both use host networking;
     # the bridge gateway and localhost endpoints continue to work.
     image: ghcr.io/music-assistant/server:2.10.4
-    user: "1000:1000"
+    # root: AirPlay 2 (cliairplay) must bind UDP 319/320 for PTP. The Yandex speaker receiver
+    # (station-airplay) answers NTP timing with 461, so MA could not play to it as uid 1000
+    # (host networking => no per-container ip_unprivileged_port_start sysctl). Default caps only.
+    user: "0:0"
     network_mode: host
     volumes:
       - /home/ultra/music-assistant:/data
@@ -117,7 +120,13 @@ services:
     networks:
       - ha-net
 
-  wyoming-openwakeword:
+  # Stopped 2026-11-09 per HyperCalendarBot#977: the HA TV-noise automation
+  # force-recreated this container on every TV on/off and the openwakeword model
+  # reload on the 3.7 GB host (zero headroom) thrashed it into PSI io 47% / load 36,
+  # killing the cloudflared tunnel (prod 502 ~7 min, 18:18Z).
+  # Wake word has been dead since 2026-09-24 (threshold "1.0" = never fires).
+  # Re-enable only with a wakebench-passing model AND a memory limit.
+  wyoming-openwakeword-disabled:
     # Preserve callbacks to HA after HA leaves the bridge network.
     extra_hosts:
       - "homeassistant:host-gateway"
@@ -148,6 +157,7 @@ services:
       options: {max-size: "50m", max-file: "3"}
     networks:
       - ha-net
+    profiles: ["disabled"]
 
   wyoming-faster-whisper:
     # Preserve callbacks to HA after HA leaves the bridge network.
@@ -180,7 +190,9 @@ services:
     networks:
       - ha-net
 
-  wyoming-satellite:
+  # Stopped 2026-11-09 with wyoming-openwakeword (see its note above);
+  # re-enable only together with a working wake word stack.
+  wyoming-satellite-disabled:
     # Preserve callbacks to HA after HA leaves the bridge network.
     extra_hosts:
       - "homeassistant:host-gateway"
@@ -218,6 +230,7 @@ services:
       options: {max-size: "50m", max-file: "3"}
     networks:
       - ha-net
+    profiles: ["disabled"]
 
   respeaker-tuning:
     # Reads the XMOS XVF-3000 direction-of-arrival and voice detectors over USB
