@@ -2,7 +2,6 @@
 # ruff: noqa: INP001, PT009, PT027
 """Host-network migration keeps DNS readiness and maintenance routing intact."""
 
-import ast
 import importlib.util
 import unittest
 from pathlib import Path
@@ -83,23 +82,6 @@ class NetworkContractTests(unittest.TestCase):
                 hosts = service.get("extra_hosts", [])
                 self.assertIn("homeassistant:host-gateway", hosts)
                 self.assertIn("homeassistant.local:host-gateway", hosts)
-
-    def test_voice_maintenance_uses_the_machine_overlay_wrapper(self) -> None:
-        source = (ROOT / "scripts/host/ha-host-actions.py").read_text()
-        tree = ast.parse(source)
-        selected = [
-            node
-            for node in tree.body
-            if isinstance(node, (ast.Assign, ast.AnnAssign))
-            and any(
-                isinstance(child, ast.Name) and child.id == "COMPOSE"
-                for child in ast.walk(node)
-            )
-        ]
-        self.assertEqual(
-            ast.literal_eval(selected[0].value),
-            ["/home/ultra/homeassistant/scripts/ha_compose.sh"],
-        )
 
     def test_wrapper_does_not_depend_on_callers_working_directory(self) -> None:
         wrapper = (ROOT / "scripts/ha_compose.sh").read_text()

@@ -46,7 +46,7 @@ shared network automatically. A fresh host creates the specified network directl
 
 ## Deployment and migration
 
-Use `scripts/ha_compose.sh` instead of invoking raw Compose, including voice-stack maintenance. It loads optional
+Use `scripts/ha_compose.sh` instead of invoking raw Compose. It loads optional
 machine overlays from the root-owned `/etc/default/ha-compose`, then always
 applies `docker/bluetooth/compose.final.yaml` last. The final overlay removes
 legacy bridge attachments and published HA ports, but preserves machine image
