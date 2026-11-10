@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -26,7 +27,7 @@ from typing import Any
 CONFIG_DIR = Path.home() / ".config" / "ha-host-actions"
 TOKEN_FILE = CONFIG_DIR / "token"
 PASSWORD_FILE = CONFIG_DIR / "desktop-password"
-KODI_UNIT = os.environ.get("KODI_UNIT", "kodi.service")
+KODI_APP_ID = "tv.kodi.Kodi"
 AGENT_BROWSER = Path(os.environ.get("AGENT_BROWSER", "/home/linuxbrew/.linuxbrew/bin/agent-browser"))
 RUTRACKER_LOGIN_URL = os.environ.get(
     "RUTRACKER_LOGIN_URL", "https://rutracker.org/forum/login.php"
@@ -36,8 +37,8 @@ RUTRACKER_BROWSER_SESSION = os.environ.get(
 )
 KODI_JSONRPC_URL = os.environ.get("KODI_JSONRPC_URL", "http://127.0.0.1:8080/jsonrpc")
 KODI_USERNAME = os.environ.get("KODI_USERNAME", "kodi")
-KODI_PASSWORD = os.environ.get("KODI_PASSWORD", "")
-KODI_USERDATA_DIR = Path(os.environ.get("KODI_USERDATA_DIR", str(Path.home() / ".kodi/userdata")))
+KODI_PASSWORD = os.environ.get("KODI_PASSWORD", "kodi")
+KODI_USERDATA_DIR = Path(os.environ.get("KODI_USERDATA_DIR", str(Path.home() / ".var/app/tv.kodi.Kodi/data/userdata")))
 KODI_LIBRARY_DIR = Path(os.environ.get("KODI_LIBRARY_DIR", str(Path.home() / "KodiLibrary")))
 KODI_SERIES_DIR = KODI_LIBRARY_DIR / "Series"
 KODI_MOVIES_DIR = KODI_LIBRARY_DIR / "Movies"
@@ -110,11 +111,7 @@ def run(
 
 
 def dbus_call(args: list[str], timeout: float = 5.0) -> dict[str, Any]:
-    try:
-        proc = run(["gdbus", "call", "--session", *args], timeout=timeout)
-    except FileNotFoundError:
-        # gdbus is absent on headless hosts; report the probe as unavailable.
-        return {"cmd": " ".join(args), "returncode": None, "stdout": None, "stderr": "gdbus unavailable"}
+    proc = run(["gdbus", "call", "--session", *args], timeout=timeout)
     return {
         "cmd": " ".join(args),
         "returncode": proc.returncode,
@@ -171,19 +168,64 @@ def lock_screen() -> dict[str, Any]:
 
 
 def kodi_running() -> bool:
-    return run(["systemctl", "is-active", "--quiet", KODI_UNIT], timeout=3).returncode == 0
+    return bool(kodi_pids())
+
+
+def kodi_pids() -> list[int]:
+    proc = run(["ps", "-eo", "pid=,uid=,comm=,args="], timeout=3)
+    if proc.returncode != 0:
+        return []
+
+    pids: list[int] = []
+    current_uid = str(os.getuid())
+    own_pid = os.getpid()
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid_s, uid_s, comm, args = parts
+        if uid_s != current_uid:
+            continue
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        if pid == own_pid:
+            continue
+        if "ha-host-actions.py" in args:
+            continue
+        if (
+            "flatpak run tv.kodi.Kodi" in args
+            or "/app/bin/kodi" in args
+            or comm in {"kodi", "kodi.bin"}
+        ):
+            pids.append(pid)
+    return pids
 
 
 def start_kodi() -> dict[str, Any]:
     if kodi_running():
         return {"kodi": "already_running"}
 
-    # kodi.service is a system unit (DRM/ALSA access, see /usr/local/bin/kodi-session); the sudoers
-    # drop-in /etc/sudoers.d/ha-kodi lets this user start/stop exactly that unit.
-    proc = run(["sudo", "-n", "systemctl", "start", "--no-block", KODI_UNIT], timeout=10)
-    if proc.returncode != 0:
-        raise RuntimeError(f"systemctl start {KODI_UNIT} failed: {proc.stderr.strip()[-300:]}")
-    return {"kodi": "starting", "unit": KODI_UNIT}
+    unit = f"ha-kodi-projector-{int(time.time())}"
+    proc = subprocess.Popen(
+        [
+            "systemd-run",
+            "--user",
+            "--scope",
+            "--collect",
+            "--unit",
+            unit,
+            "flatpak",
+            "run",
+            KODI_APP_ID,
+        ],
+        env=session_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"kodi": "starting", "pid": proc.pid, "unit": unit}
 
 
 def kodi_jsonrpc(method: str, params: dict[str, Any] | None = None, timeout: float = 5.0) -> dict[str, Any]:
@@ -278,29 +320,41 @@ def stop_kodi() -> dict[str, Any]:
         return {"kodi": "not_running"}
 
     rpc_result = kodi_jsonrpc_quit()
-    # Kodi needs a few seconds to shut down on this board; killing the unit mid-shutdown also
-    # kills its virtual X server and Kodi then dies with an X IO error (unit left "failed").
-    deadline = time.monotonic() + 8
-    while kodi_running() and time.monotonic() < deadline:
-        time.sleep(0.5)
+    time.sleep(3)
     if not kodi_running():
         return {"kodi": "stopped", "method": "jsonrpc", "jsonrpc": rpc_result}
 
-    stop = run(["sudo", "-n", "systemctl", "stop", KODI_UNIT], timeout=20)
+    flatpak = run(["flatpak", "kill", KODI_APP_ID], timeout=5)
+    time.sleep(1)
+    if not kodi_running():
+        return {
+            "kodi": "stopped",
+            "method": "flatpak_kill",
+            "jsonrpc": rpc_result,
+            "flatpak_returncode": flatpak.returncode,
+        }
+
+    killed_pids = kodi_pids()
+    for pid in killed_pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     return {
-        "kodi": "stopped" if not kodi_running() else "stop_requested",
-        "method": "systemctl_stop",
+        "kodi": "stop_requested",
+        "method": "pid_term",
         "jsonrpc": rpc_result,
-        "systemctl_returncode": stop.returncode,
+        "flatpak_returncode": flatpak.returncode,
+        "pids": killed_pids,
     }
 
 
 def projector_on() -> dict[str, Any]:
-    return {"kodi": start_kodi()}
+    return {"unlock": wake_and_unlock_screen(), "kodi": start_kodi()}
 
 
 def projector_off() -> dict[str, Any]:
-    return {"kodi": stop_kodi()}
+    return {"kodi": stop_kodi(), "lock": lock_screen()}
 
 
 def episode_match(text: str) -> re.Match[str] | None:
@@ -664,6 +718,12 @@ def ensure_kodi_video_db_sources() -> dict[str, Any]:
 
 def ensure_kodi_library_setup() -> dict[str, Any]:
     result: dict[str, Any] = {}
+    try:
+        override = run(["flatpak", "override", "--user", f"--filesystem={KODI_LIBRARY_DIR}:ro", KODI_APP_ID], timeout=10)
+        result["flatpak"] = {"returncode": override.returncode, "stderr": override.stderr.strip()[-500:]}
+    except Exception as exc:  # noqa: BLE001 - setup should still continue.
+        result["flatpak"] = {"error": repr(exc)}
+
     result["sources_xml"] = ensure_kodi_sources_xml()
     try:
         result["video_db"] = ensure_kodi_video_db_sources()
@@ -962,6 +1022,33 @@ def health() -> dict[str, Any]:
         "screen_active_raw": active.get("stdout"),
         "password_file_present": PASSWORD_FILE.exists(),
     }
+
+
+# Voice stack controls. The HA container has no docker CLI, so HA's
+# shell_command.voice_* call these endpoints instead (fixed allow-list, no args).
+COMPOSE = ["/home/ultra/homeassistant/scripts/ha_compose.sh"]
+SATELLITE = "homeassistant-wyoming-satellite-1"
+APLAY = "aplay -D plughw:CARD=ArrayUAC10,DEV=0"
+VOICE_COMMANDS: dict[str, list[str]] = {
+    "restart-services": [*COMPOSE, "up", "-d", "--force-recreate", "wyoming-openwakeword", "wyoming-satellite"],
+    "restart-satellite": [*COMPOSE, "up", "-d", "--force-recreate", "wyoming-satellite"],
+    "stop-recording": [*COMPOSE, "stop", "wyoming-satellite"],
+    "start-recording": [*COMPOSE, "start", "wyoming-satellite"],
+    "play-last-wake": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} $(ls -1t /tmp/debug/*-wake.wav | head -n1)"],
+    "play-last-stt": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} $(ls -1t /tmp/debug/*-stt.wav | head -n1)"],
+    "play-awake": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} /app/sounds/awake.wav"],
+    "play-done": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} /app/sounds/done.wav"],
+}
+
+
+def voice_action(name: str):
+    def action() -> dict[str, Any]:
+        proc = subprocess.run(VOICE_COMMANDS[name], text=True, capture_output=True, timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(f"{name} failed ({proc.returncode}): {proc.stderr.strip()[-500:]}")
+        return {"voice": name, "returncode": proc.returncode}
+
+    return action
 
 
 # Network devices (router-cli). HA's network-devices card reads the inventory and
@@ -1440,6 +1527,7 @@ ROUTES = {
     ("POST", "/screen/lock"): lock_screen,
     ("POST", "/rutracker/login"): rutracker_browser_login,
     ("GET", "/health"): health,
+    **{("POST", f"/voice/{name}"): voice_action(name) for name in VOICE_COMMANDS},
     ("GET", "/network/inventory"): network_inventory,
     ("POST", "/network/inventory"): network_inventory,
     ("POST", "/network/scan"): network_scan,
