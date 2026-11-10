@@ -102,23 +102,3 @@ automation:
             {% set line = '[' ~ now().strftime('%H:%M') ~ '] responding -> idle (done)' %}
             {{ [hist, line] | select('defined') | join('\n') | trim }}
     mode: single
-
-  - id: voice_pause_stop_satellite
-    alias: "Voice: Pause Stop Satellite"
-    trigger:
-      - platform: state
-        entity_id: input_boolean.voice_pipeline_paused
-        to: "on"
-    action:
-      - service: shell_command.voice_stop_recording
-    mode: single
-
-  - id: voice_resume_start_satellite
-    alias: "Voice: Resume Start Satellite"
-    trigger:
-      - platform: state
-        entity_id: input_boolean.voice_pipeline_paused
-        to: "off"
-    action:
-      - service: shell_command.voice_start_recording
-    mode: single
