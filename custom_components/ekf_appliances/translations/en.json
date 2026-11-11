@@ -1,0 +1,45 @@
+{
+  "title": "EKF Appliances",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect EKF appliances",
+        "description": "Create controls for the Haier air conditioner and Toshiba projector using an existing EKF remote.",
+        "data": {
+          "remote_entity_id": "Infrared remote",
+          "temperature_entity_id": "Room temperature sensor",
+          "projector_power_entity_id": "Projector power helper",
+          "projector_on_script": "Projector startup script",
+          "projector_off_script": "Projector shutdown script"
+        },
+        "data_description": {
+          "projector_on_script": "Leave empty to use the existing Projector turn on script.",
+          "projector_off_script": "Leave empty to use the existing Projector turn off script."
+        }
+      },
+      "reconfigure": {
+        "title": "Change appliance connections",
+        "description": "Choose the remote, room sensor, power helper, and scripts used by these appliances.",
+        "data": {
+          "remote_entity_id": "Infrared remote",
+          "temperature_entity_id": "Room temperature sensor",
+          "projector_power_entity_id": "Projector power helper",
+          "projector_on_script": "Projector startup script",
+          "projector_off_script": "Projector shutdown script"
+        },
+        "data_description": {
+          "projector_on_script": "Leave empty to use the existing Projector turn on script.",
+          "projector_off_script": "Leave empty to use the existing Projector turn off script."
+        }
+      }
+    },
+    "error": {
+      "invalid_entity": "Select an existing entity of the requested type."
+    },
+    "abort": {
+      "already_configured": "This infrared remote is already configured.",
+      "already_in_progress": "This infrared remote is already being configured.",
+      "reconfigure_successful": "The appliance connections have been updated."
+    }
+  }
+}

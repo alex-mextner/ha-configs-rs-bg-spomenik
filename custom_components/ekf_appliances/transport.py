@@ -12,6 +12,7 @@ class Transport:
     def __init__(self, send: Callable[[str], Awaitable[None]]) -> None:
         self._send = send
         self._lock = asyncio.Lock()
+        self._busy_until = 0.0
 
     async def async_send(self, pulses: Sequence[int], *, repeats: int = 1, gap: float = 0) -> None:
         """Send full single frames, releasing the lock even on failure/cancellation."""
@@ -21,7 +22,20 @@ class Transport:
             raise ValueError("Repeat delay must be finite and nonnegative")
         command = encode_pulses(pulses)
         async with self._lock:
+            loop = asyncio.get_running_loop()
+            remaining = self._busy_until - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._busy_until = 0.0
             for index in range(repeats):
                 if index:
                     await asyncio.sleep(gap)
-                await self._send(command)
+                try:
+                    await self._send(command)
+                finally:
+                    # Preserve this deadline if a service or waiting task is cancelled.
+                    self._busy_until = loop.time() + sum(pulses) / 1_000_000
+                # Tuya Local queues packets; service return is not waveform completion.
+                # Keep the shared lock through the final frame as well.
+                await asyncio.sleep(sum(pulses) / 1_000_000)
+                self._busy_until = 0.0

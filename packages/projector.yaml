@@ -1,11 +1,10 @@
-# Projector — single media device on top of the ESP IR buttons.
+# Projector power helper and Kodi/source automation.
 #
-# The ESP exposes 12 raw IR buttons (button.projector_*). This package
-# wraps the media-ish subset (power / play-pause / volume / mute) into one
-# `universal` media_player so it reads as a single device, and models the
-# power quirk: the projector turns ON with one press but needs TWO presses
-# ~1s apart to turn OFF. State is ASSUMED (fire-and-forget IR has no
-# feedback) — the physical projector remote can desync input_boolean below.
+# The EKF Appliances integration provides the media player and the twelve
+# button.projector_* IR controls through remote.ekf_connect_ir. Keep these
+# script/entity IDs stable for existing dashboards, automations and Alice.
+# Power is assumed because the projector does not report its state over IR.
+# Turning off requires two power frames, three seconds apart.
 
 input_boolean:
   projector_power:
@@ -84,40 +83,3 @@ automation:
               - if: "{{ is_state('input_text.tv_source', 'projector') }}"
                 then:
                   - action: script.source_to_chromecast
-
-media_player:
-  # Commands-only universal player (no children) — state comes from the
-  # assumed-power input_boolean. Volume is relative (vol±/mute buttons),
-  # so no slider/level is exposed. Source cycling stays a raw button —
-  # the projector can only step inputs, not jump to a named one.
-  - platform: universal
-    name: Projector
-    unique_id: projector_ir
-    device_class: tv
-    commands:
-      turn_on:
-        action: script.projector_turn_on
-      turn_off:
-        action: script.projector_turn_off
-      toggle:
-        action: script.projector_toggle
-      volume_up:
-        action: button.press
-        target: { entity_id: button.projector_vol_up }
-      volume_down:
-        action: button.press
-        target: { entity_id: button.projector_vol_down }
-      volume_mute:
-        action: button.press
-        target: { entity_id: button.projector_mute }
-      media_play:
-        action: button.press
-        target: { entity_id: button.projector_play_pause }
-      media_pause:
-        action: button.press
-        target: { entity_id: button.projector_play_pause }
-      media_play_pause:
-        action: button.press
-        target: { entity_id: button.projector_play_pause }
-    attributes:
-      state: input_boolean.projector_power
