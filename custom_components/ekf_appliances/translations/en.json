@@ -16,8 +16,7 @@
           "tv_androidtv_entity_id": "Android TV Remote media player",
           "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
           "tv_kodi_entity_id": "Kodi media player",
-          "tv_source_entity_id": "Current television source helper",
-          "tv_network_protocol": "Samsung network protocol"
+          "tv_source_entity_id": "Current television source helper"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
@@ -28,8 +27,7 @@
           "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
           "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
           "tv_kodi_entity_id": "Optional. Kodi controls when the television source is pc or kodi. Selecting the separate projector does not change television playback controls.",
-          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast.",
-          "tv_network_protocol": "Normally keep the current protocol. WebSocket 8001 verifies the powered-on TV and authorized connection without sending keys, then updates the existing Samsung integration."
+          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast."
         }
       },
       "reconfigure": {
@@ -46,8 +44,7 @@
           "tv_androidtv_entity_id": "Android TV Remote media player",
           "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
           "tv_kodi_entity_id": "Kodi media player",
-          "tv_source_entity_id": "Current television source helper",
-          "tv_network_protocol": "Samsung network protocol"
+          "tv_source_entity_id": "Current television source helper"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
@@ -58,31 +55,19 @@
           "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
           "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
           "tv_kodi_entity_id": "Optional. Kodi controls when the television source is pc or kodi. Selecting the separate projector does not change television playback controls.",
-          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast.",
-          "tv_network_protocol": "Normally keep the current protocol. WebSocket 8001 verifies the powered-on TV and authorized connection without sending keys, then updates the existing Samsung integration."
+          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast."
         }
       }
     },
     "error": {
       "invalid_entity": "Select an existing entity of the requested type.",
       "invalid_tv_entity": "Select an existing TV from the Samsung Smart TV integration.",
-      "different_cast_player": "Select the same Chromecast in Music Assistant.",
-      "invalid_tv_protocol": "Select a network protocol from the list.",
-      "tv_network_unavailable": "Could not verify WebSocket on this TV. Turn the TV on and try again.",
-      "tv_network_changed": "Samsung configuration changed during validation. Try again."
+      "different_cast_player": "Select the same Chromecast in Music Assistant."
     },
     "abort": {
       "already_configured": "This infrared remote is already configured.",
       "already_in_progress": "This infrared remote is already being configured.",
       "reconfigure_successful": "The appliance connections have been updated."
-    }
-  },
-  "selector": {
-    "tv_network_protocol": {
-      "options": {
-        "current": "Keep current",
-        "websocket_8001": "WebSocket — port 8001"
-      }
     }
   }
 }
