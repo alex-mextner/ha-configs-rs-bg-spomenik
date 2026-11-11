@@ -4,39 +4,44 @@
     "step": {
       "user": {
         "title": "Connect EKF appliances",
-        "description": "Create controls for the Haier air conditioner and Toshiba projector using an existing EKF remote.",
+        "description": "Create controls for the Haier air conditioner and Toshiba projector using an existing EKF remote. Optionally select a Samsung TV.",
         "data": {
           "remote_entity_id": "Infrared remote",
           "temperature_entity_id": "Room temperature sensor",
           "projector_power_entity_id": "Projector status sensor",
           "projector_on_script": "Projector startup script",
-          "projector_off_script": "Projector shutdown script"
+          "projector_off_script": "Projector shutdown script",
+          "tv_entity_id": "Samsung TV"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
           "projector_off_script": "Leave empty to use the existing Projector turn off script.",
-          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection."
+          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection.",
+          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls."
         }
       },
       "reconfigure": {
         "title": "Change appliance connections",
-        "description": "Choose the remote, room temperature sensor, projector status sensor, and scripts used by these appliances.",
+        "description": "Choose the remote, room temperature sensor, projector status sensor, and scripts used by these appliances. Optionally select a Samsung TV.",
         "data": {
           "remote_entity_id": "Infrared remote",
           "temperature_entity_id": "Room temperature sensor",
           "projector_power_entity_id": "Projector status sensor",
           "projector_on_script": "Projector startup script",
-          "projector_off_script": "Projector shutdown script"
+          "projector_off_script": "Projector shutdown script",
+          "tv_entity_id": "Samsung TV"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
           "projector_off_script": "Leave empty to use the existing Projector turn off script.",
-          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection."
+          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection.",
+          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls."
         }
       }
     },
     "error": {
-      "invalid_entity": "Select an existing entity of the requested type."
+      "invalid_entity": "Select an existing entity of the requested type.",
+      "invalid_tv_entity": "Select an existing TV from the Samsung Smart TV integration."
     },
     "abort": {
       "already_configured": "This infrared remote is already configured.",

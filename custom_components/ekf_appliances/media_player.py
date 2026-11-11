@@ -1,16 +1,32 @@
 """Projector media functions backed by verified keys and existing power scripts."""
+import logging
+
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components.media_player import (
     MediaPlayerEntity, MediaPlayerEntityFeature, MediaPlayerDeviceClass,
     MediaPlayerState,
 )
 from homeassistant.helpers.event import async_track_state_change_event
 
+from .const import CONF_TV_ENTITY_ID
 from .entity import EkfEntity
 from .runtime import ApplianceRuntime
+from .samsung_tv import SamsungTvMediaPlayer
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
-    async_add_entities([ProjectorMediaPlayer(entry.runtime_data)])
+    entities = [ProjectorMediaPlayer(entry.runtime_data)]
+    if entry.data.get(CONF_TV_ENTITY_ID):
+        try:
+            television = SamsungTvMediaPlayer(entry.runtime_data)
+        except HomeAssistantError as err:
+            _LOGGER.error("Cannot configure optional Samsung TV: %s", err)
+        else:
+            await television.coordinator.async_config_entry_first_refresh()
+            entities.append(television)
+    async_add_entities(entities)
 
 
 class ProjectorMediaPlayer(EkfEntity, MediaPlayerEntity):

@@ -1,0 +1,5 @@
+# Acknowledge commands while the TV confirms its power transition.
+yandex_smart_home:
+  entity_config:
+    media_player.ue48j5500_ue48j5500:
+      slow: true

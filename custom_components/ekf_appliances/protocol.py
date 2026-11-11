@@ -81,3 +81,27 @@ def encode_pulses(pulses: Sequence[int]) -> str:
         raise ValueError("IR timings must be positive 16-bit mark/space pairs")
     packed = struct.pack(f"<{len(pulses)}H", *pulses)
     return "b64:" + base64.b64encode(packed).decode("ascii")
+
+
+SAMSUNG_COMMANDS = MappingProxyType({"power": 0x02, "power_on": 0x99, "power_off": 0x98})
+SAMSUNG_HEADER = 4480
+SAMSUNG_MARK = 560
+SAMSUNG_ONE_SPACE = 1680
+SAMSUNG_FRAME_DURATION = 108080
+
+
+def samsung_pulses(command: str) -> tuple[int, ...]:
+    """Encode one Samsung32 frame with the physically verified EKF timings.
+
+    Address 0x07 is repeated, then the command and its complement, all LSB
+    first. Literal wire vectors are independently decoded in the tests.
+    """
+    if command not in SAMSUNG_COMMANDS:
+        raise ValueError(f"Unknown Samsung command: {command}")
+    key = SAMSUNG_COMMANDS[command]
+    pulses = [SAMSUNG_HEADER, SAMSUNG_HEADER]
+    for byte in (0x07, 0x07, key, key ^ 255):
+        for bit in range(8):
+            pulses.extend((SAMSUNG_MARK, SAMSUNG_ONE_SPACE if byte & (1 << bit) else SAMSUNG_MARK))
+    pulses.append(SAMSUNG_MARK)
+    return (*pulses, SAMSUNG_FRAME_DURATION - sum(pulses))
