@@ -24,7 +24,9 @@ from .protocol import samsung_pulses
 from .runtime import ApplianceRuntime
 from .samsung_power import SamsungPowerCoordinator
 
-TV_TRANSITION_TIMEOUT = 35.0
+# The panel can take 51 seconds to expose its LAN endpoint after one IR ON.
+# Keep duplicate requests guarded until that feedback arrives.
+TV_TRANSITION_TIMEOUT = 75.0
 SAMSUNG_ON_COMMAND = "power_on"
 SAMSUNG_OFF_COMMAND = "power_off"
 _NATIVE_SERVICES = {
