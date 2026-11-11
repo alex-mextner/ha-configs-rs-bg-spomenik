@@ -1,0 +1,7 @@
+{
+  "activate_source": "0",
+  "wake_devices": "231",
+  "standby_devices": "231",
+  "standby_tv_on_pc_standby": "0",
+  "send_inactive_source": "0"
+}
