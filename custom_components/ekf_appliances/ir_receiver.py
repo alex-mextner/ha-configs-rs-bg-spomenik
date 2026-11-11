@@ -41,7 +41,10 @@ class IrReceiver:
         self.mapper = RemoteMapper()
         self.last_received = None
         self.last_error = None
-        self._config = SimpleNamespace(dps=lambda: [])
+        self._config = SimpleNamespace(
+            dps=lambda: [],
+            unique_id=lambda device_id: f"ekf_ir_observer_{runtime.entry.entry_id}_{device_id}",
+        )
         self.entity_id = "event.ekf_universal_remote"
         self.unsub_services = self.hass.bus.async_listen("call_service", self._service_called)
 
