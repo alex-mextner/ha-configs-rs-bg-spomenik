@@ -1,5 +1,6 @@
 """Projector power scripts execute against real HA services without appliance I/O."""
 import asyncio
+from datetime import timedelta
 from pathlib import Path
 import sys
 import tempfile
@@ -10,6 +11,7 @@ from homeassistant.core import HomeAssistant, Context
 from homeassistant import loader
 from homeassistant.helpers import config_validation as cv, frame
 from homeassistant.helpers.script import Script
+from homeassistant.util import dt as dt_util
 
 PACKAGE = Path(__file__).resolve().parents[2] / "packages/projector.yaml"
 
@@ -36,6 +38,9 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
 
         async def helper(call):
             self.helper_writes.append(call.service)
+            self.hass.states.async_set(
+                "input_boolean.projector_power", "on" if call.service == "turn_on" else "off"
+            )
 
         async def lifecycle(call):
             self.lifecycle.append((call.domain, call.service, dict(call.data)))
@@ -57,7 +62,13 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
 
     async def run_sequence(self, sequence):
         script = Script(self.hass, cv.SCRIPT_SCHEMA(sequence), "Projector test", "script")
-        await script.async_run({"trigger": {"id": "off"}}, context=Context())
+        await script.async_run({"trigger": {"id": "off", "platform": "state"}}, context=Context())
+
+    def stable_on(self):
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.hass.states.get("binary_sensor.projector_hdmi_connected").last_changed = (
+            dt_util.utcnow() - timedelta(seconds=31)
+        )
 
     async def test_on_script_sends_one_power_without_claiming_helper_state(self):
         self.feedback_after_press = lambda count: self.hass.states.async_set(
@@ -73,7 +84,7 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.presses, [])
 
     async def test_off_script_confirms_only_while_feedback_remains_on(self):
-        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.stable_on()
         self.feedback_after_press = lambda count: self.hass.states.async_set(
             "binary_sensor.projector_hdmi_connected", "off"
         ) if count == 2 else None
@@ -82,7 +93,7 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.helper_writes, [])
 
     async def test_off_script_skips_second_power_after_observed_disconnect(self):
-        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.stable_on()
         self.feedback_after_press = lambda count: self.hass.states.async_set(
             "binary_sensor.projector_hdmi_connected", "off"
         )
@@ -105,7 +116,7 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
         await self.run_sequence(self.config["automation"][0]["action"])
         self.assertEqual(self.helper_writes, ["turn_off"])
         self.assertEqual([item[:2] for item in self.lifecycle], [
-            ("rest_command", "host_projector_off"), ("script", "source_to_chromecast")
+            ("rest_command", "host_projector_off"), ("input_text", "set_value")
         ])
         self.assertEqual(self.presses, [])
 
@@ -114,4 +125,29 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
         await self.run_sequence(self.config["automation"][0]["action"])
         self.assertEqual(self.helper_writes, ["turn_off"])
         self.assertEqual(self.lifecycle, [])
+        self.assertEqual(self.presses, [])
+
+
+    async def test_unknown_recovery_does_not_restart_kodi(self):
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.hass.states.async_set("input_boolean.projector_power", "on")
+        await self.run_sequence(self.config["automation"][0]["action"])
+        self.assertEqual(self.helper_writes, [])
+        self.assertEqual(self.lifecycle, [])
+
+    async def test_new_observed_on_starts_kodi_once(self):
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.hass.states.async_set("input_boolean.projector_power", "off")
+        await self.run_sequence(self.config["automation"][0]["action"])
+        await self.run_sequence(self.config["automation"][0]["action"])
+        self.assertEqual(self.helper_writes, ["turn_on"])
+        self.assertEqual([item[:2] for item in self.lifecycle], [
+            ("rest_command", "host_projector_on"), ("input_text", "set_value")
+        ])
+
+    async def test_power_off_waits_during_warmup_without_sending(self):
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        with self.assertRaises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await self.run_sequence(self.config["script"]["projector_turn_off"]["sequence"])
         self.assertEqual(self.presses, [])

@@ -17,6 +17,7 @@ from .transport import Transport
 
 
 PROJECTOR_TRANSITION_TIMEOUT = 35.0
+PROJECTOR_SHUTDOWN_TIMEOUT = 75.0
 
 
 class ApplianceRuntime:
@@ -97,6 +98,10 @@ class ApplianceRuntime:
                 )
             else:
                 observed = self.projector_power_state
+                if observed is None and turn_on is not None:
+                    raise HomeAssistantError(
+                        "Projector power is unknown; use its single Power button"
+                    )
                 target = (not observed if observed is not None else None) if turn_on is None else turn_on
                 if observed is not None and target == observed:
                     return
@@ -117,7 +122,11 @@ class ApplianceRuntime:
     async def _async_projector_transition(self, target: bool | None, observed: bool | None) -> None:
         """Run the physical sequence, then wait for confirmation without guessing."""
         try:
-            async with asyncio.timeout(PROJECTOR_TRANSITION_TIMEOUT):
+            timeout = (
+                PROJECTOR_SHUTDOWN_TIMEOUT
+                if target is False else PROJECTOR_TRANSITION_TIMEOUT
+            )
+            async with asyncio.timeout(timeout):
                 if observed is None:
                     # Unknown power never permits an automatic confirmation press.
                     await self.async_send_projector("power")

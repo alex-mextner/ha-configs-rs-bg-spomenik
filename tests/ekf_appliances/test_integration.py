@@ -317,20 +317,22 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.player.state, "off")
 
-    async def test_unknown_native_power_sends_once_then_waits_for_real_feedback(self):
+    async def test_unknown_absolute_power_does_not_guess_or_transmit(self):
         self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "unknown")
-        with patch("custom_components.ekf_appliances.runtime.PROJECTOR_TRANSITION_TIMEOUT", 0.5, create=True):
-            request = asyncio.create_task(self.player.async_turn_on())
-            for _ in range(20):
-                if self.commands or request.done():
-                    break
-                await self.real_sleep(0)
-            before = (self.player.state, len(self.commands), list(self.script_calls))
-            self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
-            result = await asyncio.gather(request, return_exceptions=True)
-        self.assertEqual(before, (None, 1, []))
-        self.assertEqual(result, [None])
-        self.assertEqual(self.player.state, "on")
+        for action in (self.player.async_turn_on, self.player.async_turn_off):
+            with self.assertRaisesRegex(HomeAssistantError, "unknown"):
+                await action()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.script_calls, [])
+        self.assertIsNone(self.player.state)
+
+    async def test_unknown_toggle_sends_only_one_explicit_power(self):
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "unknown")
+        with patch("custom_components.ekf_appliances.runtime.PROJECTOR_TRANSITION_TIMEOUT", 0.03):
+            await self.player.async_toggle()
+        self.assertEqual(len(self.commands), 1)
+        self.assertEqual(self.script_calls, [])
+        self.assertIsNone(self.player.state)
 
     async def test_projector_media_controls_and_button_use_same_verified_frame(self):
         await self.attach(self.player, "media_player.ekf_projector")
