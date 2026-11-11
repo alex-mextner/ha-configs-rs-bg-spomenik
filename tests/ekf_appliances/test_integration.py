@@ -27,7 +27,7 @@ from custom_components.ekf_appliances.button import ProjectorButton
 CONFIG = {
     "remote_entity_id":"remote.ekf_connect_ir",
     "temperature_entity_id":"sensor.room_temperature",
-    "projector_power_entity_id":"input_boolean.projector_power",
+    "projector_power_entity_id":"binary_sensor.projector_hdmi_connected",
     "projector_on_script":"script.projector_turn_on",
     "projector_off_script":"script.projector_turn_off",
 }
@@ -55,7 +55,7 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
 
         self.hass.states.async_set("remote.ekf_connect_ir", "on")
         self.hass.states.async_set("sensor.room_temperature", "23.5", {"unit_of_measurement":"°C"})
-        self.hass.states.async_set("input_boolean.projector_power", "off")
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "off")
         self.commands = []
         self.script_calls = []
         self.fail_at = None
@@ -69,11 +69,11 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
 
         async def on(call):
             self.script_calls.append("on")
-            self.hass.states.async_set("input_boolean.projector_power", "on")
+            self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
 
         async def off(call):
             self.script_calls.append("off")
-            self.hass.states.async_set("input_boolean.projector_power", "off")
+            self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "off")
 
         self.hass.services.async_register("remote", "send_command", send)
         self.hass.services.async_register("script", "projector_turn_on", on)
@@ -260,14 +260,77 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.script_calls, ["on","off"])
         self.assertEqual(self.commands, [])
 
-    async def test_unknown_projector_power_is_unavailable_and_not_guessed(self):
+    async def test_unknown_projector_power_stays_available_without_claiming_on(self):
         await self.attach(self.player, "media_player.ekf_projector")
-        self.hass.states.async_set("input_boolean.projector_power", "unknown")
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "unknown")
         await self.hass.async_block_till_done()
-        self.assertFalse(self.player.available)
-        with self.assertRaises(HomeAssistantError):
-            await self.player.async_turn_on()
+        self.assertTrue(self.player.available)
+        self.assertIsNone(self.player.state)
+        self.assertFalse(self.player.assumed_state)
         self.assertEqual(self.script_calls, [])
+
+    async def test_projector_ignores_stale_helper_and_uses_observed_hdmi(self):
+        await self.attach(self.player, "media_player.ekf_projector")
+        self.hass.states.async_set("input_boolean.projector_power", "on")
+        self.assertEqual(self.player.state, "off")
+        self.assertFalse(self.player.assumed_state)
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.hass.states.get(self.player.entity_id).state, "on")
+        self.assertEqual(self.commands, [])
+
+    async def test_legacy_boolean_is_not_accepted_as_observed_power(self):
+        self.runtime.projector_power_entity_id = "input_boolean.projector_power"
+        self.hass.states.async_set("input_boolean.projector_power", "on")
+        self.assertIsNone(self.player.state)
+        self.assertTrue(self.player.available)
+
+    async def test_repeated_on_and_toggle_join_pending_boot_until_feedback(self):
+        began = asyncio.Event()
+        async def boot(call):
+            self.script_calls.append("on")
+            await self.runtime.async_send_projector("power")
+            began.set()
+        self.hass.services.async_register("script", "projector_turn_on", boot)
+        with patch("custom_components.ekf_appliances.runtime.PROJECTOR_TRANSITION_TIMEOUT", 0.5, create=True):
+            first = asyncio.create_task(self.player.async_turn_on())
+            await began.wait()
+            second = asyncio.create_task(self.player.async_turn_on())
+            toggle = asyncio.create_task(self.player.async_toggle())
+            await self.real_sleep(0.01)
+            before_feedback = (first.done(), list(self.script_calls), len(self.commands), self.player.state)
+            self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+            await asyncio.gather(first, second, toggle)
+        self.assertEqual(before_feedback, (False, ["on"], 1, "off"))
+        self.assertEqual(self.script_calls, ["on"])
+        self.assertEqual(self.player.state, "on")
+
+    async def test_concurrent_failed_boot_does_not_retry_power_or_fake_state(self):
+        async def no_feedback(call):
+            self.script_calls.append("on")
+            await self.runtime.async_send_projector("power")
+        self.hass.services.async_register("script", "projector_turn_on", no_feedback)
+        with patch("custom_components.ekf_appliances.runtime.PROJECTOR_TRANSITION_TIMEOUT", 0.03, create=True):
+            results = await asyncio.gather(self.player.async_turn_on(), self.player.async_turn_on(), return_exceptions=True)
+        self.assertTrue(all(isinstance(result, HomeAssistantError) for result in results), results)
+        self.assertEqual(self.script_calls, ["on"])
+        self.assertEqual(len(self.commands), 1)
+        self.assertEqual(self.player.state, "off")
+
+    async def test_unknown_native_power_sends_once_then_waits_for_real_feedback(self):
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "unknown")
+        with patch("custom_components.ekf_appliances.runtime.PROJECTOR_TRANSITION_TIMEOUT", 0.5, create=True):
+            request = asyncio.create_task(self.player.async_turn_on())
+            for _ in range(20):
+                if self.commands or request.done():
+                    break
+                await self.real_sleep(0)
+            before = (self.player.state, len(self.commands), list(self.script_calls))
+            self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+            result = await asyncio.gather(request, return_exceptions=True)
+        self.assertEqual(before, (None, 1, []))
+        self.assertEqual(result, [None])
+        self.assertEqual(self.player.state, "on")
 
     async def test_projector_media_controls_and_button_use_same_verified_frame(self):
         await self.attach(self.player, "media_player.ekf_projector")
@@ -352,3 +415,18 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(devices.async_get(after.device_id).via_device_id, gateway.id)
         self.assertEqual(self.commands, [])
         self.assertEqual(self.script_calls, [])
+
+    async def test_explicit_off_after_unknown_toggle_rechecks_observed_state(self):
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "unknown")
+        with patch("custom_components.ekf_appliances.runtime.PROJECTOR_TRANSITION_TIMEOUT", 0.04):
+            toggle = asyncio.create_task(self.player.async_toggle())
+            for _ in range(20):
+                if self.commands:
+                    break
+                await self.real_sleep(0)
+            self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+            off = asyncio.create_task(self.player.async_turn_off())
+            await asyncio.gather(toggle, off)
+        self.assertEqual(self.script_calls, ["off"])
+        self.assertEqual(self.player.state, "off")
+        self.assertEqual(len(self.commands), 1)

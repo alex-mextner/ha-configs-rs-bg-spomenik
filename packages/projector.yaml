@@ -1,85 +1,106 @@
-# Projector power helper and Kodi/source automation.
-#
-# The EKF Appliances integration provides the media player and the twelve
-# button.projector_* IR controls through remote.ekf_connect_ir. Keep these
-# script/entity IDs stable for existing dashboards, automations and Alice.
-# Power is assumed because the projector does not report its state over IR.
-# Turning off requires two power frames, three seconds apart.
+# Projector power is observed through the ODROID HDMI connector.
+# A local POWER key starts the projector in about 17 seconds; shutdown uses
+# a second confirmation press only while HDMI still reports connected.
+
+command_line:
+  - binary_sensor:
+      name: Projector HDMI connected
+      unique_id: projector_hdmi_connected
+      device_class: connectivity
+      command: "cat /sys/class/drm/card0-HDMI-A-1/status"
+      payload_on: connected
+      payload_off: disconnected
+      scan_interval: 1
+      command_timeout: 2
 
 input_boolean:
+  # Compatibility mirror for older source routing. Never used as power feedback.
   projector_power:
-    name: Projector power (assumed)
+    name: Projector power (HDMI observed)
     icon: mdi:projector
 
 script:
-  # One power frame = turn on. Mark assumed-on.
+  # Keep these sequence hooks for existing callers and the EKF config entry.
+  # No helper is changed until the HDMI sensor observes the physical transition.
   projector_turn_on:
     alias: Projector turn on
     mode: single
     sequence:
+      - condition: state
+        entity_id: binary_sensor.projector_hdmi_connected
+        state: "off"
       - action: button.press
         target: { entity_id: button.projector_power }
-      - action: input_boolean.turn_on
-        target: { entity_id: input_boolean.projector_power }
+      - wait_template: "{{ is_state('binary_sensor.projector_hdmi_connected', 'on') }}"
+        timeout: "00:00:35"
+        continue_on_timeout: false
 
-  # The projector requires a double power press ~3s apart to power off
-  # (single press just shows the "press again to power off" OSD). Mirror
-  # that here so a single media_player.turn_off actually powers it down.
   projector_turn_off:
     alias: Projector turn off
     mode: single
     sequence:
+      - condition: state
+        entity_id: binary_sensor.projector_hdmi_connected
+        state: "on"
       - action: button.press
         target: { entity_id: button.projector_power }
       - delay: "00:00:03"
+      - condition: state
+        entity_id: binary_sensor.projector_hdmi_connected
+        state: "on"
       - action: button.press
         target: { entity_id: button.projector_power }
-      - action: input_boolean.turn_off
-        target: { entity_id: input_boolean.projector_power }
+      - wait_template: "{{ is_state('binary_sensor.projector_hdmi_connected', 'off') }}"
+        timeout: "00:00:35"
+        continue_on_timeout: false
 
   projector_toggle:
-    alias: Projector toggle
+    alias: Projector power
     mode: single
     sequence:
-      - choose:
-          - conditions: "{{ is_state('input_boolean.projector_power', 'on') }}"
-            sequence:
-              - action: script.projector_turn_off
-        default:
-          - action: script.projector_turn_on
+      - action: media_player.toggle
+        target: { entity_id: media_player.projector }
 
 automation:
-  # Projector power drives the PC display/Kodi helper and the active source.
-  # Turning the projector on wakes/unlocks the desktop and starts Kodi, then
-  # marks the source as projector. Turning it off stops Kodi and locks the
-  # desktop. Only reverts TV source to chromecast if projector was actually
-  # active, so a background power correction does not hijack pc/chromecast.
-  # tv_source + source_to_chromecast live in universal_remote; packages merge.
-  - alias: Projector power follows source
+  # Startup also reconciles a stale compatibility helper without sending IR.
+  # Kodi/source lifecycle follows physical HDMI edges, including manual controls.
+  # Kodi runs on the ODROID (kodi.service); restore Chromecast only when
+  # projector was the active source, preserving PC/Chromecast routing.
+  - alias: Projector power follows HDMI
     id: projector_power_follows_source
     mode: queued
     trigger:
       - platform: state
-        entity_id: input_boolean.projector_power
-        from: "off"
+        entity_id: binary_sensor.projector_hdmi_connected
         to: "on"
-        id: "on"
       - platform: state
-        entity_id: input_boolean.projector_power
-        from: "on"
+        entity_id: binary_sensor.projector_hdmi_connected
         to: "off"
-        id: "off"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: template
+        value_template: "{{ states('binary_sensor.projector_hdmi_connected') in ['on', 'off'] }}"
     action:
       - choose:
-          - conditions: "{{ trigger.id == 'on' }}"
+          - conditions: "{{ is_state('binary_sensor.projector_hdmi_connected', 'on') }}"
             sequence:
+              - action: input_boolean.turn_on
+                target: { entity_id: input_boolean.projector_power }
               - action: rest_command.host_projector_on
               - action: input_text.set_value
                 target: { entity_id: input_text.tv_source }
                 data: { value: projector }
-          - conditions: "{{ trigger.id == 'off' }}"
+          - conditions: "{{ is_state('binary_sensor.projector_hdmi_connected', 'off') }}"
             sequence:
-              - action: rest_command.host_projector_off
+              - action: input_boolean.turn_off
+                target: { entity_id: input_boolean.projector_power }
               - if: "{{ is_state('input_text.tv_source', 'projector') }}"
                 then:
+                  - action: rest_command.host_projector_off
                   - action: script.source_to_chromecast
+# Alice can acknowledge the request while HDMI confirms the slow transition.
+yandex_smart_home:
+  entity_config:
+    media_player.projector:
+      slow: true
