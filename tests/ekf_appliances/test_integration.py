@@ -116,7 +116,7 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         self.tmp.cleanup()
 
-    async def test_setup_and_restore_never_transmit(self):
+    async def test_legacy_comfort_restore_normalizes_without_transmitting(self):
         restored = State("climate.old", "heat", {
             "temperature":27, "fan_mode":"low", "swing_mode":"vertical",
             "preset_mode":"comfort", "last_hvac_mode":"heat",
@@ -128,7 +128,23 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.climate.hvac_mode, "heat")
         self.assertEqual(self.climate.target_temperature, 27)
         self.assertEqual(self.climate.fan_mode, "low")
+        self.assertEqual(self.climate.swing_mode, "vertical")
+        self.assertEqual(self.climate.preset_mode, "none")
+        self.assertEqual(self.climate.extra_state_attributes["last_hvac_mode"], "heat")
         self.assertTrue(self.climate.assumed_state)
+
+    async def test_comfort_preset_is_not_exposed_or_accepted(self):
+        self.assertEqual(self.climate.preset_mode, "none")
+        await self.attach(self.climate, "climate.ekf_haier", State(
+            "climate.old", "heat", {"temperature":27, "preset_mode":"none"}
+        ))
+        self.assertEqual(self.climate.preset_modes, ["none", "sleep", "boost"])
+        with self.assertRaises(ServiceValidationError):
+            await self.climate.async_set_preset_mode("comfort")
+        self.assertEqual(self.climate.preset_mode, "none")
+        self.assertEqual(self.climate.hvac_mode, "heat")
+        self.assertEqual(self.climate.target_temperature, 27)
+        self.assertEqual(self.commands, [])
 
     async def test_off_temperature_change_is_saved_without_turning_on(self):
         await self.attach(self.climate, "climate.ekf_haier")

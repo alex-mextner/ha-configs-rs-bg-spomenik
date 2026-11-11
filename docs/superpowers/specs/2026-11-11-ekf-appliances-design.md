@@ -16,9 +16,9 @@ Create separate Toshiba projector and Haier HSU-12HT303/R2 devices using the con
 
 ## Haier
 
-Expose off/cool/heat/dry/fan_only/auto; 16–30°C in integer steps; fan auto/low/medium/high; swing off/vertical; presets none/sleep/comfort/boost. Current temperature comes only from the configured sensor, converting temperature units; unavailable, malformed, unknown, or non-finite readings become None. Restore desired settings and previous non-off mode without sending; default off. Target changes while off store the desired value without enabling the AC. Validate before state changes. Commit assumed operating state only after successful transmission; failures raise HA errors.
+Expose off/cool/heat/dry/fan_only/auto; 16–30°C in integer steps; fan auto/low/medium/high; swing off/vertical; presets none/sleep/boost. Current temperature comes only from the configured sensor, converting temperature units; unavailable, malformed, unknown, or non-finite readings become None. Restore desired settings and previous non-off mode without sending; default off. Target changes while off store the desired value without enabling the AC. Validate before state changes. Commit assumed operating state only after successful transmission; failures raise HA errors.
 
-Send complete fourteen-byte YRW02 state. Off bytes: `A6 90 00 02 00 A0 00 80 00 00 00 00 05 5D`. Byte 13 is sum(bytes 0–12) modulo 256. Header timings: 3000,3000,3000,4300µs. Send 112 bits MSB-first, mark 520µs and spaces 1650µs/650µs for 1/0; footer 520µs plus a 5000µs terminal space for Tuya. Exactly one complete frame per action with its waveform duration reserved; no long gap inside the frame. A retained deadline protects the final waveform after cancellation.
+Send complete fourteen-byte YRW02 state. Off bytes: `A6 90 00 00 00 A0 00 80 00 00 00 00 05 5B`. Byte 13 is sum(bytes 0–12) modulo 256. Header timings: 3000,3000,3000,4300µs. Send 112 bits MSB-first, mark 520µs and spaces 1650µs/650µs for 1/0; footer 520µs plus a 5000µs terminal space for Tuya. Exactly one complete frame per action with its waveform duration reserved; no long gap inside the frame. A retained deadline protects the final waveform after cancellation.
 
 Sources: existing `/home/ultra/esphome/components/haier_acyrw02`; IRremoteESP8266 2.9.0 [header](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.h) and [implementation](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.cpp). Independently implement these wire-format facts without vendoring that library.
 
@@ -37,3 +37,7 @@ Use stdlib unittest plus a separate no-network HA-image container with a read-on
 ## User correction and protocol repair
 
 The previous six-frame repetition was a workaround for old IR hardware, not a protocol requirement; the EKF sends one frame. Active full-state frames use command byte 0x05 following IRac::haierYrwo2, which calls setPower last before send. Heat/cool mode bits remain 4/1; physical mode confirmation is a deployment check. Device links use current HA via_device_id, avoiding legacy via_device failures during core entity renaming.
+
+## Health compatibility correction
+
+Disable Health/Filter (byte 3 bit 1) in every frame and remove the unsupported Comfort preset. Normalize restored legacy Comfort to None without transmitting or dropping the other valid settings. [IRremoteESP8266 issue #1894](https://github.com/crankyoldgit/IRremoteESP8266/issues/1894) independently documents an incorrect cooling indicator when heat is selected with Health enabled on another Haier model and supplies the working heat capture used for regression. Preserve native mode values, full-state Power5, one frame per action, and all projector behavior. Physical confirmation remains separate from encoder tests.

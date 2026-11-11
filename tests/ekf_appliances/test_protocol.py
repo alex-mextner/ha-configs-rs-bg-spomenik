@@ -14,7 +14,7 @@ class HaierProtocolTests(unittest.TestCase):
     def test_model_specific_off_frame_includes_checksum(self):
         self.assertEqual(
             protocol.haier_state("off", 24, "auto", "off", "none"),
-            bytes.fromhex("A6 90 00 02 00 A0 00 80 00 00 00 00 05 5D"),
+            bytes.fromhex("A6 90 00 00 00 A0 00 80 00 00 00 00 05 5B"),
         )
 
     def test_cool_frame_contains_every_setting_and_checksum(self):
@@ -35,9 +35,28 @@ class HaierProtocolTests(unittest.TestCase):
             bytes.fromhex("A6 00 00 00 40 60 00 40 80 00 00 00 05 0B"),
         )
 
-    def test_comfort_sets_health_without_boost(self):
-        state = protocol.haier_state("auto", 25, "medium", "vertical", "comfort")
-        self.assertEqual(state, bytes.fromhex("A6 9C 00 02 40 40 00 00 00 00 00 00 05 C9"))
+    def test_heat_matches_independent_working_health_off_capture(self):
+        # IRremoteESP8266 issue 1894: original remote, heat 18C, low fan.
+        # Its swing-down and Temp-Up button differ from this adapter's
+        # swing-off / full-state Power command; the other fields must match.
+        working = bytes.fromhex("A6 2A 00 00 40 60 00 80 00 00 00 00 00 F0")
+        state = protocol.haier_state("heat", 18, "low", "off", "none")
+        self.assertEqual(state[0], working[0])
+        self.assertEqual(state[1] >> 4, working[1] >> 4)
+        self.assertEqual(state[2:12], working[2:12])
+        self.assertEqual(state[1] & 15, 0)
+        self.assertEqual(state[12:], bytes.fromhex("05 EB"))
+
+    def test_health_stays_disabled_for_all_supported_settings(self):
+        self.assertEqual(protocol.PRESETS, ("none", "sleep", "boost"))
+        for mode in ("off", "auto", "cool", "heat", "dry", "fan_only"):
+            for fan in ("auto", "low", "medium", "high"):
+                for preset in ("none", "sleep", "boost"):
+                    for swing in ("off", "vertical"):
+                        with self.subTest(mode=mode, fan=fan, preset=preset, swing=swing):
+                            state = protocol.haier_state(mode, 24, fan, swing, preset)
+                            self.assertEqual(state[3] & 0x02, 0)
+                            self.assertEqual(state[-1], sum(state[:-1]) & 255)
 
     def test_each_valid_combination_has_full_state_and_checksum(self):
         for mode in ("off", "auto", "cool", "heat", "dry", "fan_only"):
@@ -51,7 +70,7 @@ class HaierProtocolTests(unittest.TestCase):
         for position, value in (
             (0, "heat_cool"), (1, 15), (1, 31), (1, 24.5), (1, math.nan),
             (1, math.inf), (1, True), (2, "turbo"), (3, "horizontal"),
-            (4, "away"),
+            (4, "away"), (4, "comfort"),
         ):
             values = ["cool", 24, "auto", "off", "none"]
             values[position] = value
@@ -59,7 +78,7 @@ class HaierProtocolTests(unittest.TestCase):
                 protocol.haier_state(*values)
 
     def test_single_frame_has_msb_first_prefix_and_tuya_terminal_space(self):
-        frame = protocol.haier_pulses(bytes.fromhex("A6 90 00 02 00 A0 00 80 00 00 00 00 05 5D"))
+        frame = protocol.haier_pulses(bytes.fromhex("A6 90 00 00 00 A0 00 80 00 00 00 00 05 5B"))
         self.assertEqual(len(frame), 230)
         self.assertEqual(frame[:4], (3000, 3000, 3000, 4300))
         self.assertEqual(frame[4:20], (520,1650,520,650,520,1650,520,650,520,650,520,1650,520,1650,520,650))
