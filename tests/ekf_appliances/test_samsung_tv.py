@@ -602,3 +602,31 @@ class SamsungMediaRoutingTests(SamsungAdapterTests):
         self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.cast_renamed"})])
         self.assertEqual(self.entry.data["tv_cast_entity_id"], "media_player.cast_renamed")
         self.assertEqual(self.player.unique_id, before)
+
+    async def test_projector_selection_does_not_steal_television_cast_controls(self):
+        await self.configure_media_sources()
+        self.hass.states.async_set("input_text.tv_source", "projector")
+        self.hass.states.async_set("media_player.projector", "on")
+        self.hass.states.async_set("media_player.living_kodi", "playing", {
+            "supported_features": NATIVE_FEATURES, "media_title": "Projector movie",
+        })
+        await self.hass.async_block_till_done()
+        await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_music"})])
+        self.assertEqual(self.hass.states.get(self.player.entity_id).attributes["media_title"], "Current song")
+
+    async def test_pause_and_volume_capabilities_survive_all_sources_standby(self):
+        await self.configure_media_sources()
+        before = self.player.supported_features
+        for entity in ("living_cast", "living_remote", "living_music", "living_kodi"):
+            self.hass.states.async_set("media_player." + entity, "off", {
+                "supported_features": NATIVE_FEATURES,
+            })
+        self.coordinator.async_set_updated_data(False)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.player.supported_features, before)
+        required = Feature.PAUSE | Feature.PLAY | Feature.VOLUME_SET | Feature.VOLUME_STEP
+        self.assertEqual(self.player.supported_features & required, required)
+        with self.assertRaises(HomeAssistantError):
+            await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [])

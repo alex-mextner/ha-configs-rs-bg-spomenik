@@ -149,7 +149,7 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
     @property
     def supported_features(self) -> Feature:
         features = Feature.TURN_ON | Feature.TURN_OFF
-        for target in self.media_routing.command_candidates(self._backend_state):
+        for target in self.media_routing.capability_states(self._backend_state):
             features |= Feature(int(target.attributes.get("supported_features", 0))) & (
                 _NATIVE_FEATURES & ~Feature.SELECT_SOURCE
             )

@@ -68,13 +68,16 @@ class TelevisionMediaRouting:
     def source(self):
         source = self.state(CONF_TV_SOURCE_ENTITY_ID)
         if self.entity_id(CONF_TV_SOURCE_ENTITY_ID):
-            return source.state.lower() if source else "unknown"
+            value = source.state.lower() if source else "unknown"
+            # The shared universal remote can target a separate projector
+            # without changing the television's Chromecast input.
+            return "chromecast" if value == "projector" else value
         return "chromecast"
 
     def choose(self, native):
         if not self.configured:
             return native
-        if self.source in {"pc", "projector", "kodi"}:
+        if self.source in {"pc", "kodi"}:
             kodi = self.state(CONF_TV_KODI_ENTITY_ID)
             return kodi if self.ready(kodi) else None
         if self.source in {"tv", "hdmi"}:
@@ -108,6 +111,16 @@ class TelevisionMediaRouting:
         if self.ready(android):
             return android
         return cast if self.ready(cast) else None
+
+    def capability_states(self, native):
+        """Advertise configured controls even when every source is in standby."""
+        if not self.configured:
+            return [native] if native is not None else []
+        states = [
+            state for key in MEDIA_CONFIG_KEYS[:-1]
+            if (state := self.state(key)) is not None
+        ]
+        return states or ([native] if native is not None else [])
 
     def command_candidates(self, native):
         primary = self.choose(native)
