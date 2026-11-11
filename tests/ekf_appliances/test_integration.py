@@ -432,3 +432,58 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.script_calls, ["off"])
         self.assertEqual(self.player.state, "off")
         self.assertEqual(len(self.commands), 1)
+
+
+    async def test_projector_uses_kodi_playback_state_and_actions(self):
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**CONFIG, "tv_kodi_entity_id": "media_player.home"}
+        )
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.hass.states.async_set("media_player.home", "paused", {
+            "media_title": "Example episode", "media_content_type": "tvshow",
+            "media_duration": 1800, "media_position": 123,
+        })
+        await self.attach(self.player, "media_player.ekf_projector")
+        calls = []
+        async def control(call):
+            calls.append((call.service, call.data["entity_id"]))
+        for service in ("media_play", "media_pause", "media_play_pause"):
+            self.hass.services.async_register("media_player", service, control)
+        self.assertEqual(self.player.state, "paused")
+        self.assertEqual(self.player.media_title, "Example episode")
+        self.assertEqual(self.player.media_position, 123)
+        await self.player.async_media_play()
+        await self.player.async_media_pause()
+        await self.player.async_media_play_pause()
+        self.assertEqual(calls, [
+            ("media_play", "media_player.home"),
+            ("media_pause", "media_player.home"),
+            ("media_play_pause", "media_player.home"),
+        ])
+        self.assertEqual(self.commands, [])
+        await self.player.async_volume_up()
+        self.assertEqual(len(self.commands), 1)
+
+    async def test_configured_offline_kodi_never_falls_back_to_ir(self):
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**CONFIG, "tv_kodi_entity_id": "media_player.home"}
+        )
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.hass.states.async_set("media_player.home", "off")
+        with self.assertRaisesRegex(HomeAssistantError, "not running"):
+            await self.player.async_media_play_pause()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.player.state, "on")
+
+    async def test_projector_power_feedback_overrides_kodi_playing(self):
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**CONFIG, "tv_kodi_entity_id": "media_player.home"}
+        )
+        self.hass.states.async_set("media_player.home", "playing", {"media_title": "Hidden"})
+        for observed in ("off", "unknown"):
+            self.hass.states.async_set("binary_sensor.projector_hdmi_connected", observed)
+            self.assertEqual(self.player.state, "off" if observed == "off" else None)
+            self.assertIsNone(self.player.media_title)
+            with self.assertRaisesRegex(HomeAssistantError, "not confirmed"):
+                await self.player.async_media_pause()
+        self.assertEqual(self.commands, [])
