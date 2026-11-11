@@ -8,28 +8,30 @@
         "data": {
           "remote_entity_id": "Infrared remote",
           "temperature_entity_id": "Room temperature sensor",
-          "projector_power_entity_id": "Projector power helper",
+          "projector_power_entity_id": "Projector status sensor",
           "projector_on_script": "Projector startup script",
           "projector_off_script": "Projector shutdown script"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
-          "projector_off_script": "Leave empty to use the existing Projector turn off script."
+          "projector_off_script": "Leave empty to use the existing Projector turn off script.",
+          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection."
         }
       },
       "reconfigure": {
         "title": "Change appliance connections",
-        "description": "Choose the remote, room sensor, power helper, and scripts used by these appliances.",
+        "description": "Choose the remote, room temperature sensor, projector status sensor, and scripts used by these appliances.",
         "data": {
           "remote_entity_id": "Infrared remote",
           "temperature_entity_id": "Room temperature sensor",
-          "projector_power_entity_id": "Projector power helper",
+          "projector_power_entity_id": "Projector status sensor",
           "projector_on_script": "Projector startup script",
           "projector_off_script": "Projector shutdown script"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
-          "projector_off_script": "Leave empty to use the existing Projector turn off script."
+          "projector_off_script": "Leave empty to use the existing Projector turn off script.",
+          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection."
         }
       }
     },

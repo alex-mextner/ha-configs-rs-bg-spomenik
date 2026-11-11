@@ -16,7 +16,7 @@ DOMAIN = "ekf_appliances"
 VALID = {
     "remote_entity_id": "remote.ekf_connect_ir",
     "temperature_entity_id": "sensor.ekf_connect_ir_temperatura",
-    "projector_power_entity_id": "input_boolean.projector_power",
+    "projector_power_entity_id": "binary_sensor.projector_hdmi_connected",
     "projector_on_script": "script.projector_turn_on",
     "projector_off_script": "script.projector_turn_off",
 }
@@ -88,7 +88,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         domains = {
             "remote_entity_id": "remote",
             "temperature_entity_id": "sensor",
-            "projector_power_entity_id": "input_boolean",
+            "projector_power_entity_id": "binary_sensor",
             "projector_on_script": "script",
             "projector_off_script": "script",
         }
@@ -179,6 +179,61 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             for marker in result["data_schema"].schema
         }
         self.assertEqual(defaults, dict(entry.data))
+
+    async def test_saved_legacy_helper_is_not_a_valid_feedback_selection(self):
+        self.populate_entities()
+        self.hass.states.async_set("input_boolean.projector_power", "on")
+        legacy = {**VALID, "projector_power_entity_id": "input_boolean.projector_power"}
+        result = await self.flow().async_step_user(legacy)
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(
+            result["errors"], {"projector_power_entity_id": "invalid_entity"}
+        )
+        self.assertEqual(self.transmissions, [])
+
+    async def test_legacy_reconfigure_requires_a_new_feedback_selection(self):
+        self.populate_entities()
+        self.hass.states.async_set("input_boolean.projector_power", "on")
+        legacy = {**VALID, "projector_power_entity_id": "input_boolean.projector_power"}
+        entry = self.add_entry({**legacy, "future_setting": "keep"})
+        flow = self.flow("reconfigure", entry)
+        result = await flow.async_step_reconfigure()
+        power_marker = next(
+            marker for marker in result["data_schema"].schema
+            if marker.schema == "projector_power_entity_id"
+        )
+        self.assertIsInstance(power_marker, vol.Required)
+        self.assertIs(power_marker.default, vol.UNDEFINED)
+        self.assertNotIn("suggested_value", power_marker.description or {})
+        result = await flow.async_step_reconfigure(legacy)
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(
+            result["errors"], {"projector_power_entity_id": "invalid_entity"}
+        )
+        self.assertEqual(dict(entry.data), {**legacy, "future_setting": "keep"})
+        self.assertEqual(self.transmissions, [])
+
+    async def test_reconfigure_migrates_feedback_without_losing_script_overrides(self):
+        self.populate_entities()
+        self.hass.states.async_set("input_boolean.projector_power", "on")
+        self.hass.states.async_set("script.custom_on", "off")
+        self.hass.states.async_set("script.custom_off", "off")
+        legacy = {
+            **VALID,
+            "projector_power_entity_id": "input_boolean.projector_power",
+            "projector_on_script": "script.custom_on",
+            "projector_off_script": "script.custom_off",
+        }
+        entry = self.add_entry({**legacy, "future_setting": "keep"})
+        selected = {
+            **legacy,
+            "projector_power_entity_id": "binary_sensor.projector_hdmi_connected",
+        }
+        with patch.object(self.hass.config_entries, "async_schedule_reload"):
+            result = await self.flow("reconfigure", entry).async_step_reconfigure(selected)
+        self.assertEqual(result["reason"], "reconfigure_successful")
+        self.assertEqual(dict(entry.data), {**selected, "future_setting": "keep"})
+        self.assertEqual(self.transmissions, [])
 
     async def test_reconfigure_updates_data_identity_and_preserves_unrelated_data(self):
         self.populate_entities()

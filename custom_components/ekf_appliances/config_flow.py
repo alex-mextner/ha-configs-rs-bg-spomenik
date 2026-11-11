@@ -22,7 +22,7 @@ from .const import (
 _ENTITY_DOMAINS = {
     CONF_REMOTE_ENTITY_ID: "remote",
     CONF_TEMPERATURE_ENTITY_ID: "sensor",
-    CONF_PROJECTOR_POWER_ENTITY_ID: "input_boolean",
+    CONF_PROJECTOR_POWER_ENTITY_ID: "binary_sensor",
     CONF_PROJECTOR_ON_SCRIPT: "script",
     CONF_PROJECTOR_OFF_SCRIPT: "script",
 }
@@ -30,7 +30,7 @@ _OPTIONAL_FIELDS = {CONF_PROJECTOR_ON_SCRIPT, CONF_PROJECTOR_OFF_SCRIPT}
 _DEFAULT_ENTITIES = {
     CONF_REMOTE_ENTITY_ID: "remote.ekf_connect_ir",
     CONF_TEMPERATURE_ENTITY_ID: "sensor.ekf_connect_ir_temperatura",
-    CONF_PROJECTOR_POWER_ENTITY_ID: "input_boolean.projector_power",
+    CONF_PROJECTOR_POWER_ENTITY_ID: "binary_sensor.projector_hdmi_connected",
     CONF_PROJECTOR_ON_SCRIPT: DEFAULT_PROJECTOR_ON_SCRIPT,
     CONF_PROJECTOR_OFF_SCRIPT: DEFAULT_PROJECTOR_OFF_SCRIPT,
 }
@@ -59,7 +59,14 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 marker = vol.Optional(key, description=description)
             else:
-                marker = vol.Required(key, default=values.get(key, vol.UNDEFINED))
+                default = values.get(key, vol.UNDEFINED)
+                if key == CONF_PROJECTOR_POWER_ENTITY_ID and (
+                    not isinstance(default, str)
+                    or default.partition(".")[0] != domain
+                ):
+                    # Legacy helpers require an explicit feedback sensor selection.
+                    default = vol.UNDEFINED
+                marker = vol.Required(key, default=default)
             fields[marker] = selector.EntitySelector(
                 selector.EntitySelectorConfig(filter={"domain": domain})
             )

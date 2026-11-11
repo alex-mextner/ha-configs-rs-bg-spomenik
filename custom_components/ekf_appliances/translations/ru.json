@@ -8,28 +8,30 @@
         "data": {
           "remote_entity_id": "Инфракрасный пульт",
           "temperature_entity_id": "Датчик температуры комнаты",
-          "projector_power_entity_id": "Помощник питания проектора",
+          "projector_power_entity_id": "Датчик состояния проектора",
           "projector_on_script": "Скрипт включения проектора",
           "projector_off_script": "Скрипт выключения проектора"
         },
         "data_description": {
           "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
-          "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off."
+          "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off.",
+          "projector_power_entity_id": "Выберите датчик, который определяет состояние проектора, например по HDMI-подключению."
         }
       },
       "reconfigure": {
         "title": "Изменение подключений",
-        "description": "Выберите пульт, датчик температуры, помощник питания и скрипты для этих устройств.",
+        "description": "Выберите пульт, датчик температуры, датчик состояния проектора и скрипты для этих устройств.",
         "data": {
           "remote_entity_id": "Инфракрасный пульт",
           "temperature_entity_id": "Датчик температуры комнаты",
-          "projector_power_entity_id": "Помощник питания проектора",
+          "projector_power_entity_id": "Датчик состояния проектора",
           "projector_on_script": "Скрипт включения проектора",
           "projector_off_script": "Скрипт выключения проектора"
         },
         "data_description": {
           "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
-          "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off."
+          "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off.",
+          "projector_power_entity_id": "Выберите датчик, который определяет состояние проектора, например по HDMI-подключению."
         }
       }
     },
