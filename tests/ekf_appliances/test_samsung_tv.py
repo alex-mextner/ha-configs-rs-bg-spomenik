@@ -340,6 +340,31 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.native_calls, [])
 
+    async def test_late_boot_confirmation_keeps_one_pending_power_frame(self):
+        # Scale the observed 51-second cold boot to 0.51 seconds. The former
+        # 35-second deadline must fail this scenario; a 75-second window passes.
+        real_timeout = asyncio.timeout
+
+        def scaled_timeout(seconds):
+            return real_timeout(seconds / 100 if seconds in (35.0, 75.0) else seconds)
+
+        with patch("custom_components.ekf_appliances.samsung_tv.asyncio.timeout", scaled_timeout):
+            first = asyncio.create_task(self.player.async_turn_on())
+            await self.sent.wait()
+            duplicate = asyncio.create_task(self.player.async_turn_on())
+            await self.real_sleep(0.51)
+            waiting_for_feedback = not first.done() and not duplicate.done()
+            before_feedback = self.player.state
+            self.set_native("on")
+            results = await asyncio.gather(first, duplicate, return_exceptions=True)
+        self.assertTrue(waiting_for_feedback, "Cold boot must remain guarded after 51 seconds")
+        self.assertEqual(before_feedback, "off")
+        self.assertEqual(results, [None, None])
+        self.assertEqual(len(self.commands), 1)
+        self.assertEqual(wire_code(self.commands[0]["command"]), 0xE0E09966)
+        self.assertEqual(self.native_calls, [])
+        self.assertEqual(self.player.state, "on")
+
     async def test_opposite_request_waits_for_boot_then_sends_one_off(self):
         with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5):
             first = asyncio.create_task(self.player.async_turn_on())
