@@ -37,7 +37,8 @@ class SamsungPowerCoordinator(DataUpdateCoordinator[bool | None]):
         except (TimeoutError, ConnectionRefusedError):
             return False
         except ClientConnectorError as err:
-            if err.os_error.errno == errno.ECONNREFUSED:
+            # This TV also returns EHOSTUNREACH while in deep standby.
+            if err.os_error.errno in (errno.ECONNREFUSED, errno.EHOSTUNREACH):
                 return False
             return None
         except Exception:
