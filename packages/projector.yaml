@@ -1,17 +1,18 @@
-# Projector power is observed through the ODROID HDMI connector.
-# A local POWER key starts the projector in about 17 seconds; shutdown uses
-# a second confirmation press only while HDMI still reports connected.
+# Projector power is observed through the matching MStar HDMI display on the ODROID.
+# Unknown reads never trigger another lifecycle action. Shutdown waits for a stable
+# display after boot and confirms POWER only while that display is still present.
 
 command_line:
   - binary_sensor:
       name: Projector HDMI connected
       unique_id: projector_hdmi_connected
       device_class: connectivity
-      command: "cat /sys/class/drm/card0-HDMI-A-1/status"
+      command: >-
+        python3 -c "from pathlib import Path; p=Path('/sys/class/drm/card0-HDMI-A-1'); s=(p/'status').read_text().strip(); e=(p/'edid').read_bytes() if s=='connected' else b''; match=len(e)>=128 and e[8:12]==bytes.fromhex('36743000') and b'MStar Demo' in e and sum(e[:128])%256==0; print('connected' if s=='connected' and match else 'disconnected' if s=='disconnected' else 'unknown')"
       payload_on: connected
       payload_off: disconnected
-      scan_interval: 1
-      command_timeout: 2
+      scan_interval: 2
+      command_timeout: 3
 
 input_boolean:
   # Compatibility mirror for older source routing. Never used as power feedback.
@@ -42,6 +43,15 @@ script:
       - condition: state
         entity_id: binary_sensor.projector_hdmi_connected
         state: "on"
+      # HDMI appears before the projector accepts another power command.
+      # One delayed request is held until the matching display has been stable.
+      - delay:
+          seconds: >-
+            {{ [0, 30 - (now() - states.binary_sensor.projector_hdmi_connected.last_changed).total_seconds()] | max | round(0, 'ceil') }}
+      - condition: template
+        value_template: >-
+          {{ is_state('binary_sensor.projector_hdmi_connected', 'on')
+             and (now() - states.binary_sensor.projector_hdmi_connected.last_changed).total_seconds() >= 30 }}
       - action: button.press
         target: { entity_id: button.projector_power }
       - delay: "00:00:03"
@@ -62,10 +72,8 @@ script:
         target: { entity_id: media_player.projector }
 
 automation:
-  # Startup also reconciles a stale compatibility helper without sending IR.
-  # Kodi/source lifecycle follows physical HDMI edges, including manual controls.
-  # Kodi runs on the ODROID (kodi.service); restore Chromecast only when
-  # projector was the active source, preserving PC/Chromecast routing.
+  # The helper is the last observed state, not a guessed power state. Leaving it
+  # unchanged during a failed read prevents unknown -> on from restarting Kodi.
   - alias: Projector power follows HDMI
     id: projector_power_follows_source
     mode: queued
@@ -83,7 +91,14 @@ automation:
         value_template: "{{ states('binary_sensor.projector_hdmi_connected') in ['on', 'off'] }}"
     action:
       - choose:
-          - conditions: "{{ is_state('binary_sensor.projector_hdmi_connected', 'on') }}"
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.projector_hdmi_connected
+                state: "on"
+              - condition: template
+                value_template: >-
+                  {{ not is_state('input_boolean.projector_power', 'on')
+                     or trigger.platform == 'homeassistant' }}
             sequence:
               - action: input_boolean.turn_on
                 target: { entity_id: input_boolean.projector_power }
@@ -91,14 +106,23 @@ automation:
               - action: input_text.set_value
                 target: { entity_id: input_text.tv_source }
                 data: { value: projector }
-          - conditions: "{{ is_state('binary_sensor.projector_hdmi_connected', 'off') }}"
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.projector_hdmi_connected
+                state: "off"
+              - condition: state
+                entity_id: input_boolean.projector_power
+                state: "on"
             sequence:
               - action: input_boolean.turn_off
                 target: { entity_id: input_boolean.projector_power }
               - if: "{{ is_state('input_text.tv_source', 'projector') }}"
                 then:
                   - action: rest_command.host_projector_off
-                  - action: script.source_to_chromecast
+                  # Restore remote routing without sending TV input or power keys.
+                  - action: input_text.set_value
+                    target: { entity_id: input_text.tv_source }
+                    data: { value: chromecast }
 # Alice can acknowledge the request while HDMI confirms the slow transition.
 yandex_smart_home:
   entity_config:
