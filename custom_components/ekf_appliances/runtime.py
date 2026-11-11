@@ -55,6 +55,8 @@ class ApplianceRuntime:
         return info
 
     async def _async_send(self, command: str) -> None:
+        if receiver := getattr(self, "receiver", None):
+            await receiver.async_before_send()
         if not self.available:
             raise HomeAssistantError(f"IR transmitter {self.remote_entity_id} is unavailable")
         try:

@@ -1,0 +1,17 @@
+probe_remote_receive:
+  name: Проверить приём универсального пульта
+  description: До 30 секунд ожидает кнопку физического пульта через EKF. Не отправляет команды бытовой технике. После проверки выходит из обучения.
+  fields:
+    remote_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: remote
+          integration: tuya_local
+    seconds:
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: s
