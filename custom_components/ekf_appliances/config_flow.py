@@ -5,7 +5,8 @@ from typing import Any
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
-from homeassistant.helpers import selector
+from homeassistant.const import CONF_HOST, CONF_MODEL
+from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
 import voluptuous as vol
 
 from .const import (
@@ -14,6 +15,7 @@ from .const import (
     CONF_PROJECTOR_POWER_ENTITY_ID,
     CONF_REMOTE_ENTITY_ID,
     CONF_TEMPERATURE_ENTITY_ID,
+    CONF_TV_ENTITY_ID,
     DEFAULT_PROJECTOR_OFF_SCRIPT,
     DEFAULT_PROJECTOR_ON_SCRIPT,
     DOMAIN,
@@ -25,8 +27,9 @@ _ENTITY_DOMAINS = {
     CONF_PROJECTOR_POWER_ENTITY_ID: "binary_sensor",
     CONF_PROJECTOR_ON_SCRIPT: "script",
     CONF_PROJECTOR_OFF_SCRIPT: "script",
+    CONF_TV_ENTITY_ID: "media_player",
 }
-_OPTIONAL_FIELDS = {CONF_PROJECTOR_ON_SCRIPT, CONF_PROJECTOR_OFF_SCRIPT}
+_OPTIONAL_FIELDS = {CONF_PROJECTOR_ON_SCRIPT, CONF_PROJECTOR_OFF_SCRIPT, CONF_TV_ENTITY_ID}
 _DEFAULT_ENTITIES = {
     CONF_REMOTE_ENTITY_ID: "remote.ekf_connect_ir",
     CONF_TEMPERATURE_ENTITY_ID: "sensor.ekf_connect_ir_temperatura",
@@ -67,10 +70,45 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Legacy helpers require an explicit feedback sensor selection.
                     default = vol.UNDEFINED
                 marker = vol.Required(key, default=default)
+            entity_filter = {"domain": domain}
+            if key == CONF_TV_ENTITY_ID:
+                entity_filter["integration"] = "samsungtv"
             fields[marker] = selector.EntitySelector(
-                selector.EntitySelectorConfig(filter={"domain": domain})
+                selector.EntitySelectorConfig(filter=entity_filter)
             )
         return vol.Schema(fields)
+
+    @staticmethod
+    def _normalize_input(values: Mapping[str, Any]) -> dict[str, Any]:
+        """An empty optional TV selection disables only the TV adapter."""
+        result = dict(values)
+        if result.get(CONF_TV_ENTITY_ID) in (None, ""):
+            result.pop(CONF_TV_ENTITY_ID, None)
+        return result
+
+    def _is_native_tv(self, entity_id: str) -> bool:
+        """Validate native identity and saved connection data without probing TV."""
+        entity = er.async_get(self.hass).async_get(entity_id)
+        if (
+            entity is None
+            or entity.platform != "samsungtv"
+            or entity.device_id is None
+            or entity.config_entry_id is None
+        ):
+            return False
+        entry = self.hass.config_entries.async_get_entry(entity.config_entry_id)
+        if entry is None or entry.domain != "samsungtv":
+            return False
+        if any(
+            not isinstance(value := entry.data.get(key), str) or not value.strip()
+            for key in (CONF_HOST, CONF_MODEL)
+        ):
+            return False
+        device = dr.async_get(self.hass).async_get(entity.device_id)
+        return device is not None and any(
+            domain == "samsungtv" and identifier
+            for domain, identifier in device.identifiers
+        )
 
     def _validate_entities(self, values: Mapping[str, Any]) -> dict[str, str]:
         """Reject missing or wrong-domain entities without operating them."""
@@ -84,7 +122,11 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 or entity_id.partition(".")[0] != domain
                 or self.hass.states.get(entity_id) is None
             ):
-                errors[key] = "invalid_entity"
+                errors[key] = (
+                    "invalid_tv_entity" if key == CONF_TV_ENTITY_ID else "invalid_entity"
+                )
+            elif key == CONF_TV_ENTITY_ID and not self._is_native_tv(entity_id):
+                errors[key] = "invalid_tv_entity"
         return errors
 
     async def async_step_user(
@@ -93,6 +135,7 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Create an entry from existing HA entities."""
         errors = {}
         if user_input is not None:
+            user_input = self._normalize_input(user_input)
             errors = self._validate_entities(user_input)
             if not errors:
                 remote_id = user_input[CONF_REMOTE_ENTITY_ID]
@@ -118,6 +161,7 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         errors = {}
         if user_input is not None:
+            user_input = self._normalize_input(user_input)
             errors = self._validate_entities(user_input)
             if not errors:
                 remote_id = user_input[CONF_REMOTE_ENTITY_ID]
