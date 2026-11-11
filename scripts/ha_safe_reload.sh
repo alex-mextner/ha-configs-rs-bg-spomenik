@@ -1,50 +1,5 @@
 #!/bin/bash
-# HA Safe Reload — проверяет конфиг перед перезагрузкой
-# Урок 2026-05-19: HA уходил в recovery из-за YAML syntax error
-
+# Validate the current HA configuration before restarting its container.
 set -euo pipefail
-
-echo "=== HA Safe Reload ==="
-echo "Step 1/3: Checking YAML syntax..."
-
-# Validate all YAML files in packages/ using HA container's Python
-# (handles !secret tags that standard PyYAML does not recognise).
-INVALID=0
-for f in packages/*.yaml; do
-    if ! docker exec homeassistant-homeassistant-1 python3 -c "
-import yaml
-def secret_constructor(loader, node):
-    return '!secret'
-yaml.SafeLoader.add_constructor('!secret', secret_constructor)
-yaml.safe_load(open('/config/$f'))
-" 2>/dev/null; then
-        echo "  ERROR: $f — YAML syntax invalid"
-        INVALID=1
-    fi
-done
-
-if [ "$INVALID" -eq 1 ]; then
-    echo ""
-    echo "ABORTED: Fix YAML errors before reloading HA."
-    exit 1
-fi
-echo "  All YAML files valid."
-
-echo ""
-echo "Step 2/3: Checking HA config via check_config..."
-# Run HA config check inside container
-docker exec homeassistant-homeassistant-1 python -m homeassistant --config /config --script check_config 2>&1 | tail -n 20 || true
-
-# Alternative: we just check if HA container is healthy before restart
-if ! docker ps | grep -q "homeassistant-homeassistant-1.*healthy"; then
-    echo "  WARNING: HA container not healthy yet. Waiting..."
-    sleep 10
-fi
-
-echo ""
-echo "Step 3/3: Reloading Home Assistant..."
-docker restart homeassistant-homeassistant-1
-
-echo ""
-echo "Done. HA is restarting. Check status in 30s:"
-echo "  docker logs homeassistant-homeassistant-1 --tail 20"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/ha_safe_reload.py" "$@"
