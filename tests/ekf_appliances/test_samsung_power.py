@@ -129,13 +129,32 @@ class SamsungPowerTests(unittest.IsolatedAsyncioTestCase):
                 await self.coordinator.async_refresh()
                 self.assertIs(self.coordinator.data, False)
 
+    async def test_deep_standby_stays_off_across_timeout_and_host_unreachable(self):
+        await self.coordinator.async_refresh()
+        self.assertIs(self.coordinator.data, True)
+        for error in (
+            TimeoutError(),
+            aiohttp.ClientConnectorError(
+                self.connection_key, OSError(errno.EHOSTUNREACH, "Host unreachable"),
+            ),
+            TimeoutError(),
+            aiohttp.ClientConnectorError(
+                self.connection_key, OSError(errno.EHOSTUNREACH, "Host unreachable"),
+            ),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.respond(error=error)
+                await self.coordinator.async_refresh()
+                self.assertIs(self.coordinator.data, False)
+                self.assertTrue(self.coordinator.last_update_success)
+
     async def test_dns_unreachable_disconnect_and_other_errors_are_unknown(self):
         errors = (
             aiohttp.ClientConnectorDNSError(
                 self.connection_key, socket.gaierror(socket.EAI_NONAME, "No address"),
             ),
             aiohttp.ClientConnectorError(
-                self.connection_key, OSError(errno.EHOSTUNREACH, "No route"),
+                self.connection_key, OSError(errno.ENETUNREACH, "Network unreachable"),
             ),
             aiohttp.ServerDisconnectedError("Disconnected"),
             RuntimeError("Session is closed"),
