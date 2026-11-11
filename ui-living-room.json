@@ -1,0 +1,1652 @@
+{
+  "title": "Гостиная",
+  "views": [
+    {
+      "title": "Обзор",
+      "path": "overview",
+      "icon": "mdi:sofa-outline",
+      "type": "sections",
+      "max_columns": 3,
+      "dense_section_placement": false,
+      "header": {
+        "layout": "responsive",
+        "badges_position": "bottom",
+        "card": {
+          "type": "markdown",
+          "content": "# Гостиная"
+        }
+      },
+      "badges": [
+        {
+          "type": "entity",
+          "entity": "sensor.ekf_connect_ir_temperatura",
+          "name": "Температура",
+          "show_name": true,
+          "show_state": true,
+          "show_icon": true,
+          "tap_action": {
+            "action": "more-info"
+          }
+        },
+        {
+          "type": "entity",
+          "entity": "sensor.ekf_connect_ir_vlazhnost",
+          "name": "Влажность",
+          "show_name": true,
+          "show_state": true,
+          "show_icon": true,
+          "tap_action": {
+            "action": "more-info"
+          }
+        }
+      ],
+      "sections": [
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Телевизор",
+              "icon": "mdi:television"
+            },
+            {
+              "type": "tile",
+              "entity": "media_player.ue48j5500_ue48j5500",
+              "name": "Samsung UE48J5500",
+              "icon": "mdi:television",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/tv"
+              },
+              "icon_tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/tv"
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "grid",
+              "columns": 2,
+              "square": false,
+              "cards": [
+                {
+                  "type": "button",
+                  "name": "Включить",
+                  "icon": "mdi:power",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "media_player.turn_on",
+                    "target": {
+                      "entity_id": "media_player.ue48j5500_ue48j5500"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Выключить",
+                  "icon": "mdi:power-off",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "media_player.turn_off",
+                    "target": {
+                      "entity_id": "media_player.ue48j5500_ue48j5500"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "button",
+              "name": "Пульт телевизора",
+              "icon": "mdi:remote-tv",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": false,
+              "icon_height": "36px",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/tv"
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Проектор",
+              "icon": "mdi:projector"
+            },
+            {
+              "type": "button",
+              "name": "Питание",
+              "icon": "mdi:power",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": true,
+              "icon_height": "36px",
+              "state_color": true,
+              "tap_action": {
+                "action": "perform-action",
+                "perform_action": "media_player.toggle",
+                "target": {
+                  "entity_id": "media_player.projector"
+                }
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "double_tap_action": {
+                "action": "none"
+              },
+              "entity": "media_player.projector",
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "button",
+              "name": "Пульт проектора",
+              "icon": "mdi:remote",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": false,
+              "icon_height": "36px",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/projector"
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Кондиционер",
+              "icon": "mdi:air-conditioner"
+            },
+            {
+              "type": "tile",
+              "entity": "climate.kondei_1",
+              "name": "Haier",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/climate"
+              },
+              "icon_tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/climate"
+              },
+              "features": [
+                {
+                  "type": "target-temperature"
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "grid",
+              "columns": 2,
+              "square": false,
+              "cards": [
+                {
+                  "type": "button",
+                  "name": "Включить",
+                  "icon": "mdi:power",
+                  "entity": "climate.kondei_1",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "climate.turn_on",
+                    "target": {
+                      "entity_id": "climate.kondei_1"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Выключить",
+                  "icon": "mdi:power-off",
+                  "entity": "climate.kondei_1",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "climate.turn_off",
+                    "target": {
+                      "entity_id": "climate.kondei_1"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "button",
+              "name": "Все настройки климата",
+              "icon": "mdi:thermostat",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": false,
+              "icon_height": "36px",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/climate"
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Телевизор",
+      "path": "tv",
+      "icon": "mdi:television",
+      "type": "sections",
+      "max_columns": 3,
+      "dense_section_placement": false,
+      "header": {
+        "layout": "responsive",
+        "badges_position": "bottom",
+        "card": {
+          "type": "markdown",
+          "content": "# Телевизор\nSamsung UE48J5500"
+        }
+      },
+      "badges": [],
+      "sections": [
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Питание и источник",
+              "icon": "mdi:television"
+            },
+            {
+              "type": "media-control",
+              "entity": "media_player.ue48j5500_ue48j5500",
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "grid",
+              "columns": 2,
+              "square": false,
+              "cards": [
+                {
+                  "type": "button",
+                  "name": "Включить",
+                  "icon": "mdi:power",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "media_player.turn_on",
+                    "target": {
+                      "entity_id": "media_player.ue48j5500_ue48j5500"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Выключить",
+                  "icon": "mdi:power-off",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "media_player.turn_off",
+                    "target": {
+                      "entity_id": "media_player.ue48j5500_ue48j5500"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "conditional",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "state": [
+                    "on",
+                    "playing",
+                    "paused",
+                    "idle"
+                  ]
+                }
+              ],
+              "card": {
+                "type": "grid",
+                "columns": 2,
+                "square": false,
+                "cards": [
+                  {
+                    "type": "button",
+                    "name": "ТВ",
+                    "icon": "mdi:television-classic",
+                    "entity": "media_player.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "media_player.select_source",
+                      "target": {
+                        "entity_id": "media_player.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "source": "TV"
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "HDMI",
+                    "icon": "mdi:video-input-hdmi",
+                    "entity": "media_player.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "media_player.select_source",
+                      "target": {
+                        "entity_id": "media_player.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "source": "HDMI"
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  }
+                ],
+                "grid_options": {
+                  "columns": 12
+                }
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "conditional",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "state": "off"
+                }
+              ],
+              "card": {
+                "type": "markdown",
+                "content": "Включите телевизор — появятся пульт, звук и выбор источника.",
+                "grid_options": {
+                  "columns": 12
+                }
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "button",
+              "name": "К обзору",
+              "icon": "mdi:arrow-left",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": false,
+              "icon_height": "36px",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/overview"
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Пульт",
+              "icon": "mdi:remote-tv"
+            },
+            {
+              "type": "conditional",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "state": [
+                    "on",
+                    "playing",
+                    "paused",
+                    "idle"
+                  ]
+                }
+              ],
+              "card": {
+                "type": "grid",
+                "columns": 3,
+                "square": false,
+                "cards": [
+                  {
+                    "type": "button",
+                    "name": "Меню",
+                    "icon": "mdi:menu",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_MENU",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Вверх",
+                    "icon": "mdi:chevron-up",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_UP",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Smart Hub",
+                    "icon": "mdi:apps",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_CONTENTS",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Влево",
+                    "icon": "mdi:chevron-left",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_LEFT",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "OK",
+                    "icon": "mdi:check-circle-outline",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_ENTER",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Вправо",
+                    "icon": "mdi:chevron-right",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_RIGHT",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Назад",
+                    "icon": "mdi:arrow-u-left-top",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_RETURN",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Вниз",
+                    "icon": "mdi:chevron-down",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_DOWN",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Информация",
+                    "icon": "mdi:information-outline",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_INFO",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  }
+                ],
+                "grid_options": {
+                  "columns": 12
+                }
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Звук",
+              "icon": "mdi:volume-high"
+            },
+            {
+              "type": "conditional",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "state": [
+                    "on",
+                    "playing",
+                    "paused",
+                    "idle"
+                  ]
+                }
+              ],
+              "card": {
+                "type": "grid",
+                "columns": 3,
+                "square": false,
+                "cards": [
+                  {
+                    "type": "button",
+                    "name": "Тише",
+                    "icon": "mdi:volume-minus",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_VOLDOWN",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Звук вкл/выкл",
+                    "icon": "mdi:volume-mute",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_MUTE",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  },
+                  {
+                    "type": "button",
+                    "name": "Громче",
+                    "icon": "mdi:volume-plus",
+                    "entity": "remote.ue48j5500_ue48j5500",
+                    "show_name": true,
+                    "show_icon": true,
+                    "show_state": false,
+                    "icon_height": "36px",
+                    "tap_action": {
+                      "action": "perform-action",
+                      "perform_action": "remote.send_command",
+                      "target": {
+                        "entity_id": "remote.ue48j5500_ue48j5500"
+                      },
+                      "data": {
+                        "command": "KEY_VOLUP",
+                        "num_repeats": 1,
+                        "delay_secs": 0
+                      }
+                    },
+                    "hold_action": {
+                      "action": "more-info"
+                    }
+                  }
+                ],
+                "grid_options": {
+                  "columns": 12
+                }
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "conditional",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity": "media_player.ue48j5500_ue48j5500",
+                  "state": [
+                    "on",
+                    "playing",
+                    "paused",
+                    "idle"
+                  ]
+                }
+              ],
+              "card": {
+                "type": "button",
+                "name": "Закрыть меню",
+                "icon": "mdi:close",
+                "entity": "remote.ue48j5500_ue48j5500",
+                "show_name": true,
+                "show_icon": true,
+                "show_state": false,
+                "icon_height": "36px",
+                "tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "remote.send_command",
+                  "target": {
+                    "entity_id": "remote.ue48j5500_ue48j5500"
+                  },
+                  "data": {
+                    "command": "KEY_EXIT",
+                    "num_repeats": 1,
+                    "delay_secs": 0
+                  }
+                },
+                "hold_action": {
+                  "action": "more-info"
+                },
+                "grid_options": {
+                  "columns": 12
+                }
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Проектор",
+      "path": "projector",
+      "icon": "mdi:projector",
+      "type": "sections",
+      "max_columns": 3,
+      "dense_section_placement": false,
+      "header": {
+        "layout": "responsive",
+        "badges_position": "bottom",
+        "card": {
+          "type": "markdown",
+          "content": "# Проектор"
+        }
+      },
+      "badges": [],
+      "sections": [
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Питание",
+              "icon": "mdi:power"
+            },
+            {
+              "type": "button",
+              "name": "Питание",
+              "icon": "mdi:power",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": true,
+              "icon_height": "36px",
+              "state_color": true,
+              "tap_action": {
+                "action": "perform-action",
+                "perform_action": "media_player.toggle",
+                "target": {
+                  "entity_id": "media_player.projector"
+                }
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "double_tap_action": {
+                "action": "none"
+              },
+              "entity": "media_player.projector",
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "button",
+              "name": "К обзору",
+              "icon": "mdi:arrow-left",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": false,
+              "icon_height": "36px",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/overview"
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Пульт",
+              "icon": "mdi:remote"
+            },
+            {
+              "type": "grid",
+              "columns": 3,
+              "square": false,
+              "cards": [
+                {
+                  "type": "button",
+                  "name": "Меню",
+                  "icon": "mdi:menu",
+                  "entity": "button.projector_menu",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_menu"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Вверх",
+                  "icon": "mdi:chevron-up",
+                  "entity": "button.projector_up",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_up"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Источник",
+                  "icon": "mdi:video-input-hdmi",
+                  "entity": "button.projector_source",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_source"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Влево",
+                  "icon": "mdi:chevron-left",
+                  "entity": "button.projector_left",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_left"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Пуск / пауза",
+                  "icon": "mdi:play-pause",
+                  "entity": "media_player.projector",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "media_player.media_play_pause",
+                    "target": {
+                      "entity_id": "media_player.projector"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Вправо",
+                  "icon": "mdi:chevron-right",
+                  "entity": "button.projector_right",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_right"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Назад",
+                  "icon": "mdi:arrow-u-left-top",
+                  "entity": "button.projector_back",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_back"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Вниз",
+                  "icon": "mdi:chevron-down",
+                  "entity": "button.projector_down",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_down"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "grid",
+              "columns": 3,
+              "square": false,
+              "cards": [
+                {
+                  "type": "button",
+                  "name": "Тише",
+                  "icon": "mdi:volume-minus",
+                  "entity": "button.projector_vol_down",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_vol_down"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Звук вкл/выкл",
+                  "icon": "mdi:volume-mute",
+                  "entity": "button.projector_mute",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_mute"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Громче",
+                  "icon": "mdi:volume-plus",
+                  "entity": "button.projector_vol_up",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {
+                      "entity_id": "button.projector_vol_up"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Kodi · видео",
+              "icon": "mdi:kodi"
+            },
+            {
+              "type": "media-control",
+              "entity": "media_player.home",
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "grid",
+              "columns": 2,
+              "square": false,
+              "cards": [],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "markdown",
+              "content": "Kodi запускается вместе с проектором. Кнопка «Питание» управляет проектором по текущему статусу. При неизвестном статусе она отправляет одно нажатие Power.",
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Климат",
+      "path": "climate",
+      "icon": "mdi:air-conditioner",
+      "type": "sections",
+      "max_columns": 3,
+      "dense_section_placement": false,
+      "header": {
+        "layout": "responsive",
+        "badges_position": "bottom",
+        "card": {
+          "type": "markdown",
+          "content": "# Климат\nHaier · 16–30 °C"
+        }
+      },
+      "badges": [
+        {
+          "type": "entity",
+          "entity": "sensor.ekf_connect_ir_temperatura",
+          "name": "Температура",
+          "show_name": true,
+          "show_state": true,
+          "show_icon": true,
+          "tap_action": {
+            "action": "more-info"
+          }
+        },
+        {
+          "type": "entity",
+          "entity": "sensor.ekf_connect_ir_vlazhnost",
+          "name": "Влажность",
+          "show_name": true,
+          "show_state": true,
+          "show_icon": true,
+          "tap_action": {
+            "action": "more-info"
+          }
+        }
+      ],
+      "sections": [
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Температура и режим",
+              "icon": "mdi:thermostat"
+            },
+            {
+              "type": "thermostat",
+              "entity": "climate.kondei_1",
+              "name": "Кондиционер",
+              "show_current_as_primary": false,
+              "features": [
+                {
+                  "type": "climate-hvac-modes",
+                  "hvac_modes": [
+                    "off",
+                    "heat",
+                    "cool",
+                    "dry",
+                    "fan_only",
+                    "auto"
+                  ]
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "grid",
+              "columns": 2,
+              "square": false,
+              "cards": [
+                {
+                  "type": "button",
+                  "name": "Включить",
+                  "icon": "mdi:power",
+                  "entity": "climate.kondei_1",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "climate.turn_on",
+                    "target": {
+                      "entity_id": "climate.kondei_1"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "button",
+                  "name": "Выключить",
+                  "icon": "mdi:power-off",
+                  "entity": "climate.kondei_1",
+                  "show_name": true,
+                  "show_icon": true,
+                  "show_state": false,
+                  "icon_height": "36px",
+                  "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "climate.turn_off",
+                    "target": {
+                      "entity_id": "climate.kondei_1"
+                    }
+                  },
+                  "hold_action": {
+                    "action": "more-info"
+                  }
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "button",
+              "name": "К обзору",
+              "icon": "mdi:arrow-left",
+              "show_name": true,
+              "show_icon": true,
+              "show_state": false,
+              "icon_height": "36px",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/living-room/overview"
+              },
+              "hold_action": {
+                "action": "none"
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Воздух и комфорт",
+              "icon": "mdi:fan"
+            },
+            {
+              "type": "tile",
+              "entity": "climate.kondei_1",
+              "name": "Скорость вентилятора",
+              "icon": "mdi:fan",
+              "tap_action": {
+                "action": "more-info"
+              },
+              "icon_tap_action": {
+                "action": "more-info"
+              },
+              "hide_state": true,
+              "features": [
+                {
+                  "type": "climate-fan-modes",
+                  "style": "dropdown",
+                  "fan_modes": [
+                    "auto",
+                    "low",
+                    "medium",
+                    "high"
+                  ]
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "tile",
+              "entity": "climate.kondei_1",
+              "name": "Движение жалюзи",
+              "icon": "mdi:air-filter",
+              "tap_action": {
+                "action": "more-info"
+              },
+              "icon_tap_action": {
+                "action": "more-info"
+              },
+              "hide_state": true,
+              "features": [
+                {
+                  "type": "climate-swing-modes",
+                  "style": "dropdown",
+                  "swing_modes": [
+                    "off",
+                    "vertical"
+                  ]
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "conditional",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity": "climate.kondei_1",
+                  "state": [
+                    "off",
+                    "heat",
+                    "cool"
+                  ]
+                }
+              ],
+              "card": {
+                "type": "tile",
+                "entity": "climate.kondei_1",
+                "name": "Комфорт",
+                "icon": "mdi:sofa-outline",
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "more-info"
+                },
+                "hide_state": true,
+                "features": [
+                  {
+                    "type": "climate-preset-modes",
+                    "style": "dropdown",
+                    "preset_modes": [
+                      "none",
+                      "sleep",
+                      "comfort",
+                      "boost"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 12
+                }
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "conditional",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity": "climate.kondei_1",
+                  "state": [
+                    "auto",
+                    "dry",
+                    "fan_only"
+                  ]
+                }
+              ],
+              "card": {
+                "type": "tile",
+                "entity": "climate.kondei_1",
+                "name": "Комфорт",
+                "icon": "mdi:sofa-outline",
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "more-info"
+                },
+                "hide_state": true,
+                "features": [
+                  {
+                    "type": "climate-preset-modes",
+                    "style": "dropdown",
+                    "preset_modes": [
+                      "none",
+                      "sleep",
+                      "comfort"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 12
+                }
+              },
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "markdown",
+              "content": "Усиленный режим доступен при обогреве и охлаждении.",
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "В комнате",
+              "icon": "mdi:home-thermometer-outline"
+            },
+            {
+              "type": "grid",
+              "columns": 2,
+              "square": false,
+              "cards": [
+                {
+                  "type": "tile",
+                  "entity": "sensor.ekf_connect_ir_temperatura",
+                  "name": "Температура",
+                  "icon": "mdi:thermometer",
+                  "vertical": true,
+                  "tap_action": {
+                    "action": "more-info"
+                  },
+                  "icon_tap_action": {
+                    "action": "more-info"
+                  }
+                },
+                {
+                  "type": "tile",
+                  "entity": "sensor.ekf_connect_ir_vlazhnost",
+                  "name": "Влажность",
+                  "icon": "mdi:water-percent",
+                  "vertical": true,
+                  "tap_action": {
+                    "action": "more-info"
+                  },
+                  "icon_tap_action": {
+                    "action": "more-info"
+                  }
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "markdown",
+              "content": "Температура и влажность — показания EKF. Режим и настройки кондиционера — последняя отправленная команда.\n\nПока кондиционер выключен, изменение температуры, скорости и жалюзи не включает его.",
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "history-graph",
+              "title": "Температура и влажность · 24 часа",
+              "hours_to_show": 24,
+              "entities": [
+                {
+                  "entity": "sensor.ekf_connect_ir_temperatura",
+                  "name": "Температура"
+                },
+                {
+                  "entity": "sensor.ekf_connect_ir_vlazhnost",
+                  "name": "Влажность"
+                }
+              ],
+              "grid_options": {
+                "columns": 12
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
