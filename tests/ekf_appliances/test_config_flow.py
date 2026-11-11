@@ -120,7 +120,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             marker.schema: (marker, selector)
             for marker, selector in result["data_schema"].schema.items()
         }
-        self.assertEqual(set(fields), set(VALID) | {"tv_entity_id"})
+        self.assertEqual(set(fields), set(VALID) | {
+            "tv_entity_id", "tv_cast_entity_id", "tv_androidtv_entity_id",
+            "tv_music_assistant_entity_id", "tv_kodi_entity_id", "tv_source_entity_id",
+        })
         domains = {
             "remote_entity_id": "remote",
             "temperature_entity_id": "sensor",

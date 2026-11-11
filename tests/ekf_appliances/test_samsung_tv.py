@@ -480,3 +480,125 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HomeAssistantError):
             await self.player.async_select_source("TV")
         self.assertEqual(self.native_calls, [])
+
+
+class SamsungMediaRoutingTests(SamsungAdapterTests):
+    async def configure_media_sources(self):
+        registry = er.async_get(self.hass)
+        config = {}
+        for key, platform, object_id, unique_id in (
+            ("tv_cast_entity_id", "cast", "living_cast", "cast-uuid"),
+            ("tv_androidtv_entity_id", "androidtv_remote", "living_remote", "cast-mac"),
+            ("tv_music_assistant_entity_id", "music_assistant", "living_music", "cast-uuid"),
+            ("tv_kodi_entity_id", "kodi", "living_kodi", "kodi-uuid"),
+        ):
+            entry = await self.add_entry(platform + "-test", platform, {})
+            entity = registry.async_get_or_create(
+                "media_player", platform, unique_id,
+                suggested_object_id=object_id, config_entry=entry,
+            )
+            config[key] = entity.entity_id
+        config["tv_source_entity_id"] = "input_text.tv_source"
+        self.hass.config_entries.async_update_entry(self.entry, data={**CONFIG, **config})
+        self.runtime = ApplianceRuntime(self.hass, self.entry)
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.SamsungPowerCoordinator",
+            return_value=self.coordinator,
+        ):
+            self.player = SamsungTvMediaPlayer(self.runtime)
+        self.set_native("on")
+        self.hass.states.async_set("input_text.tv_source", "chromecast")
+        self.hass.states.async_set("media_player.living_remote", "on", {"supported_features": NATIVE_FEATURES})
+        self.hass.states.async_set("media_player.living_cast", "playing", {
+            "supported_features": NATIVE_FEATURES, "app_id": "C35B0678",
+            "app_name": "Music Assistant", "media_title": "Cast flow",
+            "volume_level": 0.2,
+        })
+        self.hass.states.async_set("media_player.living_music", "playing", {
+            "supported_features": NATIVE_FEATURES, "app_id": "music_assistant",
+            "source": "Music Assistant Queue", "active_queue": "cast-uuid",
+            "media_title": "Current song", "volume_level": 0.2,
+        })
+        self.hass.states.async_set("media_player.living_kodi", "off", {"supported_features": NATIVE_FEATURES})
+        await self.attach()
+        await self.hass.async_block_till_done()
+
+    async def test_music_assistant_owns_controls_and_metadata(self):
+        await self.configure_media_sources()
+        await self.player.async_media_pause()
+        await self.player.async_set_volume_level(0.25)
+        self.assertEqual(self.native_calls, [
+            ("media_pause", {"entity_id": "media_player.living_music"}),
+            ("volume_set", {"entity_id": "media_player.living_music", "volume_level": 0.25}),
+        ])
+        state = self.hass.states.get(self.player.entity_id)
+        self.assertEqual(state.state, "playing")
+        self.assertEqual(state.attributes["media_title"], "Current song")
+        self.assertEqual(state.attributes["volume_level"], 0.2)
+        self.assertEqual(self.commands, [])
+
+    async def test_external_cast_replaces_stale_music_assistant_session(self):
+        await self.configure_media_sources()
+        self.hass.states.async_set("media_player.living_cast", "paused", {
+            "supported_features": NATIVE_FEATURES, "app_id": "YouTube",
+            "app_name": "YouTube", "media_title": "A video",
+        })
+        await self.hass.async_block_till_done()
+        await self.player.async_media_play()
+        self.assertEqual(self.native_calls, [("media_play", {"entity_id": "media_player.living_cast"})])
+        self.assertEqual(self.hass.states.get(self.player.entity_id).state, "paused")
+        self.assertEqual(self.hass.states.get(self.player.entity_id).attributes["media_title"], "A video")
+
+    async def test_non_cast_android_app_uses_android_remote(self):
+        await self.configure_media_sources()
+        self.hass.states.async_set("media_player.living_cast", "off", {"supported_features": NATIVE_FEATURES})
+        await self.hass.async_block_till_done()
+        await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_remote"})])
+        self.assertEqual(self.player.state, "on")
+
+    async def test_explicit_pc_source_does_not_control_background_cast(self):
+        await self.configure_media_sources()
+        self.hass.states.async_set("input_text.tv_source", "pc")
+        self.hass.states.async_set("media_player.living_kodi", "playing", {
+            "supported_features": NATIVE_FEATURES, "media_title": "Kodi movie",
+        })
+        await self.hass.async_block_till_done()
+        await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_kodi"})])
+        self.assertEqual(self.hass.states.get(self.player.entity_id).attributes["media_title"], "Kodi movie")
+
+    async def test_tv_off_overrides_background_music_and_blocks_media(self):
+        await self.configure_media_sources()
+        self.coordinator.async_set_updated_data(False)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.hass.states.get(self.player.entity_id).state, "off")
+        self.assertNotIn("media_title", self.hass.states.get(self.player.entity_id).attributes)
+        with self.assertRaises(HomeAssistantError):
+            await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [])
+
+    async def test_other_music_player_cannot_take_over_cast(self):
+        await self.configure_media_sources()
+        er.async_get(self.hass).async_update_entity(
+            "media_player.living_music", new_unique_id="another-physical-cast"
+        )
+        await self.hass.async_block_till_done()
+        await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_cast"})])
+
+    async def test_cast_entity_rename_updates_routing_without_losing_identity(self):
+        await self.configure_media_sources()
+        before = self.player.unique_id
+        er.async_get(self.hass).async_update_entity(
+            "media_player.living_cast", new_entity_id="media_player.cast_renamed"
+        )
+        self.hass.states.async_remove("media_player.living_cast")
+        self.hass.states.async_set("media_player.cast_renamed", "playing", {
+            "supported_features": NATIVE_FEATURES, "app_id": "YouTube",
+        })
+        await self.hass.async_block_till_done()
+        await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.cast_renamed"})])
+        self.assertEqual(self.entry.data["tv_cast_entity_id"], "media_player.cast_renamed")
+        self.assertEqual(self.player.unique_id, before)
