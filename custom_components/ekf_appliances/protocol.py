@@ -8,13 +8,13 @@ from types import MappingProxyType
 MODES = MappingProxyType({"auto":0, "cool":1, "dry":2, "heat":4, "fan_only":6})
 FANS = MappingProxyType({"auto":5, "low":3, "medium":2, "high":1})
 SWINGS = ("off", "vertical")
-PRESETS = ("none", "sleep", "comfort", "boost")
+PRESETS = ("none", "sleep", "boost")
 PROJECTOR_COMMANDS = MappingProxyType({
     "power":0x01, "play_pause":0x5F, "source":0x04, "up":0x0B,
     "down":0x0F, "left":0x49, "right":0x4A, "menu":0x0A,
     "back":0x54, "vol_down":0x10, "mute":0x6A, "vol_up":0x0C,
 })
-OFF_STATE = bytes.fromhex("A6 90 00 02 00 A0 00 80 00 00 00 00 05 5D")
+OFF_STATE = bytes.fromhex("A6 90 00 00 00 A0 00 80 00 00 00 00 05 5B")
 
 
 def haier_state(mode: str, temperature: float, fan: str, swing: str, preset: str) -> bytes:
@@ -36,7 +36,7 @@ def haier_state(mode: str, temperature: float, fan: str, swing: str, preset: str
     state = bytearray(14)
     state[0] = 0xA6
     state[1] = ((int(temperature) - 16) << 4) | (0xC if swing == "vertical" else 0)
-    state[3] = 0x02 if preset == "comfort" else 0
+    state[3] = 0  # Health/Filter is unsupported; see upstream issue #1894.
     state[4] = 0x40
     state[5] = FANS[fan] << 5
     state[6] = 0x40 if preset == "boost" and mode in ("cool", "heat") else 0

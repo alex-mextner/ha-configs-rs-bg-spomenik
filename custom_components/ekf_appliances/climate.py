@@ -108,6 +108,8 @@ class HaierClimate(EkfEntity, ClimateEntity, RestoreEntity):
                 fan=attrs.get("fan_mode", "auto"), swing=attrs.get("swing_mode", "off"),
                 preset=attrs.get("preset_mode", "none"), last_mode=last_mode,
             )
+            if candidate.preset == "comfort":
+                candidate = replace(candidate, preset="none")
             if candidate.preset == "boost" and mode not in ("off", "cool", "heat"):
                 candidate = replace(candidate, preset="none")
             try:

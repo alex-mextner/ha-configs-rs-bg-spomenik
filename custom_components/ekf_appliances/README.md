@@ -20,9 +20,9 @@ The temperature sensor must report a recognized temperature unit; unknown, unava
 
 ## Devices and capabilities
 
-**Haier:** full-state off/cool/heat/dry/fan/auto; 16–30°C in 1°C steps; auto/low/medium/high fan; off/vertical swing; none/sleep/comfort/boost presets. Boost is available in cool/heat. Switching to another active mode clears boost. While off, changing desired settings does not turn the AC on. Explicit off always sends the model-specific off command, even when the assumed state is already off.
+**Haier:** full-state off/cool/heat/dry/fan/auto; 16–30°C in 1°C steps; auto/low/medium/high fan; off/vertical swing; none/sleep/boost presets. Boost is available in cool/heat. Switching to another active mode clears boost. While off, changing desired settings does not turn the AC on. Explicit off always sends the model-specific off command, even when the assumed state is already off.
 
-The first setup defaults to off, 24°C, auto fan, no swing/preset, and previous mode cool. Later reloads restore the previous assumed mode and desired settings without transmitting. The native target temperature is persisted separately from HA's display-unit conversion.
+The first setup defaults to off, 24°C, auto fan, no swing/preset, and previous mode cool. Later reloads restore the previous assumed mode and desired settings without transmitting. The native target temperature is persisted separately from HA's display-unit conversion. A legacy Comfort preset restores as None while preserving the other valid settings; restoration still sends no IR commands.
 
 **Projector:** media power, relative volume, and play/pause toggle; twelve raw buttons for power, play/pause, source cycle, up/down/left/right, menu, back, volume down/up, and mute. Mute is a raw toggle button, not an absolute media-player mute capability. No absolute volume, discrete input selection, or unverified OK command is invented.
 
@@ -48,11 +48,11 @@ Raw commands use standard `remote.send_command` with `b64:` unsigned little-endi
 
 A successful HA service call is not physical acknowledgment. Tuya Local may absorb some underlying connection errors; IR appliances provide no return channel. Entities therefore expose assumed operating state. Surfaced service failures abort the command and leave the last committed climate settings intact, but a partially delivered transmission may already have affected the appliance.
 
-Protocol facts are taken from the user's previously verified ESPHome configuration and IRremoteESP8266 **2.9.0** [ir_Haier.cpp](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.cpp) / [ir_Haier.h](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.h). The independent encoders include the exact fourteen-byte off frame and extended-NEC address 0xBD00. Full-state commands follow [IRac::haierYrwo2](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/IRac.cpp): Power command byte 0x05 is set last, while the heat/cool mode bits remain 4/1. The old custom component’s Turbo/Health setter-order artifact is removed. No third-party integration code is copied.
+Wire formats are based on the existing ESPHome configuration and IRremoteESP8266 **2.9.0** [ir_Haier.cpp](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.cpp) / [ir_Haier.h](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.h). The independent encoders include a fourteen-byte off frame with Health disabled and extended-NEC address 0xBD00. Full-state commands follow [IRac::haierYrwo2](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/IRac.cpp): Power command byte 0x05 is set last, while the heat/cool mode bits remain 4/1. The old custom component’s Turbo/Health setter-order artifact is removed. No third-party integration code is copied.
 
 ## Verification
 
-The focused suite uses real HA config flows, services, registries, and EntityPlatform lifecycle with an in-memory service boundary. **48 tests pass** on HA 2026.9.3 / Python 3.14.6, covering literal wire fixtures, invalid inputs, real sensor units, state restoration, failure behavior, command serialization, cancellation, idempotent projector scripts, and gateway-linked canonical renaming of all fourteen entities.
+The focused suite uses real HA config flows, services, registries, and EntityPlatform lifecycle with an in-memory service boundary. **50 tests pass** on HA 2026.9.3 / Python 3.14.6, covering literal wire fixtures, invalid inputs, real sensor units, state restoration, failure behavior, command serialization, cancellation, idempotent projector scripts, gateway-linked canonical renaming of all fourteen entities, Health exclusion, and legacy Comfort normalization.
 
 Run on the ODROID using the installed image, with no network or live config mount:
 
@@ -67,3 +67,7 @@ docker run --rm --pull never --network none --read-only \
 ```
 
 The unrelated repository-wide suite needs absent development environments and was not installed or run. Runtime UI verification and appliance reception checks belong to the deployment task.
+
+## Health/Filter compatibility
+
+Health/Filter is disabled in every Haier frame, including OFF. The unsupported Comfort preset is neither offered nor accepted. [Upstream issue #1894](https://github.com/crankyoldgit/IRremoteESP8266/issues/1894) reports a Haier model displaying the cooling indicator despite a correctly encoded heat mode when byte 3 bit 1 (Health) is enabled. Its original working heat capture is an independent regression fixture; it is a different model and does not by itself establish this unit's physical behavior. Heat remains native mode 4, cool mode 1, and full-state Power command 5.

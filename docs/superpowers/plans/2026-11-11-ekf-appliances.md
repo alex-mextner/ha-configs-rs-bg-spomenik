@@ -34,10 +34,10 @@
 
 **Interfaces:** `haier_state(mode, temperature, fan, swing, preset) -> bytes`; `haier_pulses(state) -> tuple[int, ...]`; `projector_pulses(command) -> tuple[int, ...]`; `encode_pulses(pulses) -> str`; `Transport(send: async callback).async_send(pulses, repeats=1, gap=0) -> None`.
 
-- [x] Write literal fixtures: off ending 05 5D; cool/24/auto/off/none = A6 80 00 00 40 A0 00 20 00 00 00 00 05 2B; Haier frame 230 timings; NEC power data 00 BD 01 FE LSB-first; LE16 encoding; invalid mode/range tests.
+- [x] Write literal fixtures: off with Health disabled ending 05 5B; cool/24/auto/off/none = A6 80 00 00 40 A0 00 20 00 00 00 00 05 2B; Haier frame 230 timings; NEC power data 00 BD 01 FE LSB-first; LE16 encoding; invalid mode/range tests.
 - [x] Run stdlib unittest and verify missing functionality fails.
 - [x] Implement independent encoders and transport; serialize whole bursts and propagate errors.
-- [x] Verify exact six sends/five gaps, no interleaving, and pure protocol suite passing.
+- [x] Verify one Haier send per action, no interleaving, and pure protocol suite passing.
 - [x] Commit protocol/transport and tests.
 
 ### Task 2: HA devices and configuration
@@ -63,7 +63,7 @@
 
 ## Verification and decisions
 
-- Complete focused suite: 47/47 on isolated HA 2026.9.3 / Python 3.14.6, no-network, read-only code mount.
+- Complete focused suite: 50/50 on isolated HA 2026.9.3 / Python 3.14.6, no-network, read-only code mount.
 - Independent reviewers checked protocol, runtime, platforms, and flow. Concrete findings gained failing regression tests before fixes.
 - First setup is off; later reload restores valid assumed mode without transmitting, per root clarification.
 - Pacing includes the complete single-frame waveform duration; cancellation retains a quiet-time deadline.
@@ -76,3 +76,12 @@
 ## Follow-up verification
 
 The user explicitly removed the old six-frame workaround. A failing one-frame service assertion and corrected literal full-state vectors preceded the runtime/protocol changes. A registered-gateway regression exercises all fourteen canonical entity renames and exposed the deprecated via_device call; the implementation now passes the gateway ID directly.
+
+## Health/Filter correction
+
+- [x] Confirm issue #1894 identifies Health as a cause of the incorrect cooling indicator with heat selected; retain its literal original-remote heat capture as independent evidence.
+- [x] Observe failing tests for legacy Comfort restoration, unsupported preset exposure/acceptance, and OFF-frame Health/checksum.
+- [x] Remove Comfort, clear Health from all frames, and normalize legacy restoration without IR; preserve mode values and transport behavior.
+- [x] Verify the focused HA suite and receive independent review approval before the scoped correction commit.
+
+Health correction verification: five expected failures before implementation; 50/50 passing afterward in 0.924s using the isolated HA image. Compile and diff checks passed. Only climate/protocol production files changed; no device commands or live edits were made by this worker.
