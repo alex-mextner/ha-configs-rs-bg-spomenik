@@ -1,0 +1,16 @@
+{
+  "domain": "ekf_appliances",
+  "name": "EKF Appliances",
+  "codeowners": [
+    "@alex-mextner"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "remote"
+  ],
+  "documentation": "https://github.com/alex-mextner/ha-configs-rs-bg-stanka_vraza/tree/main/custom_components/ekf_appliances",
+  "integration_type": "hub",
+  "iot_class": "assumed_state",
+  "requirements": [],
+  "version": "0.1.0"
+}

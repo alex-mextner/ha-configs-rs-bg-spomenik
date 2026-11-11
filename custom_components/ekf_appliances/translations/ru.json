@@ -1,0 +1,45 @@
+{
+  "title": "Устройства EKF",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Подключение устройств EKF",
+        "description": "Добавьте управление кондиционером Haier и проектором Toshiba через существующий пульт EKF.",
+        "data": {
+          "remote_entity_id": "Инфракрасный пульт",
+          "temperature_entity_id": "Датчик температуры комнаты",
+          "projector_power_entity_id": "Помощник питания проектора",
+          "projector_on_script": "Скрипт включения проектора",
+          "projector_off_script": "Скрипт выключения проектора"
+        },
+        "data_description": {
+          "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
+          "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off."
+        }
+      },
+      "reconfigure": {
+        "title": "Изменение подключений",
+        "description": "Выберите пульт, датчик температуры, помощник питания и скрипты для этих устройств.",
+        "data": {
+          "remote_entity_id": "Инфракрасный пульт",
+          "temperature_entity_id": "Датчик температуры комнаты",
+          "projector_power_entity_id": "Помощник питания проектора",
+          "projector_on_script": "Скрипт включения проектора",
+          "projector_off_script": "Скрипт выключения проектора"
+        },
+        "data_description": {
+          "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
+          "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off."
+        }
+      }
+    },
+    "error": {
+      "invalid_entity": "Выберите существующий объект указанного типа."
+    },
+    "abort": {
+      "already_configured": "Этот инфракрасный пульт уже настроен.",
+      "already_in_progress": "Настройка этого инфракрасного пульта уже выполняется.",
+      "reconfigure_successful": "Подключения устройств обновлены."
+    }
+  }
+}
