@@ -99,4 +99,9 @@ class PlantCareSensor(SensorEntity):
             "wet_risk": record.get("wet_risk", "unknown"),
             "forecast_status": record.get("forecast_status", "insufficient_data"),
             "voice_unavailable_reason": record.get("voice_unavailable_reason"),
+            "voice_target": record.get("voice_target"),
+            "voice_target_name": record.get("voice_target_name"),
+            "voice_target_available": record.get("voice_target_available", False),
+            "voice_config_entry_id": (self.manager.voice_entry.entry_id
+                                      if self.manager.voice_entry else None),
         }

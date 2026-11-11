@@ -40,7 +40,6 @@ automation:
       path: plant_care/alerts.yaml
       input:
         notify_target: mobile_app_echowhiskey536
-        speaker: media_player.yandex_station_m00zrw3008rajg
         voice_toggle: input_boolean.plant_care_voice_enabled
         voice_start: "08:00:00"
         voice_end: "22:00:00"

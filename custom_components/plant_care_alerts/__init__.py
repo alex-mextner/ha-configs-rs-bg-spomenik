@@ -10,6 +10,7 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, EVENT_STATE_CHANGED
 from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from homeassistant.helpers import config_validation as cv
@@ -23,6 +24,7 @@ from homeassistant.util import dt as dt_util
 from .analytics import analyze
 from .photo import persist_photo
 from .state_machine import evaluate, finite
+from .voice import async_announce, configured_target, target_available
 
 DOMAIN = "plant_care_alerts"
 RETRY_DELAYS = (60, 300, 900, 3600)
@@ -207,6 +209,35 @@ async def async_setup(hass: Any, config: Any) -> bool:
 
     hass.services.async_register(DOMAIN, "snooze", snooze,
                                  schema=vol.Schema({vol.Required("entity_id"): cv.entity_id}))
+    async def announce(call: Any) -> None:
+        await async_announce(hass, manager.voice_target, call.data["message"])
+
+    hass.services.async_register(
+        DOMAIN, "announce", announce,
+        schema=vol.Schema({vol.Required("message"): cv.string}),
+    )
+    return True
+
+
+async def async_setup_entry(hass: Any, entry: ConfigEntry) -> bool:
+    """Attach persisted UI preferences to the existing YAML alert engine."""
+    manager = hass.data[DOMAIN]
+    manager.voice_entry = entry
+
+    async def options_updated(_hass: Any, _entry: ConfigEntry) -> None:
+        await manager.async_refresh()
+
+    entry.async_on_unload(entry.add_update_listener(options_updated))
+    await manager.async_refresh()
+    return True
+
+
+async def async_unload_entry(hass: Any, entry: ConfigEntry) -> bool:
+    """Keep plant monitoring intact when notification preferences are unloaded."""
+    manager = hass.data.get(DOMAIN)
+    if manager is not None and manager.voice_entry is entry:
+        manager.voice_entry = None
+        await manager.async_refresh()
     return True
 
 
@@ -225,11 +256,17 @@ class CareManager:
         self.history_loaded = set()
         self.history_attempts = {}
         self.busy = False
+        self.voice_entry = None
         self.settings = {
             "confirm_seconds": config["confirmation_hours"] * 3600,
             "overdue_seconds": config["overdue_hours"] * 3600,
             "stale_seconds": config["stale_minutes"] * 60,
         }
+
+    @property
+    def voice_target(self) -> str | None:
+        """One setting drives the card and the delivery path."""
+        return configured_target(self.voice_entry, self.config.get("voice_speaker"))
 
     async def load(self) -> None:
         """Restore alert timing through the supported Home Assistant storage API."""
@@ -404,7 +441,7 @@ class CareManager:
         wet = finite(wet_state.state) if wet_state else None
         calibration = [dry, wet] if dry is not None and wet is not None and wet > dry else None
         self.watched.update(x for x in [*calibration_ids.values(), self.config.get("voice_toggle"),
-                                        self.config.get("voice_speaker")] if x)
+                                        self.voice_target] if x)
         points = current.get("adc_samples", [])
         if "adc_identity" in current and current["adc_identity"] != raw_id:
             points = []
@@ -476,17 +513,20 @@ class CareManager:
         current["forecast_voice_at"] = self._voice_hour(forecast + self.settings["overdue_seconds"], now) if forecast else None
         due = current.get("due_since") or forecast
         toggle = self.hass.states.get(self.config.get("voice_toggle", "input_boolean.plant_care_voice_enabled"))
-        speaker = self.hass.states.get(self.config.get("voice_speaker", "media_player.yandex_station_m00zrw3008rajg"))
+        speaker = self.hass.states.get(self.voice_target) if self.voice_target else None
         reason = None
         if toggle is None or toggle.state != "on":
             reason = "Голосовые напоминания выключены"
-        elif speaker is None or speaker.state in ("unavailable", "unknown"):
+        elif not target_available(speaker):
             reason = "Колонка недоступна"
         elif current.get("status") == "sensor_error":
             reason = "Нет свежих показаний датчика"
         elif not due:
             reason = "Нет достоверной оценки времени полива"
         current["voice_unavailable_reason"] = reason
+        current["voice_target"] = self.voice_target
+        current["voice_target_name"] = speaker.attributes.get("friendly_name", self.voice_target) if speaker else None
+        current["voice_target_available"] = target_available(speaker)
         current["voice_next_at"] = (self._voice_hour(max(due + self.settings["overdue_seconds"], current.get("snoozed_until") or 0), now)
                                     if reason is None else None)
 

@@ -1,0 +1,34 @@
+{
+  "title": "Plants — watering reminders",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Speaker for watering reminders",
+        "description": "Select the speaker used for all plants. For a local AISIS speaker choose its Speak/Notify entity. The voice reminder switch and quiet hours stay in effect.",
+        "data": {
+          "voice_target": "Speaker"
+        }
+      }
+    },
+    "error": {
+      "invalid_speaker": "Select a Yandex Station or the speech notification entity of a local AISIS speaker."
+    },
+    "abort": {
+      "already_configured": "Watering reminders are already configured. Use Configure to change the speaker."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Speaker for watering reminders",
+        "description": "This speaker receives watering reminders for all plants. Changes apply immediately without restarting Home Assistant.",
+        "data": {
+          "voice_target": "Speaker"
+        }
+      }
+    },
+    "error": {
+      "invalid_speaker": "Select a Yandex Station or the speech notification entity of a local AISIS speaker."
+    }
+  }
+}

@@ -36,3 +36,11 @@ set_photo:
       required: true
       selector:
         text:
+announce:
+  name: Озвучить напоминание на выбранной колонке
+  description: Отправить текст один раз на колонку из настроек напоминаний о поливе.
+  fields:
+    message:
+      required: true
+      selector:
+        text:

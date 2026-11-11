@@ -14,11 +14,6 @@ blueprint:
       default: ""
       selector:
         text:
-    speaker:
-      name: Яндекс.Станция для напоминаний
-      selector:
-        entity:
-          domain: media_player
     voice_toggle:
       name: Переключатель голосовых напоминаний (необязательно)
       default: ""
@@ -42,7 +37,6 @@ blueprint:
         text:
 variables:
   notify_target: !input notify_target
-  speaker: !input speaker
   voice_toggle: !input voice_toggle
   dashboard_url: !input dashboard_url
   change_entity: >-
@@ -162,17 +156,16 @@ actions:
             value_template: >-
               {{ trigger is defined and trigger.id == 'hourly' and overdue_plants | count > 0
                  and (voice_toggle == '' or is_state(voice_toggle, 'on'))
-                 and states(speaker) not in ['unavailable','unknown'] }}
+                 and (states.sensor | selectattr('attributes.plant_care', 'defined')
+                      | selectattr('attributes.plant_care', 'equalto', true)
+                      | selectattr('attributes.voice_target_available', 'equalto', true) | list | count > 0) }}
           - condition: time
             after: !input voice_start
             before: !input voice_end
         sequence:
-          - action: media_player.play_media
-            target:
-              entity_id: !input speaker
+          - action: plant_care_alerts.announce
             data:
-              media_content_type: text
-              media_content_id: >-
+              message: >-
                 Напоминание о поливе. {{ overdue_plants | join(', ') | replace('<','') | replace('>','') }}.
                 Полив просрочен больше суток. Проверьте землю и полейте растения.
 mode: queued

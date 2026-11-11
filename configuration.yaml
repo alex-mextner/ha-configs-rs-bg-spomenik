@@ -183,6 +183,8 @@ homeassistant:
 lovelace:
   resource_mode: yaml
   resources:
+    - url: /local/plant-care/plant-care-card.js?v=20261111-speaker
+      type: module
     - url: /local/u1-share/u1-inspector-card.js?v=20260919b
       type: module
     - url: /local/network-devices/network-devices-card.js?v=20260925i
