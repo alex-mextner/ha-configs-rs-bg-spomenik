@@ -43,8 +43,8 @@ class ApplianceRuntime:
         )
         remote = er.async_get(self.hass).async_get(self.remote_entity_id)
         gateway = dr.async_get(self.hass).async_get(remote.device_id) if remote and remote.device_id else None
-        if gateway and gateway.identifiers:
-            info["via_device"] = sorted(gateway.identifiers)[0]
+        if gateway:
+            info["via_device_id"] = gateway.id
         return info
 
     async def _async_send(self, command: str) -> None:
@@ -60,7 +60,7 @@ class ApplianceRuntime:
             raise HomeAssistantError(f"IR transmitter command failed: {err}") from err
 
     async def async_send_haier(self, state: bytes) -> None:
-        await self.transport.async_send(haier_pulses(state), repeats=6, gap=0.15)
+        await self.transport.async_send(haier_pulses(state), repeats=1)
 
     async def async_send_projector(self, command: str) -> None:
         await self.transport.async_send(projector_pulses(command))
