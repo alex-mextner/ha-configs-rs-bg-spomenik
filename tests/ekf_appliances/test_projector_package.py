@@ -30,6 +30,8 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
         self.helper_writes = []
         self.lifecycle = []
         self.feedback_after_press = None
+        self.refreshes = 0
+        self.feedback_after_refresh = None
 
         async def press(call):
             self.presses.append(dict(call.data))
@@ -45,6 +47,12 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
         async def lifecycle(call):
             self.lifecycle.append((call.domain, call.service, dict(call.data)))
 
+        async def refresh(call):
+            self.refreshes += 1
+            if self.feedback_after_refresh:
+                self.feedback_after_refresh(self.refreshes)
+
+        self.hass.services.async_register("homeassistant", "update_entity", refresh)
         self.hass.services.async_register("button", "press", press)
         for service in ("turn_on", "turn_off"):
             self.hass.services.async_register("input_boolean", service, helper)
@@ -151,3 +159,13 @@ class ProjectorPackageTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(0.05):
                 await self.run_sequence(self.config["script"]["projector_turn_off"]["sequence"])
         self.assertEqual(self.presses, [])
+
+
+    async def test_second_power_is_blocked_by_fresh_unknown_feedback(self):
+        self.stable_on()
+        self.feedback_after_refresh = lambda count: self.hass.states.async_set(
+            "binary_sensor.projector_hdmi_connected", "unknown"
+        ) if count == 2 else None
+        await self.run_sequence(self.config["script"]["projector_turn_off"]["sequence"])
+        self.assertEqual(self.refreshes, 2)
+        self.assertEqual(len(self.presses), 1)
