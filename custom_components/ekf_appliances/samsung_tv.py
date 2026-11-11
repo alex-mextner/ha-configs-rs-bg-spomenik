@@ -18,7 +18,8 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_TV_ENTITY_ID
+from .const import CONF_TV_ENTITY_ID, CONF_TV_ANDROIDTV_ENTITY_ID
+from .media_routing import TelevisionMediaRouting
 from .protocol import samsung_pulses
 from .runtime import ApplianceRuntime
 from .samsung_power import SamsungPowerCoordinator
@@ -54,7 +55,7 @@ _NATIVE_PROPERTIES = (
 
 
 class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlayerEntity):
-    """Keep the native device identity and replace only its power path."""
+    """Combine display power with the media source that owns playback."""
 
     _attr_has_entity_name = True
     _attr_name = None
@@ -92,6 +93,7 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
         if not isinstance(host, str) or not host.strip() or not isinstance(model, str) or not model.strip():
             raise HomeAssistantError("The native Samsung TV must have a host and model")
         super().__init__(SamsungPowerCoordinator(hass, runtime.entry, host, model))
+        self.media_routing = TelevisionMediaRouting(hass, runtime.entry)
         self._backend_registry_id = backend.id
         self._attr_unique_id = f"{runtime.entry.entry_id}_samsung_{backend.unique_id}"
         # DeviceInfo lookup is scoped to its config entry in HA 2026. Reuse the
@@ -125,7 +127,8 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
         # The native entity may be unavailable in standby, when IR ON is needed.
         # An IR outage must not hide working LAN volume/source controls.
         return self.runtime.available or (
-            self.coordinator.data is not False and self._native_available
+            self.coordinator.data is not False
+            and (self._native_available or self._media_state is not None)
         )
 
     @property
@@ -133,25 +136,48 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
         if self.coordinator.data is False:
             return MediaPlayerState.OFF
         if self.coordinator.data is True:
+            media = self._media_state
+            if media is not None and media.state in ("playing", "paused", "buffering"):
+                return MediaPlayerState(media.state)
             return MediaPlayerState.ON
         return None
 
     @property
+    def _media_state(self):
+        return self.media_routing.choose(self._backend_state)
+
+    @property
     def supported_features(self) -> Feature:
+        features = Feature.TURN_ON | Feature.TURN_OFF
+        for target in self.media_routing.command_candidates(self._backend_state):
+            features |= Feature(int(target.attributes.get("supported_features", 0))) & (
+                _NATIVE_FEATURES & ~Feature.SELECT_SOURCE
+            )
         backend = self._backend_state
-        features = int(backend.attributes.get("supported_features", 0)) if backend else 0
-        return Feature(features) & _NATIVE_FEATURES | Feature.TURN_ON | Feature.TURN_OFF
+        if backend:
+            features |= Feature(int(backend.attributes.get("supported_features", 0))) & Feature.SELECT_SOURCE
+        return features
+
+    @property
+    def extra_state_attributes(self):
+        target = self._media_state
+        return {
+            "media_control_entity_id": target.entity_id if target else None,
+            "media_control_source": self.media_routing.source if self.media_routing.configured else "tv",
+        }
 
     @callback
     def _copy_native_attributes(self) -> None:
         """Populate the public media properties; HA builds the state attributes."""
         backend = self._backend_state
-        attributes = backend.attributes if (
-            self.coordinator.data is not False and backend is not None
-            and backend.state not in ("off", "unknown", "unavailable")
+        target = self._media_state
+        attributes = target.attributes if (
+            self.coordinator.data is True and target is not None
+            and target.state not in ("off", "unknown", "unavailable")
         ) else {}
         for name in _NATIVE_PROPERTIES:
             setattr(self, f"_attr_{name}", attributes.get(name))
+        self._attr_source = backend.attributes.get("source") if backend and self.coordinator.data is True else None
         self._attr_source_list = backend.attributes.get("source_list") if backend else None
         self._attr_media_image_url = attributes.get("entity_picture")
 
@@ -172,13 +198,16 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
     @callback
     def _subscribe_backend(self) -> None:
         self._unsubscribe_backend()
+        entity_ids = self.media_routing.entity_ids
         if entity_id := self.backend_entity_id:
+            entity_ids.append(entity_id)
+        if entity_ids:
             self._backend_unsubscribers = [
                 async_track_state_change_event(
-                    self.hass, [entity_id], self._async_dependency_changed
+                    self.hass, entity_ids, self._async_dependency_changed
                 ),
                 async_track_entity_registry_updated_event(
-                    self.hass, [entity_id], self._async_backend_registry_changed
+                    self.hass, entity_ids, self._async_backend_registry_changed
                 ),
             ]
 
@@ -196,12 +225,14 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
     @callback
     def _async_backend_registry_changed(self, _event) -> None:
         self._subscribe_backend()
-        if entity_id := self.backend_entity_id:
-            data = self.runtime.entry.data
-            if data.get(CONF_TV_ENTITY_ID) != entity_id:
-                self.hass.config_entries.async_update_entry(
-                    self.runtime.entry, data={**data, CONF_TV_ENTITY_ID: entity_id}
-                )
+        data = self.runtime.entry.data
+        changes = self.media_routing.renamed_data()
+        if (entity_id := self.backend_entity_id) and data.get(CONF_TV_ENTITY_ID) != entity_id:
+            changes[CONF_TV_ENTITY_ID] = entity_id
+        if changes:
+            self.hass.config_entries.async_update_entry(
+                self.runtime.entry, data={**data, **changes}
+            )
         self._copy_native_attributes()
         self.async_write_ha_state()
 
@@ -296,40 +327,62 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
             blocking=True, context=self._context,
         )
 
+    async def _async_media(self, service: str, **data: Any) -> None:
+        if self.coordinator.data is False:
+            raise HomeAssistantError("The television is off")
+        required = _NATIVE_SERVICES[service]
+        candidates = self.media_routing.command_candidates(self._backend_state)
+        if service == "play_media" and data.get("media_content_type") == "app":
+            android = self.media_routing.state(CONF_TV_ANDROIDTV_ENTITY_ID)
+            if self.media_routing.source == "chromecast" and self.media_routing.ready(android):
+                candidates = [android]
+        target = next((
+            item for item in candidates
+            if self.media_routing.ready(item)
+            and item.entity_id != self.entity_id
+            and Feature(int(item.attributes.get("supported_features", 0))) & required == required
+        ), None)
+        if target is None:
+            raise HomeAssistantError(f"The active media source is not ready for {service}")
+        await self.runtime.hass.services.async_call(
+            "media_player", service, {**data, "entity_id": target.entity_id},
+            blocking=True, context=self._context,
+        )
+
     async def async_select_source(self, source: str) -> None:
         await self._async_native("select_source", source=source)
 
     async def async_set_volume_level(self, volume: float) -> None:
-        await self._async_native("volume_set", volume_level=volume)
+        await self._async_media("volume_set", volume_level=volume)
 
     async def async_mute_volume(self, mute: bool) -> None:
-        await self._async_native("volume_mute", is_volume_muted=mute)
+        await self._async_media("volume_mute", is_volume_muted=mute)
 
     async def async_volume_up(self) -> None:
-        await self._async_native("volume_up")
+        await self._async_media("volume_up")
 
     async def async_volume_down(self) -> None:
-        await self._async_native("volume_down")
+        await self._async_media("volume_down")
 
     async def async_media_play(self) -> None:
-        await self._async_native("media_play")
+        await self._async_media("media_play")
 
     async def async_media_pause(self) -> None:
-        await self._async_native("media_pause")
+        await self._async_media("media_pause")
 
     async def async_media_play_pause(self) -> None:
-        await self._async_native("media_play_pause")
+        await self._async_media("media_play_pause")
 
     async def async_media_stop(self) -> None:
-        await self._async_native("media_stop")
+        await self._async_media("media_stop")
 
     async def async_media_next_track(self) -> None:
-        await self._async_native("media_next_track")
+        await self._async_media("media_next_track")
 
     async def async_media_previous_track(self) -> None:
-        await self._async_native("media_previous_track")
+        await self._async_media("media_previous_track")
 
     async def async_play_media(self, media_type: str, media_id: str, **kwargs: Any) -> None:
-        await self._async_native(
+        await self._async_media(
             "play_media", **{**kwargs, "media_content_type": media_type, "media_content_id": media_id}
         )

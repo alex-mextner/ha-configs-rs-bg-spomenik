@@ -11,13 +11,23 @@
           "projector_power_entity_id": "Датчик состояния проектора",
           "projector_on_script": "Скрипт включения проектора",
           "projector_off_script": "Скрипт выключения проектора",
-          "tv_entity_id": "Телевизор Samsung"
+          "tv_entity_id": "Телевизор Samsung",
+          "tv_cast_entity_id": "Chromecast — воспроизведение",
+          "tv_androidtv_entity_id": "Chromecast — пульт Android TV",
+          "tv_music_assistant_entity_id": "Music Assistant — этот Chromecast",
+          "tv_kodi_entity_id": "Kodi — воспроизведение",
+          "tv_source_entity_id": "Текущий источник телевизора"
         },
         "data_description": {
           "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
           "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off.",
           "projector_power_entity_id": "Выберите датчик, который определяет состояние проектора, например по HDMI-подключению.",
-          "tv_entity_id": "Выберите телевизор из интеграции Samsung Smart TV. Оставьте поле пустым, если не нужно добавлять управление телевизором."
+          "tv_entity_id": "Выберите телевизор из интеграции Samsung Smart TV. Оставьте поле пустым, если не нужно добавлять управление телевизором.",
+          "tv_cast_entity_id": "Необязательно. Состояние и управление трансляцией Chromecast.",
+          "tv_androidtv_entity_id": "Необязательно. Управление приложениями Android, которые не показывают воспроизведение через Cast.",
+          "tv_music_assistant_entity_id": "Необязательно. Выберите этот же Chromecast в Music Assistant. Управление очередью используется, только когда Music Assistant воспроизводит на нём музыку.",
+          "tv_kodi_entity_id": "Необязательно. Управление Kodi, когда текущий источник — pc, projector или kodi.",
+          "tv_source_entity_id": "Необязательно. Существующий текстовый помощник со значением chromecast, pc, projector, kodi или tv. Без помощника используется Chromecast."
         }
       },
       "reconfigure": {
@@ -29,19 +39,30 @@
           "projector_power_entity_id": "Датчик состояния проектора",
           "projector_on_script": "Скрипт включения проектора",
           "projector_off_script": "Скрипт выключения проектора",
-          "tv_entity_id": "Телевизор Samsung"
+          "tv_entity_id": "Телевизор Samsung",
+          "tv_cast_entity_id": "Chromecast — воспроизведение",
+          "tv_androidtv_entity_id": "Chromecast — пульт Android TV",
+          "tv_music_assistant_entity_id": "Music Assistant — этот Chromecast",
+          "tv_kodi_entity_id": "Kodi — воспроизведение",
+          "tv_source_entity_id": "Текущий источник телевизора"
         },
         "data_description": {
           "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
           "projector_off_script": "Если поле пустое, используется существующий скрипт Projector turn off.",
           "projector_power_entity_id": "Выберите датчик, который определяет состояние проектора, например по HDMI-подключению.",
-          "tv_entity_id": "Выберите телевизор из интеграции Samsung Smart TV. Оставьте поле пустым, если не нужно добавлять управление телевизором."
+          "tv_entity_id": "Выберите телевизор из интеграции Samsung Smart TV. Оставьте поле пустым, если не нужно добавлять управление телевизором.",
+          "tv_cast_entity_id": "Необязательно. Состояние и управление трансляцией Chromecast.",
+          "tv_androidtv_entity_id": "Необязательно. Управление приложениями Android, которые не показывают воспроизведение через Cast.",
+          "tv_music_assistant_entity_id": "Необязательно. Выберите этот же Chromecast в Music Assistant. Управление очередью используется, только когда Music Assistant воспроизводит на нём музыку.",
+          "tv_kodi_entity_id": "Необязательно. Управление Kodi, когда текущий источник — pc, projector или kodi.",
+          "tv_source_entity_id": "Необязательно. Существующий текстовый помощник со значением chromecast, pc, projector, kodi или tv. Без помощника используется Chromecast."
         }
       }
     },
     "error": {
       "invalid_entity": "Выберите существующий объект указанного типа.",
-      "invalid_tv_entity": "Выберите существующий телевизор из интеграции Samsung Smart TV."
+      "invalid_tv_entity": "Выберите существующий телевизор из интеграции Samsung Smart TV.",
+      "different_cast_player": "Выберите тот же Chromecast в Music Assistant."
     },
     "abort": {
       "already_configured": "Этот инфракрасный пульт уже настроен.",

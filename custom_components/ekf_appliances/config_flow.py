@@ -16,6 +16,11 @@ from .const import (
     CONF_REMOTE_ENTITY_ID,
     CONF_TEMPERATURE_ENTITY_ID,
     CONF_TV_ENTITY_ID,
+    CONF_TV_CAST_ENTITY_ID,
+    CONF_TV_ANDROIDTV_ENTITY_ID,
+    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID,
+    CONF_TV_KODI_ENTITY_ID,
+    CONF_TV_SOURCE_ENTITY_ID,
     DEFAULT_PROJECTOR_OFF_SCRIPT,
     DEFAULT_PROJECTOR_ON_SCRIPT,
     DOMAIN,
@@ -28,8 +33,24 @@ _ENTITY_DOMAINS = {
     CONF_PROJECTOR_ON_SCRIPT: "script",
     CONF_PROJECTOR_OFF_SCRIPT: "script",
     CONF_TV_ENTITY_ID: "media_player",
+    CONF_TV_CAST_ENTITY_ID: "media_player",
+    CONF_TV_ANDROIDTV_ENTITY_ID: "media_player",
+    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID: "media_player",
+    CONF_TV_KODI_ENTITY_ID: "media_player",
+    CONF_TV_SOURCE_ENTITY_ID: "input_text",
 }
-_OPTIONAL_FIELDS = {CONF_PROJECTOR_ON_SCRIPT, CONF_PROJECTOR_OFF_SCRIPT, CONF_TV_ENTITY_ID}
+_OPTIONAL_FIELDS = {
+    CONF_PROJECTOR_ON_SCRIPT, CONF_PROJECTOR_OFF_SCRIPT, CONF_TV_ENTITY_ID,
+    CONF_TV_CAST_ENTITY_ID, CONF_TV_ANDROIDTV_ENTITY_ID,
+    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID, CONF_TV_KODI_ENTITY_ID,
+    CONF_TV_SOURCE_ENTITY_ID,
+}
+_MEDIA_PLATFORMS = {
+    CONF_TV_CAST_ENTITY_ID: "cast",
+    CONF_TV_ANDROIDTV_ENTITY_ID: "androidtv_remote",
+    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID: "music_assistant",
+    CONF_TV_KODI_ENTITY_ID: "kodi",
+}
 _DEFAULT_ENTITIES = {
     CONF_REMOTE_ENTITY_ID: "remote.ekf_connect_ir",
     CONF_TEMPERATURE_ENTITY_ID: "sensor.ekf_connect_ir_temperatura",
@@ -73,6 +94,8 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             entity_filter = {"domain": domain}
             if key == CONF_TV_ENTITY_ID:
                 entity_filter["integration"] = "samsungtv"
+            elif key in _MEDIA_PLATFORMS:
+                entity_filter["integration"] = _MEDIA_PLATFORMS[key]
             fields[marker] = selector.EntitySelector(
                 selector.EntitySelectorConfig(filter=entity_filter)
             )
@@ -82,8 +105,9 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _normalize_input(values: Mapping[str, Any]) -> dict[str, Any]:
         """An empty optional TV selection disables only the TV adapter."""
         result = dict(values)
-        if result.get(CONF_TV_ENTITY_ID) in (None, ""):
-            result.pop(CONF_TV_ENTITY_ID, None)
+        for key in _OPTIONAL_FIELDS:
+            if result.get(key) in (None, ""):
+                result.pop(key, None)
         return result
 
     def _is_native_tv(self, entity_id: str) -> bool:
@@ -127,6 +151,18 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             elif key == CONF_TV_ENTITY_ID and not self._is_native_tv(entity_id):
                 errors[key] = "invalid_tv_entity"
+            elif key in _MEDIA_PLATFORMS:
+                entity = er.async_get(self.hass).async_get(entity_id)
+                if entity is None or entity.platform != _MEDIA_PLATFORMS[key]:
+                    errors[key] = "invalid_entity"
+        cast_id = values.get(CONF_TV_CAST_ENTITY_ID)
+        music_id = values.get(CONF_TV_MUSIC_ASSISTANT_ENTITY_ID)
+        if cast_id and music_id and not errors:
+            registry = er.async_get(self.hass)
+            cast = registry.async_get(cast_id)
+            music = registry.async_get(music_id)
+            if cast is None or music is None or cast.unique_id != music.unique_id:
+                errors[CONF_TV_MUSIC_ASSISTANT_ENTITY_ID] = "different_cast_player"
         return errors
 
     async def async_step_user(

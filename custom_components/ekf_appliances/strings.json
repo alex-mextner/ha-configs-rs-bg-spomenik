@@ -11,13 +11,23 @@
           "projector_power_entity_id": "Projector status sensor",
           "projector_on_script": "Projector startup script",
           "projector_off_script": "Projector shutdown script",
-          "tv_entity_id": "Samsung TV"
+          "tv_entity_id": "Samsung TV",
+          "tv_cast_entity_id": "Chromecast media player",
+          "tv_androidtv_entity_id": "Android TV Remote media player",
+          "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
+          "tv_kodi_entity_id": "Kodi media player",
+          "tv_source_entity_id": "Current television source helper"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
           "projector_off_script": "Leave empty to use the existing Projector turn off script.",
           "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection.",
-          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls."
+          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls.",
+          "tv_cast_entity_id": "Optional. Playback status and controls for cast sessions.",
+          "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
+          "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
+          "tv_kodi_entity_id": "Optional. Kodi controls when the source helper is pc, projector, or kodi.",
+          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast."
         }
       },
       "reconfigure": {
@@ -29,19 +39,30 @@
           "projector_power_entity_id": "Projector status sensor",
           "projector_on_script": "Projector startup script",
           "projector_off_script": "Projector shutdown script",
-          "tv_entity_id": "Samsung TV"
+          "tv_entity_id": "Samsung TV",
+          "tv_cast_entity_id": "Chromecast media player",
+          "tv_androidtv_entity_id": "Android TV Remote media player",
+          "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
+          "tv_kodi_entity_id": "Kodi media player",
+          "tv_source_entity_id": "Current television source helper"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
           "projector_off_script": "Leave empty to use the existing Projector turn off script.",
           "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection.",
-          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls."
+          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls.",
+          "tv_cast_entity_id": "Optional. Playback status and controls for cast sessions.",
+          "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
+          "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
+          "tv_kodi_entity_id": "Optional. Kodi controls when the source helper is pc, projector, or kodi.",
+          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast."
         }
       }
     },
     "error": {
       "invalid_entity": "Select an existing entity of the requested type.",
-      "invalid_tv_entity": "Select an existing TV from the Samsung Smart TV integration."
+      "invalid_tv_entity": "Select an existing TV from the Samsung Smart TV integration.",
+      "different_cast_player": "Select the same Chromecast in Music Assistant."
     },
     "abort": {
       "already_configured": "This infrared remote is already configured.",
