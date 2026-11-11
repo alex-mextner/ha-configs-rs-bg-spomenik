@@ -7,6 +7,8 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_MODEL
 from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
+from homeassistant.exceptions import HomeAssistantError
+from .samsung_network import async_prepare_websocket, async_apply_websocket
 import voluptuous as vol
 
 from .const import (
@@ -16,6 +18,7 @@ from .const import (
     CONF_REMOTE_ENTITY_ID,
     CONF_TEMPERATURE_ENTITY_ID,
     CONF_TV_ENTITY_ID,
+    CONF_TV_NETWORK_PROTOCOL,
     CONF_TV_CAST_ENTITY_ID,
     CONF_TV_ANDROIDTV_ENTITY_ID,
     CONF_TV_MUSIC_ASSISTANT_ENTITY_ID,
@@ -43,7 +46,7 @@ _OPTIONAL_FIELDS = {
     CONF_PROJECTOR_ON_SCRIPT, CONF_PROJECTOR_OFF_SCRIPT, CONF_TV_ENTITY_ID,
     CONF_TV_CAST_ENTITY_ID, CONF_TV_ANDROIDTV_ENTITY_ID,
     CONF_TV_MUSIC_ASSISTANT_ENTITY_ID, CONF_TV_KODI_ENTITY_ID,
-    CONF_TV_SOURCE_ENTITY_ID,
+    CONF_TV_SOURCE_ENTITY_ID, CONF_TV_NETWORK_PROTOCOL,
 }
 _MEDIA_PLATFORMS = {
     CONF_TV_CAST_ENTITY_ID: "cast",
@@ -99,6 +102,17 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             fields[marker] = selector.EntitySelector(
                 selector.EntitySelectorConfig(filter=entity_filter)
             )
+        description = (
+            {"suggested_value": values[CONF_TV_NETWORK_PROTOCOL]}
+            if CONF_TV_NETWORK_PROTOCOL in values else {}
+        )
+        fields[vol.Optional(CONF_TV_NETWORK_PROTOCOL, description=description)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=["current", "websocket_8001"],
+                translation_key="tv_network_protocol",
+                mode=selector.SelectSelectorMode.DROPDOWN,
+            )
+        )
         return vol.Schema(fields)
 
     @staticmethod
@@ -163,7 +177,19 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             music = registry.async_get(music_id)
             if cast is None or music is None or cast.unique_id != music.unique_id:
                 errors[CONF_TV_MUSIC_ASSISTANT_ENTITY_ID] = "different_cast_player"
+        protocol = values.get(CONF_TV_NETWORK_PROTOCOL)
+        if protocol is not None and protocol not in ("current", "websocket_8001"):
+            errors[CONF_TV_NETWORK_PROTOCOL] = "invalid_tv_protocol"
+        if protocol == "websocket_8001" and not values.get(CONF_TV_ENTITY_ID):
+            errors[CONF_TV_NETWORK_PROTOCOL] = "invalid_tv_entity"
         return errors
+
+    async def _prepare_tv_network(self, values):
+        if values.get(CONF_TV_NETWORK_PROTOCOL) != "websocket_8001":
+            return None
+        entity = er.async_get(self.hass).async_get(values[CONF_TV_ENTITY_ID])
+        entry = self.hass.config_entries.async_get_entry(entity.config_entry_id)
+        return await async_prepare_websocket(self.hass, entry)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -173,6 +199,12 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             user_input = self._normalize_input(user_input)
             errors = self._validate_entities(user_input)
+            prepared = None
+            if not errors:
+                try:
+                    prepared = await self._prepare_tv_network(user_input)
+                except HomeAssistantError:
+                    errors[CONF_TV_NETWORK_PROTOCOL] = "tv_network_unavailable"
             if not errors:
                 remote_id = user_input[CONF_REMOTE_ENTITY_ID]
                 await self.async_set_unique_id(remote_id)
@@ -180,6 +212,13 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._async_abort_entries_match({CONF_REMOTE_ENTITY_ID: remote_id})
                 remote = self.hass.states.get(remote_id)
                 assert remote is not None
+                try:
+                    async_apply_websocket(self.hass, prepared)
+                except HomeAssistantError:
+                    return self.async_show_form(
+                        step_id="user", data_schema=self._schema(user_input),
+                        errors={CONF_TV_NETWORK_PROTOCOL: "tv_network_changed"},
+                    )
                 return self.async_create_entry(
                     title=remote.name, data=dict(user_input)
                 )
@@ -199,6 +238,12 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             user_input = self._normalize_input(user_input)
             errors = self._validate_entities(user_input)
+            prepared = None
+            if not errors:
+                try:
+                    prepared = await self._prepare_tv_network(user_input)
+                except HomeAssistantError:
+                    errors[CONF_TV_NETWORK_PROTOCOL] = "tv_network_unavailable"
             if not errors:
                 remote_id = user_input[CONF_REMOTE_ENTITY_ID]
                 existing = await self.async_set_unique_id(remote_id)
@@ -208,11 +253,18 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data = {
                     key: value
                     for key, value in entry.data.items()
-                    if key not in _ENTITY_DOMAINS
+                    if key not in _ENTITY_DOMAINS and key != CONF_TV_NETWORK_PROTOCOL
                 }
                 data.update(user_input)
                 remote = self.hass.states.get(remote_id)
                 assert remote is not None
+                try:
+                    async_apply_websocket(self.hass, prepared)
+                except HomeAssistantError:
+                    return self.async_show_form(
+                        step_id="reconfigure", data_schema=self._schema(user_input),
+                        errors={CONF_TV_NETWORK_PROTOCOL: "tv_network_changed"},
+                    )
                 return self.async_update_reload_and_abort(
                     entry,
                     unique_id=remote_id,

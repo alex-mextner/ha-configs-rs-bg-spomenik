@@ -16,7 +16,8 @@
           "tv_androidtv_entity_id": "Chromecast — пульт Android TV",
           "tv_music_assistant_entity_id": "Music Assistant — этот Chromecast",
           "tv_kodi_entity_id": "Kodi — воспроизведение",
-          "tv_source_entity_id": "Текущий источник телевизора"
+          "tv_source_entity_id": "Текущий источник телевизора",
+          "tv_network_protocol": "Сетевой протокол Samsung"
         },
         "data_description": {
           "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
@@ -26,8 +27,9 @@
           "tv_cast_entity_id": "Необязательно. Состояние и управление трансляцией Chromecast.",
           "tv_androidtv_entity_id": "Необязательно. Управление приложениями Android, которые не показывают воспроизведение через Cast.",
           "tv_music_assistant_entity_id": "Необязательно. Выберите этот же Chromecast в Music Assistant. Управление очередью используется, только когда Music Assistant воспроизводит на нём музыку.",
-          "tv_kodi_entity_id": "Необязательно. Управление Kodi, когда текущий источник — pc, projector или kodi.",
-          "tv_source_entity_id": "Необязательно. Существующий текстовый помощник со значением chromecast, pc, projector, kodi или tv. Без помощника используется Chromecast."
+          "tv_kodi_entity_id": "Необязательно. Управление Kodi, когда источник телевизора — pc или kodi. Выбор отдельного проектора не меняет управление телевизором.",
+          "tv_source_entity_id": "Необязательно. Существующий текстовый помощник со значением chromecast, pc, projector, kodi или tv. Без помощника используется Chromecast.",
+          "tv_network_protocol": "Обычно оставьте текущий протокол. WebSocket 8001 сначала проверяет включённый телевизор и доступ без отправки кнопок, затем обновляет существующую интеграцию Samsung."
         }
       },
       "reconfigure": {
@@ -44,7 +46,8 @@
           "tv_androidtv_entity_id": "Chromecast — пульт Android TV",
           "tv_music_assistant_entity_id": "Music Assistant — этот Chromecast",
           "tv_kodi_entity_id": "Kodi — воспроизведение",
-          "tv_source_entity_id": "Текущий источник телевизора"
+          "tv_source_entity_id": "Текущий источник телевизора",
+          "tv_network_protocol": "Сетевой протокол Samsung"
         },
         "data_description": {
           "projector_on_script": "Если поле пустое, используется существующий скрипт Projector turn on.",
@@ -54,20 +57,32 @@
           "tv_cast_entity_id": "Необязательно. Состояние и управление трансляцией Chromecast.",
           "tv_androidtv_entity_id": "Необязательно. Управление приложениями Android, которые не показывают воспроизведение через Cast.",
           "tv_music_assistant_entity_id": "Необязательно. Выберите этот же Chromecast в Music Assistant. Управление очередью используется, только когда Music Assistant воспроизводит на нём музыку.",
-          "tv_kodi_entity_id": "Необязательно. Управление Kodi, когда текущий источник — pc, projector или kodi.",
-          "tv_source_entity_id": "Необязательно. Существующий текстовый помощник со значением chromecast, pc, projector, kodi или tv. Без помощника используется Chromecast."
+          "tv_kodi_entity_id": "Необязательно. Управление Kodi, когда источник телевизора — pc или kodi. Выбор отдельного проектора не меняет управление телевизором.",
+          "tv_source_entity_id": "Необязательно. Существующий текстовый помощник со значением chromecast, pc, projector, kodi или tv. Без помощника используется Chromecast.",
+          "tv_network_protocol": "Обычно оставьте текущий протокол. WebSocket 8001 сначала проверяет включённый телевизор и доступ без отправки кнопок, затем обновляет существующую интеграцию Samsung."
         }
       }
     },
     "error": {
       "invalid_entity": "Выберите существующий объект указанного типа.",
       "invalid_tv_entity": "Выберите существующий телевизор из интеграции Samsung Smart TV.",
-      "different_cast_player": "Выберите тот же Chromecast в Music Assistant."
+      "different_cast_player": "Выберите тот же Chromecast в Music Assistant.",
+      "invalid_tv_protocol": "Выберите сетевой протокол из списка.",
+      "tv_network_unavailable": "Не удалось проверить WebSocket этого телевизора. Включите телевизор и повторите проверку.",
+      "tv_network_changed": "Настройки Samsung изменились во время проверки. Повторите настройку."
     },
     "abort": {
       "already_configured": "Этот инфракрасный пульт уже настроен.",
       "already_in_progress": "Настройка этого инфракрасного пульта уже выполняется.",
       "reconfigure_successful": "Подключения устройств обновлены."
+    }
+  },
+  "selector": {
+    "tv_network_protocol": {
+      "options": {
+        "current": "Оставить текущий",
+        "websocket_8001": "WebSocket — порт 8001"
+      }
     }
   }
 }
