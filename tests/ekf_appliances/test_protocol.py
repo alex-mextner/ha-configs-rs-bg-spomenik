@@ -20,30 +20,31 @@ class HaierProtocolTests(unittest.TestCase):
     def test_cool_frame_contains_every_setting_and_checksum(self):
         self.assertEqual(
             protocol.haier_state("cool", 24, "auto", "off", "none"),
-            bytes.fromhex("A6 80 00 00 40 A0 00 20 00 00 00 00 08 2E"),
+            bytes.fromhex("A6 80 00 00 40 A0 00 20 00 00 00 00 05 2B"),
         )
 
     def test_heat_boost_and_vertical_swing_frame(self):
         self.assertEqual(
             protocol.haier_state("heat", 30, "high", "vertical", "boost"),
-            bytes.fromhex("A6 EC 00 00 40 20 40 80 00 00 00 00 08 BA"),
+            bytes.fromhex("A6 EC 00 00 40 20 40 80 00 00 00 00 05 B7"),
         )
 
-    def test_dry_sleep_frame_has_health_button_after_setter_order(self):
+    def test_dry_sleep_frame_uses_full_state_power_command(self):
         self.assertEqual(
             protocol.haier_state("dry", 16, "low", "off", "sleep"),
-            bytes.fromhex("A6 00 00 00 40 60 00 40 80 00 00 00 07 0D"),
+            bytes.fromhex("A6 00 00 00 40 60 00 40 80 00 00 00 05 0B"),
         )
 
     def test_comfort_sets_health_without_boost(self):
         state = protocol.haier_state("auto", 25, "medium", "vertical", "comfort")
-        self.assertEqual(state, bytes.fromhex("A6 9C 00 02 40 40 00 00 00 00 00 00 07 CB"))
+        self.assertEqual(state, bytes.fromhex("A6 9C 00 02 40 40 00 00 00 00 00 00 05 C9"))
 
     def test_each_valid_combination_has_full_state_and_checksum(self):
         for mode in ("off", "auto", "cool", "heat", "dry", "fan_only"):
             for temperature in (16, 24, 30):
                 state = protocol.haier_state(mode, temperature, "auto", "off", "none")
                 self.assertEqual(len(state), 14)
+                self.assertEqual(state[12], 5)
                 self.assertEqual(state[-1], sum(state[:-1]) & 255)
 
     def test_rejects_invalid_climate_inputs(self):

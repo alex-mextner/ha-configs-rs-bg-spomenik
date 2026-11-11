@@ -42,8 +42,9 @@ def haier_state(mode: str, temperature: float, fan: str, swing: str, preset: str
     state[6] = 0x40 if preset == "boost" and mode in ("cool", "heat") else 0
     state[7] = MODES[mode] << 5
     state[8] = 0x80 if preset == "sleep" else 0
-    # Matches the final effective setter in the existing ESPHome component.
-    state[12] = 8 if mode in ("cool", "heat") else 7
+    # IRac::haierYrwo2 finishes a complete state with setPower(), then send().
+    # Preserve the mode bits; do not inherit the old custom setter-order artifact.
+    state[12] = 5
     state[13] = sum(state[:13]) & 255
     return bytes(state)
 

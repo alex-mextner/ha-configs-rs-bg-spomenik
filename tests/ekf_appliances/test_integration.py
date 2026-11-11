@@ -17,7 +17,7 @@ from homeassistant import loader
 from homeassistant.config_entries import ConfigEntries, ConfigEntry
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.core import HomeAssistant, State
-from homeassistant.helpers import entity_registry as er, device_registry as dr, restore_state
+from homeassistant.helpers import entity_registry as er, device_registry as dr, restore_state, frame
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from custom_components.ekf_appliances.runtime import ApplianceRuntime
 from custom_components.ekf_appliances.climate import HaierClimate
@@ -38,6 +38,7 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.tmp.name)
         loader.async_setup(self.hass)
+        frame.async_setup(self.hass)
         self.hass.config_entries = ConfigEntries(self.hass, {})
         dr.async_setup(self.hass)
         await dr.async_load(self.hass, load_empty=True)
@@ -139,20 +140,20 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_off_sends_even_when_assumed_off(self):
         await self.attach(self.climate, "climate.ekf_haier")
         await self.climate.async_turn_off()
-        self.assertEqual(len(self.commands), 6)
+        self.assertEqual(len(self.commands), 1)
         self.assertTrue(all(x["command"] == self.commands[0]["command"] for x in self.commands))
         self.assertEqual(self.commands[0]["entity_id"], "remote.ekf_connect_ir")
         self.assertEqual(self.commands[0]["num_repeats"], 1)
         self.assertEqual(self.commands[0]["delay_secs"], 0)
 
-    async def test_failed_burst_keeps_last_operating_state_and_settings(self):
+    async def test_failed_send_keeps_last_operating_state_and_settings(self):
         await self.attach(self.climate, "climate.ekf_haier")
-        self.fail_at = 2
+        self.fail_at = 1
         with self.assertRaisesRegex(HomeAssistantError, "transmitter"):
             await self.climate.async_set_temperature(temperature=28, hvac_mode="cool")
         self.assertEqual(self.climate.hvac_mode, "off")
         self.assertEqual(self.climate.target_temperature, 24)
-        self.assertEqual(len(self.commands), 2)
+        self.assertEqual(len(self.commands), 1)
 
     async def test_invalid_values_do_not_transmit_or_mutate(self):
         await self.attach(self.climate, "climate.ekf_haier")
@@ -172,7 +173,7 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         ))
         await self.climate.async_turn_on()
         self.assertEqual(self.climate.hvac_mode, "heat")
-        self.assertEqual(len(self.commands), 6)
+        self.assertEqual(len(self.commands), 1)
 
     async def test_concurrent_climate_changes_do_not_lose_settings(self):
         await self.attach(self.climate, "climate.ekf_haier")
@@ -184,11 +185,11 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.climate.target_temperature, 28)
         self.assertEqual(self.climate.fan_mode, "high")
-        self.assertEqual(len(self.commands), 12)
+        self.assertEqual(len(self.commands), 2)
         first = self.commands[0]["command"]
-        second = self.commands[6]["command"]
+        second = self.commands[1]["command"]
         self.assertNotEqual(first, second)
-        self.assertEqual([x["command"] for x in self.commands], [first]*6+[second]*6)
+        self.assertEqual([x["command"] for x in self.commands], [first,second])
 
     async def test_temperature_subscription_handles_real_units_and_unknowns(self):
         await self.attach(self.climate, "climate.ekf_haier")
@@ -290,3 +291,48 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(self.climate.target_temperature, 24)
         self.assertEqual(self.climate.extra_state_attributes["native_target_temperature"], 24)
+
+    async def test_registered_gateway_survives_canonical_entity_renames(self):
+        gateway_entry = ConfigEntry(
+            entry_id="tuya-local-test", data={}, domain="tuya_local", options={},
+            discovery_keys=MappingProxyType({}), subentries_data=[], title="EKF gateway",
+            source="user", version=1, minor_version=1, unique_id="gateway-test",
+        )
+        with patch.object(self.hass.config_entries, "async_setup", AsyncMock(return_value=True)):
+            await self.hass.config_entries.async_add(gateway_entry)
+        devices = dr.async_get(self.hass)
+        gateway = devices.async_get_or_create(
+            config_entry_id=gateway_entry.entry_id, config_subentry_id=None,
+            identifiers={("tuya_local", "gateway-test")}, name="EKF gateway",
+        )
+        registry = er.async_get(self.hass)
+        self.hass.states.async_remove("remote.ekf_connect_ir")
+        remote = registry.async_get_or_create(
+            "remote", "tuya_local", "gateway-remote",
+            suggested_object_id="ekf_connect_ir", config_entry=gateway_entry,
+            device_id=gateway.id,
+        )
+        self.assertEqual(remote.entity_id, "remote.ekf_connect_ir")
+        self.hass.states.async_set(remote.entity_id, "on")
+        mapping = [
+            (HaierClimate(self.runtime), "climate.ekf_haier", "climate.kondei_1"),
+            (ProjectorMediaPlayer(self.runtime), "media_player.ekf_projector", "media_player.projector"),
+        ]
+        for key in ("power", "play_pause", "source", "up", "down", "left", "right",
+                    "menu", "back", "vol_down", "mute", "vol_up"):
+            mapping.append((ProjectorButton(self.runtime,key), f"button.ekf_projector_{key}", f"button.projector_{key}"))
+        for entity, initial, canonical in mapping:
+            await self.attach(entity, initial)
+            self.assertIsNotNone(self.hass.states.get(initial), f"Gateway-linked entity failed to register: {initial}")
+            before = registry.async_get(initial)
+            registry.async_update_entity(initial, new_entity_id=canonical)
+            await self.hass.async_block_till_done()
+            after = registry.async_get(canonical)
+            state = self.hass.states.get(canonical)
+            self.assertIsNotNone(state, canonical)
+            self.assertNotEqual(state.state, "unavailable", canonical)
+            self.assertEqual(after.unique_id, entity.unique_id)
+            self.assertEqual(after.device_id, before.device_id)
+            self.assertEqual(devices.async_get(after.device_id).via_device_id, gateway.id)
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.script_calls, [])

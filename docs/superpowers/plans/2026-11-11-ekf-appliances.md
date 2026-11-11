@@ -14,13 +14,13 @@
 
 - No deployment, restart, registry mutation, or appliance commands.
 - No copied third-party integration code; no new dependencies.
-- Six Haier single frames, 150ms apart, one shared transmission lock.
+- One Haier frame per action, with one shared transmission lock.
 - Preserve full climate settings and all twelve verified projector commands.
 - Setup/restoration never send; unknown sensor readings are not invented.
 
 ## Review Focus
 
-- A mid-burst failure must not commit a climate state that was not fully sent.
+- A transmission failure must not commit a climate state that was not fully sent.
 - Concurrent changes must preserve both settings and serialize complete bursts.
 - Restored malformed values must not enable the AC or fabricate a temperature.
 - Projector power scripts preserve helper/Kodi behavior without lock deadlocks.
@@ -34,7 +34,7 @@
 
 **Interfaces:** `haier_state(mode, temperature, fan, swing, preset) -> bytes`; `haier_pulses(state) -> tuple[int, ...]`; `projector_pulses(command) -> tuple[int, ...]`; `encode_pulses(pulses) -> str`; `Transport(send: async callback).async_send(pulses, repeats=1, gap=0) -> None`.
 
-- [x] Write literal fixtures: off ending 05 5D; cool/24/auto/off/none = A6 80 00 00 40 A0 00 20 00 00 00 00 08 2E; Haier frame 230 timings; NEC power data 00 BD 01 FE LSB-first; LE16 encoding; invalid mode/range tests.
+- [x] Write literal fixtures: off ending 05 5D; cool/24/auto/off/none = A6 80 00 00 40 A0 00 20 00 00 00 00 05 2B; Haier frame 230 timings; NEC power data 00 BD 01 FE LSB-first; LE16 encoding; invalid mode/range tests.
 - [x] Run stdlib unittest and verify missing functionality fails.
 - [x] Implement independent encoders and transport; serialize whole bursts and propagate errors.
 - [x] Verify exact six sends/five gaps, no interleaving, and pure protocol suite passing.
@@ -66,9 +66,13 @@
 - Complete focused suite: 47/47 on isolated HA 2026.9.3 / Python 3.14.6, no-network, read-only code mount.
 - Independent reviewers checked protocol, runtime, platforms, and flow. Concrete findings gained failing regression tests before fixes.
 - First setup is off; later reload restores valid assumed mode without transmitting, per root clarification.
-- Pacing includes each waveform duration plus 150ms between frames; cancellation retains a quiet-time deadline.
+- Pacing includes the complete single-frame waveform duration; cancellation retains a quiet-time deadline.
 - Mute stays a raw toggle button; no absolute media-player mute capability is advertised.
 - Runtime API failures roll back only when surfaced; Tuya Local can swallow lower-level failures, and physical state remains assumed.
 - Root supplied the scoped projector-package retirement patch; helpers/scripts/automation are preserved.
 - Full unrelated repository suite was not run: host development environments are absent and its Makefile installs dependencies. No dependencies were installed.
 - Worktree and branch remain intact for root integration/deployment; no approval pause, merge, push, or live restart is performed by this worker.
+
+## Follow-up verification
+
+The user explicitly removed the old six-frame workaround. A failing one-frame service assertion and corrected literal full-state vectors preceded the runtime/protocol changes. A registered-gateway regression exercises all fourteen canonical entity renames and exposed the deprecated via_device call; the implementation now passes the gateway ID directly.

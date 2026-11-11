@@ -44,15 +44,15 @@ The migration operator must retire the old ESPHome entities through HA APIs and 
 
 ## Transmission and state limits
 
-Raw commands use standard `remote.send_command` with `b64:` unsigned little-endian 16-bit timings, one repeat, and zero service delay. Every frame includes its terminal low timing. A shared lock covers a full Haier burst: six single frames, their waveform durations, and 150ms between frames. A retained deadline prevents cancellation from allowing the next queued command to overlap the last frame.
+Raw commands use standard `remote.send_command` with `b64:` unsigned little-endian 16-bit timings, one repeat, and zero service delay. Every frame includes its terminal low timing. A shared lock covers exactly one complete Haier frame per action and its waveform duration. The six-repeat workaround for the previous IR hardware is not used. A retained deadline prevents cancellation from allowing the next queued command to overlap the last frame.
 
-A successful HA service call is not physical acknowledgment. Tuya Local may absorb some underlying connection errors; IR appliances provide no return channel. Entities therefore expose assumed operating state. Surfaced service failures abort the burst and leave the last committed climate settings intact, but a partially delivered burst may already have affected the appliance.
+A successful HA service call is not physical acknowledgment. Tuya Local may absorb some underlying connection errors; IR appliances provide no return channel. Entities therefore expose assumed operating state. Surfaced service failures abort the command and leave the last committed climate settings intact, but a partially delivered transmission may already have affected the appliance.
 
-Protocol facts are taken from the user's previously verified ESPHome configuration and IRremoteESP8266 **2.9.0** [ir_Haier.cpp](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.cpp) / [ir_Haier.h](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.h). The independent encoders include the exact fourteen-byte off frame and extended-NEC address 0xBD00. No third-party integration code is copied.
+Protocol facts are taken from the user's previously verified ESPHome configuration and IRremoteESP8266 **2.9.0** [ir_Haier.cpp](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.cpp) / [ir_Haier.h](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/ir_Haier.h). The independent encoders include the exact fourteen-byte off frame and extended-NEC address 0xBD00. Full-state commands follow [IRac::haierYrwo2](https://github.com/crankyoldgit/IRremoteESP8266/blob/v2.9.0/src/IRac.cpp): Power command byte 0x05 is set last, while the heat/cool mode bits remain 4/1. The old custom component’s Turbo/Health setter-order artifact is removed. No third-party integration code is copied.
 
 ## Verification
 
-The focused suite uses real HA config flows, services, registries, and EntityPlatform lifecycle with an in-memory service boundary. **47 tests pass** on HA 2026.9.3 / Python 3.14.6, covering literal wire fixtures, invalid inputs, real sensor units, state restoration, failure behavior, complete burst serialization, cancellation, and idempotent projector scripts.
+The focused suite uses real HA config flows, services, registries, and EntityPlatform lifecycle with an in-memory service boundary. **48 tests pass** on HA 2026.9.3 / Python 3.14.6, covering literal wire fixtures, invalid inputs, real sensor units, state restoration, failure behavior, command serialization, cancellation, idempotent projector scripts, and gateway-linked canonical renaming of all fourteen entities.
 
 Run on the ODROID using the installed image, with no network or live config mount:
 
