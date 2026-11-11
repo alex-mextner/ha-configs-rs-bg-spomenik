@@ -1,0 +1,34 @@
+# Native Kodi is the video player on the ODROID. Keep its stable entity ID
+# media_player.home; the friendly name is managed through the entity registry.
+# Kodi's integration emits these events for its power actions. Without handlers
+# the power button accepts a request but never starts or stops the application.
+
+automation:
+  - id: kodi_player_start_requested
+    alias: Kodi — запустить из карточки
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: kodi.turn_on
+        event_data:
+          entity_id: media_player.home
+    actions:
+      - action: rest_command.host_kodi_start
+      - wait_template: >-
+          {{ states('media_player.home') not in ['off', 'unknown', 'unavailable'] }}
+        timeout: "00:01:00"
+        continue_on_timeout: false
+
+  - id: kodi_player_stop_requested
+    alias: Kodi — выключить из карточки
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: kodi.turn_off
+        event_data:
+          entity_id: media_player.home
+    actions:
+      - action: rest_command.host_kodi_stop
+      - wait_template: "{{ is_state('media_player.home', 'off') }}"
+        timeout: "00:00:45"
+        continue_on_timeout: false
