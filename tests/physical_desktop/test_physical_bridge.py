@@ -64,11 +64,11 @@ async def test_physical_desktop_does_not_trust_forwarded_peer(tmp_path):
     async with TestClient(
         TestServer(
             module().create_app(
-                tmp_path, {"100.116.57.66"}, vnc_socket=str(tmp_path / "missing.sock")
+                tmp_path, {"192.0.2.20"}, vnc_socket=str(tmp_path / "missing.sock")
             )
         )
     ) as client:
         response = await client.get(
-            "/health", headers={"X-Forwarded-For": "100.116.57.66"}
+            "/health", headers={"X-Forwarded-For": "192.0.2.20"}
         )
         assert response.status == 403
