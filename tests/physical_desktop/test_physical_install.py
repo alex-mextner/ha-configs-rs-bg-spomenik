@@ -98,7 +98,7 @@ def simulated_host(tmp_path, monkeypatch):
 
 def test_existing_rdp_is_stopped_before_credentials_or_enable(simulated_host):
     mod, _, _, _, calls = simulated_host
-    mod.install("100.74.26.95", "100.116.57.66", 6082)
+    mod.install("192.0.2.10", "192.0.2.20", 6082)
     stop = ("systemctl", "--user", "stop", "gnome-remote-desktop.service")
     assert stop in calls
     assert calls.index(stop) < calls.index(("grdctl", "rdp", "enable"))
@@ -116,7 +116,7 @@ def test_rerun_preserves_network_and_service_settings_in_backup(simulated_host):
     old_unit = "previous-web-unit\n"
     (config / "bridge.env").write_text(old_env)
     (units / "ha-physical-desktop-web.service").write_text(old_unit)
-    mod.install("100.74.26.95", "100.116.57.66", 6081)
+    mod.install("192.0.2.10", "192.0.2.20", 6081)
     backup = next((base / "backups").iterdir())
     assert (backup / "bridge.env").read_text() == old_env
     assert (backup / "ha-physical-desktop-web.service").read_text() == old_unit
@@ -129,7 +129,7 @@ def test_root_installation_is_rejected_before_changes(monkeypatch):
     mod = installer()
     monkeypatch.setattr(mod.os, "getuid", lambda: 0)
     with pytest.raises(RuntimeError, match="not root"):
-        mod.install("100.74.26.95", "100.116.57.66", 6081)
+        mod.install("192.0.2.10", "192.0.2.20", 6081)
 
 
 def test_missing_runtime_is_rejected_before_service_changes(tmp_path, monkeypatch):
@@ -139,7 +139,7 @@ def test_missing_runtime_is_rejected_before_service_changes(tmp_path, monkeypatc
     monkeypatch.setattr(mod.os, "getuid", lambda: 1000)
     monkeypatch.setattr(mod, "command", lambda *a, **k: calls.append(a))
     with pytest.raises(RuntimeError, match="dependency is absent"):
-        mod.install("100.74.26.95", "100.116.57.66", 6081)
+        mod.install("192.0.2.10", "192.0.2.20", 6081)
     assert calls == []
 
 
@@ -153,13 +153,13 @@ def test_missing_capture_utility_is_rejected_before_service_changes(
         mod.Path, "exists", lambda p: False if str(p) == missing else exists(p)
     )
     with pytest.raises(RuntimeError, match="dependency is absent"):
-        mod.install("100.74.26.95", "100.116.57.66", 6081)
+        mod.install("192.0.2.10", "192.0.2.20", 6081)
     assert calls == []
 
 
 def test_previous_keyring_credentials_are_preserved_privately(simulated_host):
     mod, base, _, _, calls = simulated_host
-    mod.install("100.74.26.95", "100.116.57.66", 6082)
+    mod.install("192.0.2.10", "192.0.2.20", 6082)
     backup = next((base / "backups").iterdir()) / "rdp-credentials.txt"
     assert backup.read_text() == "old-settings"
     assert backup.stat().st_mode & 0o777 == 0o600
