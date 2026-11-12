@@ -81,10 +81,10 @@ async def test_backend_clipboard_uses_only_trusted_peer_and_json(tmp_path):
         assert (
             await client.post("/clipboard", json={"text": "я" * 40000})
         ).status == 400
-    app = bridge.create_app(tmp_path, {"100.116.57.66"}, clipboard=clipboard)
+    app = bridge.create_app(tmp_path, {"192.0.2.20"}, clipboard=clipboard)
     async with TestClient(TestServer(app)) as client:
         assert (
-            await client.get("/clipboard", headers={"X-Forwarded-For": "100.116.57.66"})
+            await client.get("/clipboard", headers={"X-Forwarded-For": "192.0.2.20"})
         ).status == 403
 
 
