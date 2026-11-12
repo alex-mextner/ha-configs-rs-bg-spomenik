@@ -1,4 +1,4 @@
-# Local TinyPrint X6h device. Put tinyprint_ble_address in local secrets.yaml.
+# Local TinyPrint X6h device. Put tinyprint_ble_address and tinyprint_adapter_mac in local secrets.yaml.
 # Uses an already installed Unicode font; no font binaries are added to Git.
 tinyprint:
   printers:
@@ -6,7 +6,7 @@ tinyprint:
       name: "X6h-2A4C"
       font_path: "/config/custom_components/yandex_station/core/fonts/DejaVuSans.ttf"
       transport: local_le
-      adapter_mac: "00:1A:7D:DA:71:11"
+      adapter_mac: !secret tinyprint_adapter_mac
 
 script:
   tinyprint_test_ticket:
