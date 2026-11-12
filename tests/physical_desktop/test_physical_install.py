@@ -77,6 +77,7 @@ def simulated_host(tmp_path, monkeypatch):
     gui = tmp_path / ".local/share/chatgpt-native-ha/gui-runtime/root"
     for file in (
         base / "runtime/usr/bin/xfreerdp",
+        base / "runtime/usr/bin/xclip",
         gui / "usr/bin/Xvfb",
         gui / "usr/bin/x11vnc",
         gui / "usr/share/novnc/vnc.html",

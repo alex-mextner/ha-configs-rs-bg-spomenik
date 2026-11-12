@@ -15,6 +15,7 @@ def create_app(
     vnc_port: int = 5901,
     *,
     vnc_socket: str | None = None,
+    clipboard=None,
 ) -> web.Application:
     """Serve only explicitly allowed source addresses, never forwarded headers."""
     if not allowed_peers or not 1 <= vnc_port <= 65535:
@@ -77,7 +78,43 @@ def create_app(
             await ws.close()
         return ws
 
-    app = web.Application(middlewares=[private_peer])
+    async def clipboard_request(request):
+        try:
+            if request.method == "POST":
+                if request.content_type != "application/json":
+                    raise web.HTTPUnsupportedMediaType()
+                payload = await request.json()
+                text = payload.get("text") if isinstance(payload, dict) else None
+                if (
+                    not isinstance(text, str)
+                    or "\0" in text
+                    or len(text.encode("utf-8")) > 65536
+                ):
+                    raise ValueError("Plain text up to 64 KiB is required")
+                await clipboard.set_text(text)
+                result = {"ready": True}
+            else:
+                result = {"text": await clipboard.get_text()}
+            return web.json_response(result, headers={"Cache-Control": "no-store"})
+        except PermissionError:
+            return web.json_response(
+                {"error": "desktop_locked"},
+                status=423,
+                headers={"Cache-Control": "no-store"},
+            )
+        except (ValueError, UnicodeError):
+            return web.json_response({"error": "invalid_text"}, status=400)
+        except (OSError, RuntimeError, TimeoutError):
+            return web.json_response({"error": "clipboard_unavailable"}, status=503)
+
+    async def cleanup(_app):
+        await clipboard.close()
+
+    app = web.Application(middlewares=[private_peer], client_max_size=400000)
+    if clipboard is not None:
+        app.router.add_get("/clipboard", clipboard_request)
+        app.router.add_post("/clipboard", clipboard_request)
+        app.on_cleanup.append(cleanup)
     app.router.add_get("/health", health)
     app.router.add_get("/websockify", websocket)
     app.router.add_static("/", root)
@@ -85,6 +122,11 @@ def create_app(
 
 
 if __name__ == "__main__":
+    clipboard = None
+    if executable := os.environ.get("CHATGPT_NATIVE_CLIPBOARD_EXECUTABLE"):
+        from text_clipboard import DesktopClipboard
+
+        clipboard = DesktopClipboard(Path(executable))
     peers = {
         p.strip()
         for p in os.environ.get("CHATGPT_NATIVE_ALLOWED_PEERS", "127.0.0.1").split(",")
@@ -96,6 +138,7 @@ if __name__ == "__main__":
             peers,
             int(os.environ.get("CHATGPT_NATIVE_VNC_PORT", "5901")),
             vnc_socket=os.environ.get("CHATGPT_NATIVE_VNC_SOCKET"),
+            clipboard=clipboard,
         ),
         host=os.environ.get("CHATGPT_NATIVE_LISTEN_HOST", "127.0.0.1"),
         port=int(os.environ.get("CHATGPT_NATIVE_LISTEN_PORT", "6081")),
