@@ -25,8 +25,8 @@ def bridge():
 def test_backend_is_configurable():
     from custom_components import chatgpt_native as native
     assert hasattr(native, "CONFIG_SCHEMA"), "Migrated HA needs a configurable backend URL"
-    config = native.CONFIG_SCHEMA({"chatgpt_native": {"backend_url": "http://100.74.26.95:6081"}})
-    assert config["chatgpt_native"]["backend_url"] == "http://100.74.26.95:6081"
+    config = native.CONFIG_SCHEMA({"chatgpt_native": {"backend_url": "http://192.0.2.10:6081"}})
+    assert config["chatgpt_native"]["backend_url"] == "http://192.0.2.10:6081"
 
 
 @pytest.mark.asyncio
@@ -41,7 +41,7 @@ async def test_bridge_allows_configured_peer(tmp_path):
 @pytest.mark.asyncio
 async def test_bridge_rejects_other_peers(tmp_path):
     (tmp_path / "vnc.html").write_text("private")
-    async with TestClient(TestServer(bridge().create_app(tmp_path, {"100.116.57.66"}, 5901))) as client:
+    async with TestClient(TestServer(bridge().create_app(tmp_path, {"192.0.2.20"}, 5901))) as client:
         assert (await client.get("/vnc.html")).status == 403
 
 
