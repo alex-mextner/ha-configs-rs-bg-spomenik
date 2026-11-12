@@ -1,3 +1,3 @@
 chatgpt_native:
   # Ubuntu remains on Tailnet; HA now runs on Odroid.
-  backend_url: http://100.74.26.95:6081
+  backend_url: !secret chatgpt_native_backend_url
