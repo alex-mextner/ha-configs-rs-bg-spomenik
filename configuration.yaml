@@ -124,7 +124,7 @@ scene: !include scenes.yaml
 # media_player:
 #   #   - platform: samsungtv_tizen
 #   # host: 192.168.0.26
-#   # mac: 24:4B:03:CE:05:E???
+#   # mac: <samsung-tv-mac>
 #   - platform: universal
 #     name: tv
 #     children:
