@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build-arm64:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - name: Check out Kodi 21.2 SDK sources
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -88,10 +88,32 @@ jobs:
           import zipfile
 
           dist, extracted, build = map(Path, sys.argv[1:])
+          # Odroid /proc/cpuinfo read 2026-11-15: AES, PMULL, SHA1/2 and CRC32.
+          cpu_allowlist = {
+              'arch': {'armv8-a', 'armv8-a+crc', 'armv8-a+crypto',
+                       'armv8-a+crc+crypto', 'armv8-a+crypto+crc'},
+              'cpu': {'cortex-a53', 'cortex-a73', 'cortex-a73.cortex-a53'},
+          }
           for filename in ('flags.make', 'CMakeCache.txt'):
               for flags in build.rglob(filename):
-                  if re.search(r'-m(?:arch|cpu|tune)=native\b', flags.read_text(errors='replace')):
-                      raise SystemExit(f'Runner-specific CPU flags: {flags.relative_to(build)}')
+                  contents = flags.read_text(errors='replace')
+                  if filename == 'CMakeCache.txt':
+                      # Cache help text mentions options without setting them.
+                      # Keep flags.make Custom flags comments: they are effective flags.
+                      contents = '\n'.join(line for line in contents.splitlines()
+                                           if not line.lstrip().startswith(('//', '#')))
+                  for flag in re.finditer(r'-m(arch|cpu|tune)(?=\s|=)', contents):
+                      value = re.match(
+                          r"""=\s*(?:"([^"]+)"|'([^']+)'|([^\s;"']+))""",
+                          contents[flag.end():])
+                      if value is None:
+                          raise SystemExit(f'Unparsed CPU option: {flags.relative_to(build)}')
+                      option = next(group for group in value.groups() if group is not None)
+                      kind = flag.group(1)
+                      # Other -mtune values affect scheduling, not the minimum ISA.
+                      if (option == 'native' or
+                          (kind in cpu_allowlist and option not in cpu_allowlist[kind])):
+                          raise SystemExit(f'Unsupported Odroid CPU option in {flags.relative_to(build)}: -m{kind}={option}')
           packages = list(dist.rglob('*.zip'))
           if len(packages) != 1:
               raise SystemExit(f'Expected exactly one addon ZIP, found {len(packages)}')
@@ -183,6 +205,8 @@ jobs:
           target = {
               'observed_on': '2026-11-15',
               'host': 'Odroid N2, Debian 13 trixie, ARM64',
+              'cpu_features': 'fp asimd evtstrm aes pmull sha1 sha2 crc32 cpuid'.split(),
+              'cpu_flag_allowlist': {kind: sorted(values) for kind, values in cpu_allowlist.items()},
               'packages': {
                   'kodi': '2:21.2+dfsg-4',
                   'libc6': '2.41-12+deb13u3',
@@ -222,19 +246,49 @@ jobs:
               if unknown:
                   raise SystemExit(f'Unpackaged runtime dependencies in {path.name}: {sorted(unknown)}')
               symbols = subprocess.check_output(['readelf', '-W', '--dyn-syms', str(path)], text=True)
+              counts = re.findall(r"^Symbol table '\.dynsym' contains ([0-9]+) entries:", symbols, re.MULTILINE)
+              if len(counts) != 1 or int(counts[0]) < 1:
+                  raise SystemExit(f'Missing or ambiguous dynamic symbol table: {path.name}')
+              seen_rows = 0
               weak_unversioned = []
               versioned_undefined_count = 0
+              symbol_row = re.compile(
+                  r'\s*(?P<number>[0-9]+):\s+(?P<value>[0-9a-fA-F]+)\s+'
+                  r'(?P<size>(?:0x)?[0-9a-fA-F]+)\s+(?P<type>\S+)\s+'
+                  r'(?P<binding>\S+)\s+(?P<visibility>\S+)\s+'
+                  r'(?:\[[^\]]*\]\s+)?(?P<index>\S+)'
+                  r'(?:\s+(?P<name>\S+)(?:\s+\([0-9]+\))?)?\s*')
               for line in symbols.splitlines():
-                  columns = line.split()
-                  if len(columns) < 8 or columns[6] != 'UND':
+                  if not re.match(r'^\s*[0-9]+:', line):
                       continue
-                  symbol = columns[7]
+                  row = symbol_row.fullmatch(line)
+                  if row is None:
+                      raise SystemExit(f'Unparsed numbered dynamic symbol row in {path.name}: {line!r}')
+                  if int(row.group('number')) != seen_rows:
+                      raise SystemExit(f'Incomplete dynamic symbol sequence: {path.name}')
+                  seen_rows += 1
+                  symbol = row.group('name')
+                  if symbol is None:
+                      null_row = (row.group('number') == '0'
+                                  and int(row.group('value'), 16) == 0
+                                  and int(row.group('size'), 0) == 0
+                                  and row.group('type') == 'NOTYPE'
+                                  and row.group('binding') == 'LOCAL'
+                                  and row.group('visibility') == 'DEFAULT'
+                                  and row.group('index') == 'UND')
+                      if not null_row:
+                          raise SystemExit(f'Unexpected unnamed dynamic symbol: {path.name}')
+                      continue
+                  if row.group('index') != 'UND':
+                      continue
                   if '@' in symbol:
                       versioned_undefined_count += 1
-                  elif columns[4] == 'WEAK':
+                  elif row.group('binding') == 'WEAK':
                       weak_unversioned.append(symbol)
                   else:
                       raise SystemExit(f'Unversioned unresolved symbol in {path.name}: {symbol}')
+              if seen_rows != int(counts[0]):
+                  raise SystemExit(f'Incomplete dynamic symbol table: {path.name}')
               versions = subprocess.check_output(['readelf', '-W', '--version-info', str(path)], text=True)
               needs = versions.partition('Version needs section')[2]
               required = {}
