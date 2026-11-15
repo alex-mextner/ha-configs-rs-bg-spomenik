@@ -87,16 +87,10 @@ class NativeT9ContractTests(T9ContractFixture, unittest.IsolatedAsyncioTestCase)
             for item in group
         ]
         self.assertTrue(
-            any(
-                node.get("result", {}).get("error") is True
-                for node in nodes
-            )
+            any(node.get("result", {}).get("error") is True for node in nodes)
         )
         self.assertFalse(
-            any(
-                service == "remote.send_command"
-                for service, _ in self.calls
-            )
+            any(service == "remote.send_command" for service, _ in self.calls)
         )
 
     async def test_unsent_or_missing_entity_response_stops_before_success(self) -> None:

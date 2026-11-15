@@ -22,6 +22,11 @@ class Transport:
         self._lock = asyncio.Lock()
         self._busy_until = 0.0
 
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Share the burst lock with native receiver mode writes."""
+        return self._lock
+
     async def async_send(
         self, pulses: Sequence[int], *, repeats: int = 1, gap: float = 0
     ) -> None:

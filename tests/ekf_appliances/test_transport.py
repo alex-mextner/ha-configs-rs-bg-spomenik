@@ -16,6 +16,20 @@ from ekf_appliances.transport import Transport
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     """Verify serialized IR bursts and cancellation at the send boundary."""
 
+    async def test_public_lock_serializes_native_mode_with_transmission(self) -> None:
+        sent = asyncio.Event()
+
+        async def send(_command: str) -> None:
+            sent.set()
+
+        transport = Transport(send)
+        async with transport.lock:
+            pending = asyncio.create_task(transport.async_send((520, 650)))
+            await asyncio.sleep(0)
+            self.assertFalse(sent.is_set())
+        await pending
+        self.assertTrue(sent.is_set())
+
     async def test_entire_six_frame_burst_precedes_waiting_command(self) -> None:
         events = []
         first = asyncio.Event()

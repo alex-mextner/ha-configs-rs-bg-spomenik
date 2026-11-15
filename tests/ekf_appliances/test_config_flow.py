@@ -1,18 +1,25 @@
 """User-visible configuration contracts against an isolated, real HA core."""
 
+from __future__ import annotations
+
 import importlib
 import tempfile
-from types import MappingProxyType
 import unittest
+from types import MappingProxyType
+from typing import Any
 from unittest.mock import patch
 
 from homeassistant import loader
 from homeassistant.config_entries import ConfigEntries, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import AbortFlow
-from homeassistant.helpers import device_registry as dr, entity_registry as er, frame
-import voluptuous as vol
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import frame
 
+# HA installs its schema compatibility alias before voluptuous is imported.
+# isort: split
+import voluptuous as vol
 
 DOMAIN = "ekf_appliances"
 VALID = {
@@ -25,7 +32,9 @@ VALID = {
 
 
 class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    """Exercise config flow tests contracts."""
+
+    async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.tempdir.name)
         loader.async_setup(self.hass)
@@ -37,7 +46,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.tv_counter = 0
         self.transmissions = []
 
-        async def record_service(call):
+        async def record_service(call) -> None:
             self.transmissions.append((call.domain, call.service, dict(call.data)))
 
         self.hass.services.async_register("remote", "send_command", record_service)
@@ -53,11 +62,11 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                 raise
             self.fail("The EKF configuration flow has not been implemented.")
 
-    def populate_entities(self, state="off"):
+    def populate_entities(self, state="off") -> None:
         for entity_id in VALID.values():
             self.hass.states.async_set(entity_id, state)
 
-    def flow(self, source="user", entry=None):
+    def flow(self, source="user", entry=None) -> Any:
         flow = self.flow_module.EkfAppliancesConfigFlow()
         flow.hass = self.hass
         flow.handler = DOMAIN
@@ -67,7 +76,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             flow.context["entry_id"] = entry.entry_id
         return flow
 
-    def add_entry(self, data=None, unique_id=None):
+    def add_entry(self, data=None, unique_id=None) -> Any:
         data = dict(VALID if data is None else data)
         entry = ConfigEntry(
             domain=DOMAIN,
@@ -85,34 +94,55 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         return entry
 
     def register_tv(
-        self, *, platform="samsungtv", device=True, samsung_identifier=True,
-        config_domain="samsungtv", state="off", native_data=None
-    ):
+        self,
+        *,
+        platform="samsungtv",
+        device="samsung",
+        config_domain="samsungtv",
+        state="off",
+        native_data=None,
+    ) -> Any:
         self.tv_counter += 1
         unique_id = f"test-tv-{self.tv_counter}"
         entry = ConfigEntry(
-            domain=config_domain, title="Test Samsung", options={},
-            data=({"host": "192.0.2.10", "model": "UE48J5500"}
-                  if native_data is None else native_data),
-            source="user", unique_id=unique_id, version=1, minor_version=1,
-            discovery_keys=MappingProxyType({}), subentries_data=None,
+            domain=config_domain,
+            title="Test Samsung",
+            options={},
+            data=(
+                {"host": "192.0.2.10", "model": "UE48J5500"}
+                if native_data is None
+                else native_data
+            ),
+            source="user",
+            unique_id=unique_id,
+            version=1,
+            minor_version=1,
+            discovery_keys=MappingProxyType({}),
+            subentries_data=None,
         )
         self.hass.config_entries._entries[entry.entry_id] = entry
         device_entry = None
         if device:
             device_entry = dr.async_get(self.hass).async_get_or_create(
                 config_entry_id=entry.entry_id,
-                identifiers={("samsungtv" if samsung_identifier else "other", unique_id)},
+                identifiers={
+                    ("samsungtv" if device == "samsung" else "other", unique_id)
+                },
             )
         entity = er.async_get(self.hass).async_get_or_create(
-            "media_player", platform, unique_id, config_entry=entry,
+            "media_player",
+            platform,
+            unique_id,
+            config_entry=entry,
             device_id=device_entry.id if device_entry else None,
             suggested_object_id=unique_id,
         )
         self.hass.states.async_set(entity.entity_id, state)
         return entity.entity_id
 
-    async def test_form_selects_expected_domains_and_only_existing_defaults(self):
+    async def test_form_selects_expected_domains_and_only_existing_defaults(
+        self,
+    ) -> None:
         self.populate_entities()
         result = await self.flow().async_step_user()
         self.assertEqual(result["type"], "form")
@@ -120,10 +150,18 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             marker.schema: (marker, selector)
             for marker, selector in result["data_schema"].schema.items()
         }
-        self.assertEqual(set(fields), set(VALID) | {
-            "tv_entity_id", "tv_cast_entity_id", "tv_androidtv_entity_id",
-            "tv_music_assistant_entity_id", "tv_kodi_entity_id", "tv_source_entity_id",
-        })
+        self.assertEqual(
+            set(fields),
+            set(VALID)
+            | {
+                "tv_entity_id",
+                "tv_cast_entity_id",
+                "tv_androidtv_entity_id",
+                "tv_music_assistant_entity_id",
+                "tv_kodi_entity_id",
+                "tv_source_entity_id",
+            },
+        )
         domains = {
             "remote_entity_id": "remote",
             "temperature_entity_id": "sensor",
@@ -135,26 +173,30 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(field=key):
                 marker, selector = fields[key]
                 self.assertEqual(selector.config["filter"], [{"domain": [domain]}])
-                default = (marker.default() if marker.default is not vol.UNDEFINED
-                           else (marker.description or {}).get("suggested_value"))
+                default = (
+                    marker.default()
+                    if marker.default is not vol.UNDEFINED
+                    else (marker.description or {}).get("suggested_value")
+                )
                 self.assertEqual(default, VALID[key])
                 self.assertEqual(
                     isinstance(marker, vol.Required),
-                    key in (
+                    key
+                    in (
                         "remote_entity_id",
                         "temperature_entity_id",
                         "projector_power_entity_id",
                     ),
                 )
 
-    async def test_absent_entities_are_not_suggested_as_defaults(self):
+    async def test_absent_entities_are_not_suggested_as_defaults(self) -> None:
         result = await self.flow().async_step_user()
         for marker in result["data_schema"].schema:
             with self.subTest(field=marker.schema):
                 self.assertIs(marker.default, vol.UNDEFINED)
                 self.assertNotIn("suggested_value", marker.description or {})
 
-    async def test_valid_selection_creates_entry_without_transmitting(self):
+    async def test_valid_selection_creates_entry_without_transmitting(self) -> None:
         self.populate_entities()
         flow = self.flow()
         result = await flow.async_step_user(dict(VALID))
@@ -163,7 +205,9 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flow.unique_id, "remote.ekf_connect_ir")
         self.assertEqual(self.transmissions, [])
 
-    async def test_missing_or_wrong_domain_selection_is_rejected_per_field(self):
+    async def test_missing_or_wrong_domain_selection_is_rejected_per_field(
+        self,
+    ) -> None:
         self.populate_entities()
         self.hass.states.async_set("light.wrong_device", "on")
         for key in VALID:
@@ -184,13 +228,15 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["errors"], {key: "invalid_entity"})
         self.assertEqual(self.transmissions, [])
 
-    async def test_unavailable_entities_can_be_configured_without_transmitting(self):
+    async def test_unavailable_entities_can_be_configured_without_transmitting(
+        self,
+    ) -> None:
         self.populate_entities("unavailable")
         result = await self.flow().async_step_user(dict(VALID))
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(self.transmissions, [])
 
-    async def test_optional_scripts_can_be_omitted(self):
+    async def test_optional_scripts_can_be_omitted(self) -> None:
         self.populate_entities()
         data = {
             key: value for key, value in VALID.items() if not key.endswith("_script")
@@ -199,7 +245,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(result["data"], data)
 
-    async def test_same_remote_cannot_create_a_second_entry(self):
+    async def test_same_remote_cannot_create_a_second_entry(self) -> None:
         self.populate_entities()
         self.add_entry()
         with self.assertRaises(AbortFlow) as raised:
@@ -207,21 +253,26 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.reason, "already_configured")
         self.assertEqual(self.transmissions, [])
 
-    async def test_reconfigure_prefills_current_selection(self):
+    async def test_reconfigure_prefills_current_selection(self) -> None:
         self.populate_entities()
         self.hass.states.async_set("sensor.other_temperature", "21.5")
-        entry = self.add_entry({**VALID, "temperature_entity_id": "sensor.other_temperature"})
+        entry = self.add_entry(
+            {**VALID, "temperature_entity_id": "sensor.other_temperature"}
+        )
         result = await self.flow("reconfigure", entry).async_step_reconfigure()
         defaults = {
-            marker.schema: (marker.default() if marker.default is not vol.UNDEFINED
-                            else marker.description["suggested_value"])
+            marker.schema: (
+                marker.default()
+                if marker.default is not vol.UNDEFINED
+                else marker.description["suggested_value"]
+            )
             for marker in result["data_schema"].schema
             if marker.default is not vol.UNDEFINED
             or "suggested_value" in (marker.description or {})
         }
         self.assertEqual(defaults, dict(entry.data))
 
-    async def test_saved_legacy_helper_is_not_a_valid_feedback_selection(self):
+    async def test_saved_legacy_helper_is_not_a_valid_feedback_selection(self) -> None:
         self.populate_entities()
         self.hass.states.async_set("input_boolean.projector_power", "on")
         legacy = {**VALID, "projector_power_entity_id": "input_boolean.projector_power"}
@@ -232,7 +283,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.transmissions, [])
 
-    async def test_legacy_reconfigure_requires_a_new_feedback_selection(self):
+    async def test_legacy_reconfigure_requires_a_new_feedback_selection(self) -> None:
         self.populate_entities()
         self.hass.states.async_set("input_boolean.projector_power", "on")
         legacy = {**VALID, "projector_power_entity_id": "input_boolean.projector_power"}
@@ -240,7 +291,8 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         flow = self.flow("reconfigure", entry)
         result = await flow.async_step_reconfigure()
         power_marker = next(
-            marker for marker in result["data_schema"].schema
+            marker
+            for marker in result["data_schema"].schema
             if marker.schema == "projector_power_entity_id"
         )
         self.assertIsInstance(power_marker, vol.Required)
@@ -254,7 +306,9 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(entry.data), {**legacy, "future_setting": "keep"})
         self.assertEqual(self.transmissions, [])
 
-    async def test_reconfigure_migrates_feedback_without_losing_script_overrides(self):
+    async def test_reconfigure_migrates_feedback_without_losing_script_overrides(
+        self,
+    ) -> None:
         self.populate_entities()
         self.hass.states.async_set("input_boolean.projector_power", "on")
         self.hass.states.async_set("script.custom_on", "off")
@@ -271,12 +325,16 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             "projector_power_entity_id": "binary_sensor.projector_hdmi_connected",
         }
         with patch.object(self.hass.config_entries, "async_schedule_reload"):
-            result = await self.flow("reconfigure", entry).async_step_reconfigure(selected)
+            result = await self.flow("reconfigure", entry).async_step_reconfigure(
+                selected
+            )
         self.assertEqual(result["reason"], "reconfigure_successful")
         self.assertEqual(dict(entry.data), {**selected, "future_setting": "keep"})
         self.assertEqual(self.transmissions, [])
 
-    async def test_reconfigure_updates_data_identity_and_preserves_unrelated_data(self):
+    async def test_reconfigure_updates_data_identity_and_preserves_unrelated_data(
+        self,
+    ) -> None:
         self.populate_entities()
         self.hass.states.async_set("remote.replacement", "off")
         entry = self.add_entry({**VALID, "future_setting": "keep"})
@@ -289,7 +347,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(entry.data), {**data, "future_setting": "keep"})
         self.assertEqual(self.transmissions, [])
 
-    async def test_reconfigure_can_clear_optional_script_overrides(self):
+    async def test_reconfigure_can_clear_optional_script_overrides(self) -> None:
         self.populate_entities()
         self.hass.states.async_set("script.custom_on", "off")
         entry = self.add_entry({**VALID, "projector_on_script": "script.custom_on"})
@@ -304,7 +362,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "reconfigure_successful")
         self.assertEqual(dict(entry.data), data)
 
-    async def test_reconfigure_rejects_a_remote_owned_by_another_entry(self):
+    async def test_reconfigure_rejects_a_remote_owned_by_another_entry(self) -> None:
         self.populate_entities()
         self.hass.states.async_set("remote.other", "off")
         original = self.add_entry()
@@ -317,7 +375,9 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original.unique_id, "remote.ekf_connect_ir")
         self.assertEqual(self.transmissions, [])
 
-    async def test_tv_selector_is_optional_native_samsung_without_guessed_default(self):
+    async def test_tv_selector_is_optional_native_samsung_without_guessed_default(
+        self,
+    ) -> None:
         self.populate_entities()
         self.register_tv()
         result = await self.flow().async_step_user()
@@ -336,7 +396,9 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             [{"domain": ["media_player"], "integration": "samsungtv"}],
         )
 
-    async def test_tv_backend_rejects_unregistered_wrappers_and_wrong_devices(self):
+    async def test_tv_backend_rejects_unregistered_wrappers_and_wrong_devices(
+        self,
+    ) -> None:
         self.populate_entities()
         self.hass.states.async_set("media_player.spoofed", "off")
         invalid = [
@@ -345,8 +407,8 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             "sensor.ekf_connect_ir_temperatura",
             self.register_tv(platform="ekf_appliances"),
             self.register_tv(platform="universal"),
-            self.register_tv(device=False),
-            self.register_tv(samsung_identifier=False),
+            self.register_tv(device=None),
+            self.register_tv(device="other"),
             self.register_tv(config_domain="other"),
             self.register_tv(native_data={}),
             self.register_tv(native_data={"host": " ", "model": "UE48J5500"}),
@@ -359,10 +421,14 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                     {**VALID, "tv_entity_id": entity_id}
                 )
                 self.assertEqual(result["type"], "form")
-                self.assertEqual(result["errors"], {"tv_entity_id": "invalid_tv_entity"})
+                self.assertEqual(
+                    result["errors"], {"tv_entity_id": "invalid_tv_entity"}
+                )
         self.assertEqual(self.transmissions, [])
 
-    async def test_registered_native_tv_can_be_configured_while_unavailable(self):
+    async def test_registered_native_tv_can_be_configured_while_unavailable(
+        self,
+    ) -> None:
         self.populate_entities()
         for state in ("off", "unknown", "unavailable"):
             with self.subTest(state=state):
@@ -373,18 +439,23 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["data"], values)
         self.assertEqual(self.transmissions, [])
 
-    async def test_tv_reconfigure_prefills_and_can_clear_only_tv_backend(self):
+    async def test_tv_reconfigure_prefills_and_can_clear_only_tv_backend(self) -> None:
         self.populate_entities()
         self.hass.states.async_set("script.custom_on", "off")
         self.hass.states.async_set("script.custom_off", "off")
         connections = {
-            **VALID, "projector_on_script": "script.custom_on",
+            **VALID,
+            "projector_on_script": "script.custom_on",
             "projector_off_script": "script.custom_off",
         }
         entity_id = self.register_tv()
-        entry = self.add_entry({
-            **connections, "tv_entity_id": entity_id, "future_setting": "keep",
-        })
+        entry = self.add_entry(
+            {
+                **connections,
+                "tv_entity_id": entity_id,
+                "future_setting": "keep",
+            }
+        )
         flow = self.flow("reconfigure", entry)
         form = await flow.async_step_reconfigure()
         fields = {field.schema: field for field in form["data_schema"].schema}
@@ -399,23 +470,27 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(entry.data), {**connections, "future_setting": "keep"})
         self.assertEqual(self.transmissions, [])
 
-    async def test_explicit_empty_tv_backend_disables_optional_adapter(self):
+    async def test_explicit_empty_tv_backend_disables_optional_adapter(self) -> None:
         self.populate_entities()
         for empty in (None, ""):
             with self.subTest(empty=empty):
-                result = await self.flow().async_step_user({**VALID, "tv_entity_id": empty})
+                result = await self.flow().async_step_user(
+                    {**VALID, "tv_entity_id": empty}
+                )
                 self.assertEqual(result["type"], "create_entry")
                 self.assertEqual(result["data"], VALID)
         self.assertEqual(self.transmissions, [])
 
-    async def test_adding_tv_backend_preserves_other_saved_connections(self):
+    async def test_adding_tv_backend_preserves_other_saved_connections(self) -> None:
         self.populate_entities()
         self.hass.states.async_set("script.custom_on", "off")
         connections = {**VALID, "projector_on_script": "script.custom_on"}
         entry = self.add_entry({**connections, "future_setting": "keep"})
         values = {**connections, "tv_entity_id": self.register_tv()}
         with patch.object(self.hass.config_entries, "async_schedule_reload"):
-            result = await self.flow("reconfigure", entry).async_step_reconfigure(values)
+            result = await self.flow("reconfigure", entry).async_step_reconfigure(
+                values
+            )
         self.assertEqual(result["reason"], "reconfigure_successful")
         self.assertEqual(dict(entry.data), {**values, "future_setting": "keep"})
         self.assertEqual(self.transmissions, [])

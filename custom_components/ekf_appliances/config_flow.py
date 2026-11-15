@@ -1,12 +1,22 @@
 """Configure existing local entities for the EKF appliance controls."""
 
-from collections.abc import Mapping
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from homeassistant.config_entries import ConfigFlowResult
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_MODEL
-from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import selector
+
+# HA installs its schema compatibility alias before voluptuous is imported.
+# isort: split
 import voluptuous as vol
 
 from .const import (
@@ -15,11 +25,11 @@ from .const import (
     CONF_PROJECTOR_POWER_ENTITY_ID,
     CONF_REMOTE_ENTITY_ID,
     CONF_TEMPERATURE_ENTITY_ID,
-    CONF_TV_ENTITY_ID,
-    CONF_TV_CAST_ENTITY_ID,
     CONF_TV_ANDROIDTV_ENTITY_ID,
-    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID,
+    CONF_TV_CAST_ENTITY_ID,
+    CONF_TV_ENTITY_ID,
     CONF_TV_KODI_ENTITY_ID,
+    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID,
     CONF_TV_SOURCE_ENTITY_ID,
     DEFAULT_PROJECTOR_OFF_SCRIPT,
     DEFAULT_PROJECTOR_ON_SCRIPT,
@@ -40,9 +50,13 @@ _ENTITY_DOMAINS = {
     CONF_TV_SOURCE_ENTITY_ID: "input_text",
 }
 _OPTIONAL_FIELDS = {
-    CONF_PROJECTOR_ON_SCRIPT, CONF_PROJECTOR_OFF_SCRIPT, CONF_TV_ENTITY_ID,
-    CONF_TV_CAST_ENTITY_ID, CONF_TV_ANDROIDTV_ENTITY_ID,
-    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID, CONF_TV_KODI_ENTITY_ID,
+    CONF_PROJECTOR_ON_SCRIPT,
+    CONF_PROJECTOR_OFF_SCRIPT,
+    CONF_TV_ENTITY_ID,
+    CONF_TV_CAST_ENTITY_ID,
+    CONF_TV_ANDROIDTV_ENTITY_ID,
+    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID,
+    CONF_TV_KODI_ENTITY_ID,
     CONF_TV_SOURCE_ENTITY_ID,
 }
 _MEDIA_PLATFORMS = {
@@ -60,7 +74,7 @@ _DEFAULT_ENTITIES = {
 }
 
 
-def _field_marker(key: str, domain: str, values: Mapping[str, Any]):
+def _field_marker(key: str, domain: str, values: Mapping[str, Any]) -> vol.Marker:
     """Keep optional suggestions distinct from required field defaults."""
     if key in _OPTIONAL_FIELDS:
         # A voluptuous default would reinsert an override when cleared.
@@ -108,7 +122,7 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     def _normalize_input(values: Mapping[str, Any]) -> dict[str, Any]:
-        """An empty optional TV selection disables only the TV adapter."""
+        """Disable only the TV adapter when its optional selection is empty."""
         result = dict(values)
         for key in _OPTIONAL_FIELDS:
             if result.get(key) in (None, ""):
@@ -186,10 +200,8 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
                 self._async_abort_entries_match({CONF_REMOTE_ENTITY_ID: remote_id})
                 remote = self.hass.states.get(remote_id)
-                assert remote is not None
-                return self.async_create_entry(
-                    title=remote.name, data=dict(user_input)
-                )
+                assert remote is not None  # noqa: S101 - Validated entity invariant; not an authorization check.
+                return self.async_create_entry(title=remote.name, data=dict(user_input))
 
         return self.async_show_form(
             step_id="user",
@@ -219,7 +231,7 @@ class EkfAppliancesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
                 data.update(user_input)
                 remote = self.hass.states.get(remote_id)
-                assert remote is not None
+                assert remote is not None  # noqa: S101 - Validated entity invariant; not an authorization check.
                 return self.async_update_reload_and_abort(
                     entry,
                     unique_id=remote_id,

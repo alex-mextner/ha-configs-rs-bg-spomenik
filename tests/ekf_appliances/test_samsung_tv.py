@@ -1,15 +1,28 @@
 """Samsung power frames and a real-HA native-backend adapter without live I/O."""
+
+from __future__ import annotations
+
 import asyncio
 import base64
-from datetime import timedelta
 import logging
-from pathlib import Path
 import struct
 import sys
 import tempfile
-from types import MappingProxyType
 import unittest
+from datetime import timedelta
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 from unittest.mock import AsyncMock, patch
+
+from homeassistant.components.media_player import MediaPlayerEntity
+
+from custom_components.ekf_appliances import async_setup
+from custom_components.ekf_appliances.power_pair import (
+    PowerEndpoint,
+    PowerPair,
+    PowerPairHooks,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -18,7 +31,9 @@ from homeassistant.components.media_player import MediaPlayerEntityFeature as Fe
 from homeassistant.config_entries import ConfigEntries, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er, frame
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import frame
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -27,11 +42,12 @@ from custom_components.ekf_appliances.runtime import ApplianceRuntime
 from custom_components.ekf_appliances.samsung_tv import SamsungTvMediaPlayer
 
 
-def wire_code(command):
+def wire_code(command) -> Any:
     """Decode timings independently of the encoder and its command table."""
     raw = base64.b64decode(command[4:], validate=True)
     if len(raw) != 136:
-        raise AssertionError(f"Expected 68 timings, got {len(raw) // 2}")
+        error_message = f"Expected 68 timings, got {len(raw) // 2}"
+        raise AssertionError(error_message)
     timings = struct.unpack("<68H", raw)
     assert timings[:2] == (4480, 4480)
     assert all(mark == 560 for mark in timings[2:-1:2])
@@ -41,7 +57,9 @@ def wire_code(command):
 
 
 class SamsungProtocolTests(unittest.TestCase):
-    def test_literal_power_vectors_survive_raw_tuya_encoding(self):
+    """Exercise samsung protocol tests contracts."""
+
+    def test_literal_power_vectors_survive_raw_tuya_encoding(self) -> None:
         for key, expected in (
             ("power", 0xE0E040BF),
             ("power_on", 0xE0E09966),
@@ -53,25 +71,84 @@ class SamsungProtocolTests(unittest.TestCase):
                     expected,
                 )
 
-    def test_power_on_matches_validated_live_timing_vector(self):
+    def test_power_on_matches_validated_live_timing_vector(self) -> None:
         # Decoded directly from the user's existing ON automation, whose
         # single frame was physically verified on 2026-11-11.
         expected = (
-            4480, 4480, 560, 1680, 560, 1680, 560, 1680,
-            560, 560, 560, 560, 560, 560, 560, 560,
-            560, 560, 560, 1680, 560, 1680, 560, 1680,
-            560, 560, 560, 560, 560, 560, 560, 560,
-            560, 560, 560, 1680, 560, 560, 560, 560,
-            560, 1680, 560, 1680, 560, 560, 560, 560,
-            560, 1680, 560, 560, 560, 1680, 560, 1680,
-            560, 560, 560, 560, 560, 1680, 560, 1680,
-            560, 560, 560, 47040,
+            4480,
+            4480,
+            560,
+            1680,
+            560,
+            1680,
+            560,
+            1680,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            1680,
+            560,
+            1680,
+            560,
+            1680,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            560,
+            1680,
+            560,
+            560,
+            560,
+            560,
+            560,
+            1680,
+            560,
+            1680,
+            560,
+            560,
+            560,
+            560,
+            560,
+            1680,
+            560,
+            560,
+            560,
+            1680,
+            560,
+            1680,
+            560,
+            560,
+            560,
+            560,
+            560,
+            1680,
+            560,
+            1680,
+            560,
+            560,
+            560,
+            47040,
         )
         self.assertEqual(protocol.samsung_pulses("power_on"), expected)
         encoded = protocol.encode_pulses(protocol.samsung_pulses("power_on"))
         self.assertEqual(base64.b64decode(encoded[4:]), struct.pack("<68H", *expected))
 
-    def test_unknown_samsung_command_is_rejected(self):
+    def test_unknown_samsung_command_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             protocol.samsung_pulses("invented_input")
 
@@ -85,14 +162,19 @@ CONFIG = {
 NATIVE_FEATURES = 24509
 NATIVE_ATTRIBUTES = {
     "supported_features": NATIVE_FEATURES,
-    "source": "TV", "source_list": ["TV", "HDMI"],
-    "volume_level": 0.35, "is_volume_muted": False,
-    "media_title": "Native title", "app_name": "Native app",
+    "source": "TV",
+    "source_list": ["TV", "HDMI"],
+    "volume_level": 0.35,
+    "is_volume_muted": False,
+    "media_title": "Native title",
+    "app_name": "Native app",
 }
 
 
 class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    """Exercise samsung adapter tests contracts."""
+
+    async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.tmp.name)
         loader.async_setup(self.hass)
@@ -102,15 +184,23 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         await dr.async_load(self.hass, load_empty=True)
         await er.async_load(self.hass, load_empty=True)
         self.entry = await self.add_entry("ekf-test", "ekf_appliances", CONFIG)
-        self.native_entry = await self.add_entry("samsung-test", "samsungtv", {"host": "192.0.2.10", "model": "UE48J5500"})
+        self.native_entry = await self.add_entry(
+            "samsung-test", "samsungtv", {"host": "192.0.2.10", "model": "UE48J5500"}
+        )
         self.native_device = dr.async_get(self.hass).async_get_or_create(
-            config_entry_id=self.native_entry.entry_id, config_subentry_id=None,
+            config_entry_id=self.native_entry.entry_id,
+            config_subentry_id=None,
             identifiers={("samsungtv", "native-tv-uuid")},
-            name="Living room TV", manufacturer="Samsung", model="UE48J5500",
+            name="Living room TV",
+            manufacturer="Samsung",
+            model="UE48J5500",
         )
         self.backend = er.async_get(self.hass).async_get_or_create(
-            "media_player", "samsungtv", "native-tv-uuid",
-            suggested_object_id="samsung_lan", config_entry=self.native_entry,
+            "media_player",
+            "samsungtv",
+            "native-tv-uuid",
+            suggested_object_id="samsung_lan",
+            config_entry=self.native_entry,
             device_id=self.native_device.id,
         )
         self.hass.states.async_set("remote.ekf_connect_ir", "on")
@@ -123,42 +213,63 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.entities = []
         self.real_sleep = asyncio.sleep
         self.platform = EntityPlatform(
-            hass=self.hass, logger=logging.getLogger(__name__),
-            domain="media_player", platform_name="ekf_appliances", platform=None,
-            scan_interval=timedelta(seconds=30), entity_namespace=None,
+            hass=self.hass,
+            logger=logging.getLogger(__name__),
+            domain="media_player",
+            platform_name="ekf_appliances",
+            platform=None,
+            scan_interval=timedelta(seconds=30),
+            entity_namespace=None,
         )
         self.platform.config_entry = self.entry
 
-        async def send(call):
+        async def send(call) -> None:
             self.commands.append(dict(call.data))
             self.sent.set()
             if self.fail_ir:
-                raise HomeAssistantError("IR failed")
+                error_message = "IR failed"
+                raise HomeAssistantError(error_message)
             if self.feedback:
                 code = wire_code(call.data["command"])
                 current = self.hass.states.get(self.backend.entity_id).state
-                target = "off" if code == 0xE0E019E6 else (
-                    "on" if code == 0xE0E09966 or current == "off" else "off"
+                target = (
+                    "off"
+                    if code == 0xE0E019E6
+                    else ("on" if code == 0xE0E09966 or current == "off" else "off")
                 )
                 self.set_native(target)
 
-        async def native(call):
+        async def native(call) -> None:
             self.native_calls.append((call.service, dict(call.data)))
 
         self.hass.services.async_register("remote", "send_command", send)
         for service in (
-            "turn_on", "turn_off", "toggle", "volume_up", "volume_down",
-            "volume_set", "volume_mute", "select_source", "media_play",
-            "media_pause", "media_play_pause", "media_stop", "media_next_track",
-            "media_previous_track", "play_media",
+            "turn_on",
+            "turn_off",
+            "toggle",
+            "volume_up",
+            "volume_down",
+            "volume_set",
+            "volume_mute",
+            "select_source",
+            "media_play",
+            "media_pause",
+            "media_play_pause",
+            "media_stop",
+            "media_next_track",
+            "media_previous_track",
+            "play_media",
         ):
             self.hass.services.async_register("media_player", service, native)
         self.runtime = ApplianceRuntime(self.hass, self.entry)
         self.coordinator = DataUpdateCoordinator(
-            self.hass, logging.getLogger(__name__), config_entry=self.entry,
-            name="test Samsung power", update_method=AsyncMock(return_value=False),
+            self.hass,
+            logging.getLogger(__name__),
+            config_entry=self.entry,
+            name="test Samsung power",
+            update_method=AsyncMock(return_value=False),
         )
-        self.coordinator.async_set_updated_data(False)
+        self.coordinator.async_set_updated_data(data=False)
         with patch(
             "custom_components.ekf_appliances.samsung_tv.SamsungPowerCoordinator",
             return_value=self.coordinator,
@@ -169,19 +280,30 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.no_delay.start()
 
-    async def add_entry(self, entry_id, domain, data):
+    async def add_entry(self, entry_id, domain, data) -> Any:
         entry = ConfigEntry(
-            entry_id=entry_id, data=data, domain=domain, options={},
-            discovery_keys=MappingProxyType({}), subentries_data=[], title=domain,
-            source="user", version=1, minor_version=1, unique_id=entry_id,
+            entry_id=entry_id,
+            data=data,
+            domain=domain,
+            options={},
+            discovery_keys=MappingProxyType({}),
+            subentries_data=[],
+            title=domain,
+            source="user",
+            version=1,
+            minor_version=1,
+            unique_id=entry_id,
         )
-        with patch.object(self.hass.config_entries, "async_setup", AsyncMock(return_value=True)):
+        with patch.object(
+            self.hass.config_entries, "async_setup", AsyncMock(return_value=True)
+        ):
             await self.hass.config_entries.async_add(entry)
         return entry
 
-    def set_native(self, state, attrs=None):
+    def set_native(self, state, attrs=None) -> None:
         self.hass.states.async_set(
-            self.backend.entity_id, state,
+            self.backend.entity_id,
+            state,
             NATIVE_ATTRIBUTES if attrs is None else attrs,
         )
         if hasattr(self, "coordinator"):
@@ -189,28 +311,29 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
                 True if state == "on" else False if state == "off" else None
             )
 
-    async def fast_sleep(self, seconds):
+    async def fast_sleep(self, seconds) -> None:
         await self.real_sleep(0)
 
-    async def attach(self):
+    async def attach(self) -> None:
         self.player.entity_id = "media_player.tv_adapter"
         await self.platform.async_add_entities([self.player])
         self.entities.append(self.player)
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         await self.player.async_cancel_power()
         await self.platform.async_reset()
         self.no_delay.stop()
         await self.hass.async_block_till_done()
         self.tmp.cleanup()
 
-    async def test_guarded_tv_service_routes_verified_power_and_rejects_completed_newer_off(self):
-        from custom_components.ekf_appliances import async_setup
-        from custom_components.ekf_appliances.power_pair import PowerEndpoint, PowerPair, PowerPairHooks
+    async def test_guarded_tv_service_routes_verified_power_and_rejects_completed_newer_off(
+        self,
+    ) -> None:
+
         player_state = [False]
         player_calls = []
 
-        async def player_power(target):
+        async def player_power(target) -> None:
             player_calls.append(target)
             player_state[0] = target
             pair.observe()
@@ -218,34 +341,56 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         await self.attach()
         self.feedback = True
         pair = PowerPair(
-            "TV guarded test", PowerEndpoint(lambda: self.coordinator.data, self.player._async_power),
+            "TV guarded test",
+            PowerEndpoint(lambda: self.coordinator.data, self.player._async_power),
             PowerEndpoint(lambda: player_state[0], player_power),
-            hooks=PowerPairHooks(changed=lambda: self.player.async_write_ha_state()),
+            hooks=PowerPairHooks(changed=self.player.async_write_ha_state),
         )
         self.runtime.tv_power_pair = pair
         pair.start()
         self.addAsyncCleanup(pair.close)
         await async_setup(self.hass, {})
         snapshot = pair.intent_revision
-        await self.hass.services.async_call("ekf_appliances", "wake_if_current", {
-            "entity_id": self.player.entity_id, "expected_revision": snapshot,
-        }, blocking=True)
+        await self.hass.services.async_call(
+            "ekf_appliances",
+            "wake_if_current",
+            {
+                "entity_id": self.player.entity_id,
+                "expected_revision": snapshot,
+            },
+            blocking=True,
+        )
         self.assertEqual([wire_code(c["command"]) for c in self.commands], [0xE0E09966])
         self.assertEqual(player_calls, [True])
-        self.assertIs(self.player.extra_state_attributes["last_power_intent"], True)
-        self.assertEqual(self.player.extra_state_attributes["power_intent_revision"], pair.intent_revision)
+        self.assertIs(
+            self.player.extra_state_attributes["last_power_intent"], expr2=True
+        )
+        self.assertEqual(
+            self.player.extra_state_attributes["power_intent_revision"],
+            pair.intent_revision,
+        )
         await pair.request(target=False)
         self.assertIsNone(pair.target)
         with self.assertRaisesRegex(HomeAssistantError, "superseded"):
-            await self.hass.services.async_call("ekf_appliances", "wake_if_current", {
-                "entity_id": self.player.entity_id, "expected_revision": snapshot,
-            }, blocking=True)
-        self.assertEqual([wire_code(c["command"]) for c in self.commands], [0xE0E09966, 0xE0E019E6])
+            await self.hass.services.async_call(
+                "ekf_appliances",
+                "wake_if_current",
+                {
+                    "entity_id": self.player.entity_id,
+                    "expected_revision": snapshot,
+                },
+                blocking=True,
+            )
+        self.assertEqual(
+            [wire_code(c["command"]) for c in self.commands], [0xE0E09966, 0xE0E019E6]
+        )
         self.assertEqual(player_calls, [True, False])
         self.assertEqual(self.native_calls, [])
-        self.assertIs(self.player.extra_state_attributes["last_power_intent"], False)
+        self.assertIs(
+            self.player.extra_state_attributes["last_power_intent"], expr2=False
+        )
 
-    async def test_optional_backend_creates_no_tv_when_omitted(self):
+    async def test_optional_backend_creates_no_tv_when_omitted(self) -> None:
         data = dict(CONFIG)
         data.pop("tv_entity_id")
         self.hass.config_entries.async_update_entry(self.entry, data=data)
@@ -256,7 +401,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(added[0], media_player.ProjectorMediaPlayer)
         self.assertEqual(self.commands, [])
 
-    async def test_adapter_binds_existing_device_without_merging_gateway(self):
+    async def test_adapter_binds_existing_device_without_merging_gateway(self) -> None:
         await self.attach()
         registered = er.async_get(self.hass).async_get(self.player.entity_id)
         self.assertIsNotNone(registered)
@@ -271,7 +416,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.player.assumed_state)
         self.assertEqual(self.commands, [])
 
-    async def test_backend_rename_preserves_identity_and_delegation_target(self):
+    async def test_backend_rename_preserves_identity_and_delegation_target(
+        self,
+    ) -> None:
         await self.attach()
         before = self.player.unique_id
         old_id = self.backend.entity_id
@@ -284,14 +431,20 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         await self.player.async_volume_up()
         self.assertEqual(self.player.unique_id, before)
         self.assertEqual(self.player.state, "on")
-        self.assertEqual(self.native_calls, [("volume_up", {"entity_id": self.backend.entity_id})])
+        self.assertEqual(
+            self.native_calls, [("volume_up", {"entity_id": self.backend.entity_id})]
+        )
         self.assertEqual(self.entry.data["tv_entity_id"], self.backend.entity_id)
         self.assertEqual(self.commands, [])
 
-    async def test_rejects_self_or_non_native_backend(self):
+    async def test_rejects_self_or_non_native_backend(self) -> None:
         er.async_get(self.hass).async_get_or_create(
-            "media_player", "ekf_appliances", "loop", suggested_object_id="recursive",
-            config_entry=self.entry, device_id=self.native_device.id,
+            "media_player",
+            "ekf_appliances",
+            "loop",
+            suggested_object_id="recursive",
+            config_entry=self.entry,
+            device_id=self.native_device.id,
         )
         self.hass.states.async_set("media_player.recursive", "on")
         data = {**CONFIG, "tv_entity_id": "media_player.recursive"}
@@ -299,7 +452,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(HomeAssistantError, "native Samsung"):
             SamsungTvMediaPlayer(ApplianceRuntime(self.hass, self.entry))
 
-    async def test_state_capabilities_and_media_attributes_follow_native(self):
+    async def test_state_capabilities_and_media_attributes_follow_native(self) -> None:
         await self.attach()
         self.set_native("on")
         await self.hass.async_block_till_done()
@@ -314,7 +467,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.states.get(self.player.entity_id).state, "off")
         self.assertEqual(self.commands, [])
 
-    async def test_unknown_absolute_power_uses_discrete_frame_without_fake_state(self):
+    async def test_unknown_absolute_power_uses_discrete_frame_without_fake_state(
+        self,
+    ) -> None:
         await self.attach()
         for method, expected, observed in (
             (self.player.async_turn_on, 0xE0E09966, True),
@@ -322,7 +477,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.set_native("unknown")
             self.sent.clear()
-            with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5):
+            with patch(
+                "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5
+            ):
                 request = asyncio.create_task(method())
                 for _ in range(20):
                     if self.sent.is_set() or request.done():
@@ -337,10 +494,10 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.commands), 2)
         self.assertEqual(self.native_calls, [])
 
-    async def test_unavailable_backend_and_transmitter_do_not_fake_state(self):
+    async def test_unavailable_backend_and_transmitter_do_not_fake_state(self) -> None:
         await self.attach()
         self.set_native("unavailable")
-        self.coordinator.async_set_updated_data(False)
+        self.coordinator.async_set_updated_data(data=False)
         self.assertTrue(self.player.available)
         self.feedback = True
         await self.player.async_turn_on()
@@ -354,7 +511,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             await self.player.async_turn_off()
         self.assertEqual(self.commands, [])
 
-    async def test_power_is_idempotent_and_never_calls_native_power_services(self):
+    async def test_power_is_idempotent_and_never_calls_native_power_services(
+        self,
+    ) -> None:
         self.feedback = True
         await self.player.async_turn_on()
         await self.player.async_turn_on()
@@ -364,10 +523,17 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(codes[0], 0xE0E09966)
         self.assertEqual(codes[1:], [0xE0E019E6])
         self.assertEqual(self.native_calls, [])
-        self.assertTrue(all(call["num_repeats"] == 1 and call["delay_secs"] == 0 for call in self.commands))
+        self.assertTrue(
+            all(
+                call["num_repeats"] == 1 and call["delay_secs"] == 0
+                for call in self.commands
+            )
+        )
 
-    async def test_duplicate_and_toggle_during_boot_share_one_frame(self):
-        with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5):
+    async def test_duplicate_and_toggle_during_boot_share_one_frame(self) -> None:
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5
+        ):
             first = asyncio.create_task(self.player.async_turn_on())
             await self.sent.wait()
             duplicate = asyncio.create_task(self.player.async_turn_on())
@@ -381,15 +547,18 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.native_calls, [])
 
-    async def test_late_boot_confirmation_keeps_one_pending_power_frame(self):
+    async def test_late_boot_confirmation_keeps_one_pending_power_frame(self) -> None:
         # Scale the observed 51-second cold boot to 0.51 seconds. The former
         # 35-second deadline must fail this scenario; a 75-second window passes.
         real_timeout = asyncio.timeout
 
-        def scaled_timeout(seconds):
+        def scaled_timeout(seconds) -> Any:
             return real_timeout(seconds / 100 if seconds in (35.0, 75.0) else seconds)
 
-        with patch("custom_components.ekf_appliances.samsung_tv.asyncio.timeout", scaled_timeout):
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.asyncio.timeout",
+            scaled_timeout,
+        ):
             first = asyncio.create_task(self.player.async_turn_on())
             await self.sent.wait()
             duplicate = asyncio.create_task(self.player.async_turn_on())
@@ -398,7 +567,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             before_feedback = self.player.state
             self.set_native("on")
             results = await asyncio.gather(first, duplicate, return_exceptions=True)
-        self.assertTrue(waiting_for_feedback, "Cold boot must remain guarded after 51 seconds")
+        self.assertTrue(
+            waiting_for_feedback, "Cold boot must remain guarded after 51 seconds"
+        )
         self.assertEqual(before_feedback, "off")
         self.assertEqual(results, [None, None])
         self.assertEqual(len(self.commands), 1)
@@ -406,8 +577,10 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native_calls, [])
         self.assertEqual(self.player.state, "on")
 
-    async def test_opposite_request_waits_for_boot_then_sends_one_off(self):
-        with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5):
+    async def test_opposite_request_waits_for_boot_then_sends_one_off(self) -> None:
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5
+        ):
             first = asyncio.create_task(self.player.async_turn_on())
             await self.sent.wait()
             opposite = asyncio.create_task(self.player.async_turn_off())
@@ -420,16 +593,17 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wire_code(self.commands[-1]["command"]), 0xE0E019E6)
         self.assertEqual(self.player.state, "off")
 
-    async def test_failed_on_does_not_discard_queued_off(self):
+    async def test_failed_on_does_not_discard_queued_off(self) -> None:
         release = asyncio.Event()
 
-        async def send(call):
+        async def send(call) -> None:
             self.commands.append(dict(call.data))
             self.sent.set()
             if len(self.commands) == 1:
                 await release.wait()
                 self.set_native("on")
-                raise HomeAssistantError("Power acknowledgment failed")
+                error_message = "Power acknowledgment failed"
+                raise HomeAssistantError(error_message)
             self.set_native("off")
 
         self.hass.services.async_register("remote", "send_command", send)
@@ -439,7 +613,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         opposite = asyncio.create_task(self.player.async_turn_off())
         await self.real_sleep(0)
         release.set()
-        results = await asyncio.gather(first, duplicate, opposite, return_exceptions=True)
+        results = await asyncio.gather(
+            first, duplicate, opposite, return_exceptions=True
+        )
         self.assertIsInstance(results[0], HomeAssistantError)
         self.assertIsInstance(results[1], HomeAssistantError)
         self.assertIsNone(results[2])
@@ -447,12 +623,20 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wire_code(self.commands[-1]["command"]), 0xE0E019E6)
         self.assertEqual(self.player.state, "off")
 
-    async def test_timeout_and_transport_failure_do_not_retry_or_invent_state(self):
-        with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.03):
+    async def test_timeout_and_transport_failure_do_not_retry_or_invent_state(
+        self,
+    ) -> None:
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.03
+        ):
             results = await asyncio.gather(
-                self.player.async_turn_on(), self.player.async_turn_on(), return_exceptions=True
+                self.player.async_turn_on(),
+                self.player.async_turn_on(),
+                return_exceptions=True,
             )
-        self.assertTrue(all(isinstance(result, HomeAssistantError) for result in results))
+        self.assertTrue(
+            all(isinstance(result, HomeAssistantError) for result in results)
+        )
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.player.state, "off")
         self.fail_ir = True
@@ -461,8 +645,10 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.player.state, "off")
         self.assertEqual(len(self.commands), 2)
 
-    async def test_cancelled_caller_keeps_guard_until_feedback(self):
-        with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5):
+    async def test_cancelled_caller_keeps_guard_until_feedback(self) -> None:
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5
+        ):
             first = asyncio.create_task(self.player.async_turn_on())
             await self.sent.wait()
             first.cancel()
@@ -475,32 +661,46 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             await second
         self.assertEqual(len(self.commands), 1)
 
-    async def test_unknown_explicit_toggle_sends_one_frame_and_coalesces(self):
+    async def test_unknown_explicit_toggle_sends_one_frame_and_coalesces(self) -> None:
         self.set_native("unknown")
-        with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.03):
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.03
+        ):
             await asyncio.gather(self.player.async_toggle(), self.player.async_toggle())
-        self.assertEqual([wire_code(call["command"]) for call in self.commands], [0xE0E040BF])
+        self.assertEqual(
+            [wire_code(call["command"]) for call in self.commands], [0xE0E040BF]
+        )
         self.assertIsNone(self.player.state)
 
-    async def test_optional_projector_kodi_does_not_hide_native_tv_controls(self):
+    async def test_optional_projector_kodi_does_not_hide_native_tv_controls(
+        self,
+    ) -> None:
         kodi_entry = await self.add_entry("kodi-only", "kodi", {})
         kodi = er.async_get(self.hass).async_get_or_create(
-            "media_player", "kodi", "optional-projector-kodi",
-            suggested_object_id="optional_projector_kodi", config_entry=kodi_entry,
+            "media_player",
+            "kodi",
+            "optional-projector-kodi",
+            suggested_object_id="optional_projector_kodi",
+            config_entry=kodi_entry,
         )
         self.hass.config_entries.async_update_entry(
-            self.entry, data={**self.entry.data, "tv_kodi_entity_id": kodi.entity_id},
+            self.entry,
+            data={**self.entry.data, "tv_kodi_entity_id": kodi.entity_id},
         )
         self.hass.states.async_set(kodi.entity_id, "off")
         self.set_native("on")
         await self.player.async_media_pause()
-        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": self.backend.entity_id})])
+        self.assertEqual(
+            self.native_calls, [("media_pause", {"entity_id": self.backend.entity_id})]
+        )
 
-    async def test_nonpower_services_forward_exact_parameters_only_to_backend(self):
+    async def test_nonpower_services_forward_exact_parameters_only_to_backend(
+        self,
+    ) -> None:
         self.set_native("on")
         await self.player.async_select_source("HDMI")
         await self.player.async_set_volume_level(0.4)
-        await self.player.async_mute_volume(True)
+        await self.player.async_mute_volume(mute=True)
         await self.player.async_volume_up()
         await self.player.async_volume_down()
         await self.player.async_media_play()
@@ -514,34 +714,57 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             ("select_source", {"source": "HDMI"}),
             ("volume_set", {"volume_level": 0.4}),
             ("volume_mute", {"is_volume_muted": True}),
-            ("volume_up", {}), ("volume_down", {}), ("media_play", {}),
-            ("media_pause", {}), ("media_play_pause", {}), ("media_stop", {}),
-            ("media_next_track", {}), ("media_previous_track", {}),
-            ("play_media", {"media_content_type": "channel", "media_content_id": "7", "extra": {"title": "Channel"}}),
+            ("volume_up", {}),
+            ("volume_down", {}),
+            ("media_play", {}),
+            ("media_pause", {}),
+            ("media_play_pause", {}),
+            ("media_stop", {}),
+            ("media_next_track", {}),
+            ("media_previous_track", {}),
+            (
+                "play_media",
+                {
+                    "media_content_type": "channel",
+                    "media_content_id": "7",
+                    "extra": {"title": "Channel"},
+                },
+            ),
         ]
         self.assertEqual(
             self.native_calls,
-            [(service, {**data, "entity_id": self.backend.entity_id}) for service, data in expected],
+            [
+                (service, {**data, "entity_id": self.backend.entity_id})
+                for service, data in expected
+            ],
         )
         self.assertEqual(self.commands, [])
 
-    async def test_passive_probe_overrides_stale_native_on_without_optimism(self):
+    async def test_passive_probe_overrides_stale_native_on_without_optimism(
+        self,
+    ) -> None:
         await self.attach()
         self.set_native("on")
-        self.coordinator.async_set_updated_data(False)
+        self.coordinator.async_set_updated_data(data=False)
         await self.hass.async_block_till_done()
         self.assertEqual(self.player.state, "off")
         self.assertEqual(self.hass.states.get(self.player.entity_id).state, "off")
-        self.assertNotIn("volume_level", self.hass.states.get(self.player.entity_id).attributes)
+        self.assertNotIn(
+            "volume_level", self.hass.states.get(self.player.entity_id).attributes
+        )
         await self.player.async_turn_off()
         self.assertEqual(self.commands, [])
         self.coordinator.async_set_updated_data(None)
         self.assertIsNone(self.player.state)
         self.assertEqual(self.commands, [])
 
-    async def test_entity_removal_cancels_pending_power_without_late_commands(self):
+    async def test_entity_removal_cancels_pending_power_without_late_commands(
+        self,
+    ) -> None:
         await self.attach()
-        with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5):
+        with patch(
+            "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5
+        ):
             task = asyncio.create_task(self.player.async_turn_on())
             await self.sent.wait()
             await self.platform.async_reset()
@@ -550,10 +773,14 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.native_calls, [])
 
-    async def test_canonical_rename_preserves_same_device_and_probe_refresh(self):
+    async def test_canonical_rename_preserves_same_device_and_probe_refresh(
+        self,
+    ) -> None:
         await self.attach()
         registry = er.async_get(self.hass)
-        registry.async_update_entity(self.player.entity_id, new_entity_id="media_player.living_room_tv")
+        registry.async_update_entity(
+            self.player.entity_id, new_entity_id="media_player.living_room_tv"
+        )
         await self.hass.async_block_till_done()
         self.coordinator.update_method.return_value = True
         await self.coordinator.async_refresh()
@@ -564,22 +791,33 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.states.get(registered.entity_id).state, "on")
         self.assertEqual(self.commands, [])
 
-    async def test_unknown_probe_keeps_working_native_volume_without_fake_power(self):
+    async def test_unknown_probe_keeps_working_native_volume_without_fake_power(
+        self,
+    ) -> None:
         self.set_native("on")
         self.coordinator.async_set_updated_data(None)
         self.hass.states.async_set("remote.ekf_connect_ir", "unavailable")
         self.assertTrue(self.player.available)
         self.assertIsNone(self.player.state)
         await self.player.async_volume_up()
-        self.assertEqual(self.native_calls, [("volume_up", {"entity_id": self.backend.entity_id})])
+        self.assertEqual(
+            self.native_calls, [("volume_up", {"entity_id": self.backend.entity_id})]
+        )
         self.assertEqual(self.commands, [])
 
-    async def test_uses_inherited_media_attribute_builder(self):
-        from homeassistant.components.media_player import MediaPlayerEntity
-        self.assertIs(SamsungTvMediaPlayer.state_attributes, MediaPlayerEntity.state_attributes)
+    async def test_uses_inherited_media_attribute_builder(self) -> None:
 
-    async def test_does_not_advertise_or_delegate_unsupported_native_features(self):
-        self.set_native("on", {"supported_features": int(Feature.VOLUME_STEP), "source_list": ["TV"]})
+        self.assertIs(
+            SamsungTvMediaPlayer.state_attributes, MediaPlayerEntity.state_attributes
+        )
+
+    async def test_does_not_advertise_or_delegate_unsupported_native_features(
+        self,
+    ) -> None:
+        self.set_native(
+            "on",
+            {"supported_features": int(Feature.VOLUME_STEP), "source_list": ["TV"]},
+        )
         self.assertEqual(
             self.player.supported_features,
             Feature.VOLUME_STEP | Feature.TURN_ON | Feature.TURN_OFF,
@@ -590,23 +828,35 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SamsungMediaRoutingTests(SamsungAdapterTests):
-    async def configure_media_sources(self):
+    """Exercise samsung media routing tests contracts."""
+
+    async def configure_media_sources(self) -> None:
         registry = er.async_get(self.hass)
         config = {}
         for key, platform, object_id, unique_id in (
             ("tv_cast_entity_id", "cast", "living_cast", "cast-uuid"),
             ("tv_androidtv_entity_id", "androidtv_remote", "living_remote", "cast-mac"),
-            ("tv_music_assistant_entity_id", "music_assistant", "living_music", "cast-uuid"),
+            (
+                "tv_music_assistant_entity_id",
+                "music_assistant",
+                "living_music",
+                "cast-uuid",
+            ),
             ("tv_kodi_entity_id", "kodi", "living_kodi", "kodi-uuid"),
         ):
             entry = await self.add_entry(platform + "-test", platform, {})
             entity = registry.async_get_or_create(
-                "media_player", platform, unique_id,
-                suggested_object_id=object_id, config_entry=entry,
+                "media_player",
+                platform,
+                unique_id,
+                suggested_object_id=object_id,
+                config_entry=entry,
             )
             config[key] = entity.entity_id
         config["tv_source_entity_id"] = "input_text.tv_source"
-        self.hass.config_entries.async_update_entry(self.entry, data={**CONFIG, **config})
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**CONFIG, **config}
+        )
         self.runtime = ApplianceRuntime(self.hass, self.entry)
         with patch(
             "custom_components.ekf_appliances.samsung_tv.SamsungPowerCoordinator",
@@ -615,126 +865,215 @@ class SamsungMediaRoutingTests(SamsungAdapterTests):
             self.player = SamsungTvMediaPlayer(self.runtime)
         self.set_native("on")
         self.hass.states.async_set("input_text.tv_source", "chromecast")
-        self.hass.states.async_set("media_player.living_remote", "on", {"supported_features": NATIVE_FEATURES})
-        self.hass.states.async_set("media_player.living_cast", "playing", {
-            "supported_features": NATIVE_FEATURES, "app_id": "C35B0678",
-            "app_name": "Music Assistant", "media_title": "Cast flow",
-            "volume_level": 0.2,
-        })
-        self.hass.states.async_set("media_player.living_music", "playing", {
-            "supported_features": NATIVE_FEATURES, "app_id": "music_assistant",
-            "source": "Music Assistant Queue", "active_queue": "cast-uuid",
-            "media_title": "Current song", "volume_level": 0.2,
-        })
-        self.hass.states.async_set("media_player.living_kodi", "off", {"supported_features": NATIVE_FEATURES})
+        self.hass.states.async_set(
+            "media_player.living_remote", "on", {"supported_features": NATIVE_FEATURES}
+        )
+        self.hass.states.async_set(
+            "media_player.living_cast",
+            "playing",
+            {
+                "supported_features": NATIVE_FEATURES,
+                "app_id": "C35B0678",
+                "app_name": "Music Assistant",
+                "media_title": "Cast flow",
+                "volume_level": 0.2,
+            },
+        )
+        self.hass.states.async_set(
+            "media_player.living_music",
+            "playing",
+            {
+                "supported_features": NATIVE_FEATURES,
+                "app_id": "music_assistant",
+                "source": "Music Assistant Queue",
+                "active_queue": "cast-uuid",
+                "media_title": "Current song",
+                "volume_level": 0.2,
+            },
+        )
+        self.hass.states.async_set(
+            "media_player.living_kodi", "off", {"supported_features": NATIVE_FEATURES}
+        )
         await self.attach()
         await self.hass.async_block_till_done()
 
-    async def test_music_assistant_owns_controls_and_metadata(self):
+    async def test_music_assistant_owns_controls_and_metadata(self) -> None:
         await self.configure_media_sources()
         await self.player.async_media_pause()
         await self.player.async_set_volume_level(0.25)
-        self.assertEqual(self.native_calls, [
-            ("media_pause", {"entity_id": "media_player.living_music"}),
-            ("volume_set", {"entity_id": "media_player.living_music", "volume_level": 0.25}),
-        ])
+        self.assertEqual(
+            self.native_calls,
+            [
+                ("media_pause", {"entity_id": "media_player.living_music"}),
+                (
+                    "volume_set",
+                    {"entity_id": "media_player.living_music", "volume_level": 0.25},
+                ),
+            ],
+        )
         state = self.hass.states.get(self.player.entity_id)
         self.assertEqual(state.state, "playing")
         self.assertEqual(state.attributes["media_title"], "Current song")
         self.assertEqual(state.attributes["volume_level"], 0.2)
         self.assertEqual(self.commands, [])
 
-    async def test_external_cast_replaces_stale_music_assistant_session(self):
+    async def test_external_cast_replaces_stale_music_assistant_session(self) -> None:
         await self.configure_media_sources()
-        self.hass.states.async_set("media_player.living_cast", "paused", {
-            "supported_features": NATIVE_FEATURES, "app_id": "YouTube",
-            "app_name": "YouTube", "media_title": "A video",
-        })
+        self.hass.states.async_set(
+            "media_player.living_cast",
+            "paused",
+            {
+                "supported_features": NATIVE_FEATURES,
+                "app_id": "YouTube",
+                "app_name": "YouTube",
+                "media_title": "A video",
+            },
+        )
         await self.hass.async_block_till_done()
         await self.player.async_media_play()
-        self.assertEqual(self.native_calls, [("media_play", {"entity_id": "media_player.living_cast"})])
+        self.assertEqual(
+            self.native_calls,
+            [("media_play", {"entity_id": "media_player.living_cast"})],
+        )
         self.assertEqual(self.hass.states.get(self.player.entity_id).state, "paused")
-        self.assertEqual(self.hass.states.get(self.player.entity_id).attributes["media_title"], "A video")
+        self.assertEqual(
+            self.hass.states.get(self.player.entity_id).attributes["media_title"],
+            "A video",
+        )
 
-    async def test_non_cast_android_app_uses_android_remote(self):
+    async def test_non_cast_android_app_uses_android_remote(self) -> None:
         await self.configure_media_sources()
-        self.hass.states.async_set("media_player.living_cast", "off", {"supported_features": NATIVE_FEATURES})
+        self.hass.states.async_set(
+            "media_player.living_cast", "off", {"supported_features": NATIVE_FEATURES}
+        )
         await self.hass.async_block_till_done()
         await self.player.async_media_pause()
-        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_remote"})])
+        self.assertEqual(
+            self.native_calls,
+            [("media_pause", {"entity_id": "media_player.living_remote"})],
+        )
         self.assertEqual(self.player.state, "on")
 
-    async def test_legacy_remote_sources_cannot_route_television_to_kodi(self):
+    async def test_legacy_remote_sources_cannot_route_television_to_kodi(self) -> None:
         await self.configure_media_sources()
-        self.hass.states.async_set("media_player.living_kodi", "playing", {
-            "supported_features": NATIVE_FEATURES, "media_title": "Kodi movie",
-        })
+        self.hass.states.async_set(
+            "media_player.living_kodi",
+            "playing",
+            {
+                "supported_features": NATIVE_FEATURES,
+                "media_title": "Kodi movie",
+            },
+        )
         for source in ("pc", "kodi", "projector", "tv", "unknown"):
             self.native_calls.clear()
             self.hass.states.async_set("input_text.tv_source", source)
             await self.hass.async_block_till_done()
             await self.player.async_media_pause()
-            self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_music"})])
-            self.assertEqual(self.hass.states.get(self.player.entity_id).attributes["media_title"], "Current song")
+            self.assertEqual(
+                self.native_calls,
+                [("media_pause", {"entity_id": "media_player.living_music"})],
+            )
+            self.assertEqual(
+                self.hass.states.get(self.player.entity_id).attributes["media_title"],
+                "Current song",
+            )
 
-    async def test_tv_off_overrides_background_music_and_blocks_media(self):
+    async def test_tv_off_overrides_background_music_and_blocks_media(self) -> None:
         await self.configure_media_sources()
-        self.coordinator.async_set_updated_data(False)
+        self.coordinator.async_set_updated_data(data=False)
         await self.hass.async_block_till_done()
         self.assertEqual(self.hass.states.get(self.player.entity_id).state, "off")
-        self.assertNotIn("media_title", self.hass.states.get(self.player.entity_id).attributes)
+        self.assertNotIn(
+            "media_title", self.hass.states.get(self.player.entity_id).attributes
+        )
         with self.assertRaises(HomeAssistantError):
             await self.player.async_media_pause()
         self.assertEqual(self.native_calls, [])
 
-    async def test_other_music_player_cannot_take_over_cast(self):
+    async def test_other_music_player_cannot_take_over_cast(self) -> None:
         await self.configure_media_sources()
         er.async_get(self.hass).async_update_entity(
             "media_player.living_music", new_unique_id="another-physical-cast"
         )
         await self.hass.async_block_till_done()
         await self.player.async_media_pause()
-        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_cast"})])
+        self.assertEqual(
+            self.native_calls,
+            [("media_pause", {"entity_id": "media_player.living_cast"})],
+        )
 
-    async def test_cast_entity_rename_updates_routing_without_losing_identity(self):
+    async def test_cast_entity_rename_updates_routing_without_losing_identity(
+        self,
+    ) -> None:
         await self.configure_media_sources()
         before = self.player.unique_id
         er.async_get(self.hass).async_update_entity(
             "media_player.living_cast", new_entity_id="media_player.cast_renamed"
         )
         self.hass.states.async_remove("media_player.living_cast")
-        self.hass.states.async_set("media_player.cast_renamed", "playing", {
-            "supported_features": NATIVE_FEATURES, "app_id": "YouTube",
-        })
+        self.hass.states.async_set(
+            "media_player.cast_renamed",
+            "playing",
+            {
+                "supported_features": NATIVE_FEATURES,
+                "app_id": "YouTube",
+            },
+        )
         await self.hass.async_block_till_done()
         await self.player.async_media_pause()
-        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.cast_renamed"})])
-        self.assertEqual(self.entry.data["tv_cast_entity_id"], "media_player.cast_renamed")
+        self.assertEqual(
+            self.native_calls,
+            [("media_pause", {"entity_id": "media_player.cast_renamed"})],
+        )
+        self.assertEqual(
+            self.entry.data["tv_cast_entity_id"], "media_player.cast_renamed"
+        )
         self.assertEqual(self.player.unique_id, before)
 
-    async def test_projector_selection_does_not_steal_television_cast_controls(self):
+    async def test_projector_selection_does_not_steal_television_cast_controls(
+        self,
+    ) -> None:
         await self.configure_media_sources()
         self.hass.states.async_set("input_text.tv_source", "projector")
         self.hass.states.async_set("media_player.projector", "on")
-        self.hass.states.async_set("media_player.living_kodi", "playing", {
-            "supported_features": NATIVE_FEATURES, "media_title": "Projector movie",
-        })
+        self.hass.states.async_set(
+            "media_player.living_kodi",
+            "playing",
+            {
+                "supported_features": NATIVE_FEATURES,
+                "media_title": "Projector movie",
+            },
+        )
         await self.hass.async_block_till_done()
         await self.player.async_media_pause()
-        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": "media_player.living_music"})])
-        self.assertEqual(self.hass.states.get(self.player.entity_id).attributes["media_title"], "Current song")
+        self.assertEqual(
+            self.native_calls,
+            [("media_pause", {"entity_id": "media_player.living_music"})],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.player.entity_id).attributes["media_title"],
+            "Current song",
+        )
 
-    async def test_pause_and_volume_capabilities_survive_all_sources_standby(self):
+    async def test_pause_and_volume_capabilities_survive_all_sources_standby(
+        self,
+    ) -> None:
         await self.configure_media_sources()
         before = self.player.supported_features
         for entity in ("living_cast", "living_remote", "living_music", "living_kodi"):
-            self.hass.states.async_set("media_player." + entity, "off", {
-                "supported_features": NATIVE_FEATURES,
-            })
-        self.coordinator.async_set_updated_data(False)
+            self.hass.states.async_set(
+                "media_player." + entity,
+                "off",
+                {
+                    "supported_features": NATIVE_FEATURES,
+                },
+            )
+        self.coordinator.async_set_updated_data(data=False)
         await self.hass.async_block_till_done()
         self.assertEqual(self.player.supported_features, before)
-        required = Feature.PAUSE | Feature.PLAY | Feature.VOLUME_SET | Feature.VOLUME_STEP
+        required = (
+            Feature.PAUSE | Feature.PLAY | Feature.VOLUME_SET | Feature.VOLUME_STEP
+        )
         self.assertEqual(self.player.supported_features & required, required)
         with self.assertRaises(HomeAssistantError):
             await self.player.async_media_pause()
