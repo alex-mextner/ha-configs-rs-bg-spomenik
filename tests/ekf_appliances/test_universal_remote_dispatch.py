@@ -3,6 +3,7 @@ import asyncio
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import importlib
+import logging
 from itertools import product
 from pathlib import Path
 import sys
@@ -14,12 +15,19 @@ from unittest.mock import patch
 
 import yaml
 from homeassistant import loader
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import Context, HomeAssistant, State, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, frame, trigger
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.script import Script, script_stack_cv
 from homeassistant.helpers.template import Template
 from homeassistant.util import dt as dt_util
+
+from custom_components import remote_announcements
 
 PACKAGE = Path(__file__).resolve().parents[2] / "packages/universal_remote.yaml"
 MODES = list(product(("tv", "projector"), ("off", "on"), ("off", "on")))
@@ -38,6 +46,7 @@ runtime_module = ModuleType(PREFIX + ".runtime")
 runtime_module.UNIVERSAL_PROJECTOR_COMMAND = ContextVar("test_remote_dispatch", default=False)
 with patch.dict(sys.modules, {PREFIX: package, PREFIX + ".runtime": runtime_module}):
     controller_module = importlib.import_module(PREFIX + ".remote_control")
+    sensor_module = importlib.import_module(PREFIX + ".sensor")
 
 
 class RuntimeBoundary:
@@ -911,6 +920,87 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         await self.scripts["audio_mode_deactivate"].async_run({}, context=Context())
         await self.hass.async_block_till_done()
         self.assertEqual(self.controller.mode.target, "kodi")
+
+    async def prepare_target_announcements(self):
+        """Attach the real target sensor and announcement manager to this HA loop."""
+        self.hass.config_entries = ConfigEntries(self.hass, {})
+        dr.async_setup(self.hass)
+        await dr.async_load(self.hass, load_empty=True)
+        await er.async_load(self.hass, load_empty=True)
+        entry = SimpleNamespace(
+            entry_id="remote-fixture",
+            runtime_data=SimpleNamespace(remote_controller=self.controller),
+        )
+        component = EntityComponent(logging.getLogger(__name__), "sensor", self.hass)
+        await component.async_add_entities([sensor_module.UniversalRemoteTarget(entry)])
+        config = remote_announcements.CONFIG_SCHEMA(
+            yaml.safe_load((PACKAGE.parent / "remote_announcements.yaml").read_text())
+        )[remote_announcements.DOMAIN]
+        self.hass.states.async_set(config["backend_entity"], "Яндекс")
+        self.hass.states.async_set(config["yandex_entity"], "idle", {
+            "volume_level": 0.5, "is_volume_muted": False, "alice_state": "IDLE",
+        })
+        manager = remote_announcements.Manager(self.hass, config)
+
+        async def generate(_text):
+            return b"nonplayed-cached-fixture", 0.01
+
+        await manager.cache.prepare(generate)
+        manager.settings = {"dialogs": {
+            "skill_id": "11111111-1111-1111-1111-111111111111",
+            "sounds": {clip.key: "22222222-2222-2222-2222-222222222222"
+                       for clip in manager.cache.clips.values()},
+        }}
+        manager.gate.changed(self.hass.states.get(config["target_entity"]).state)
+        unsubscribe = async_track_state_change_event(
+            self.hass, [config["target_entity"]], manager.target_changed,
+        )
+
+        async def speak(call):
+            self.calls.append(("media_player.play_media", dict(call.data)))
+            entity = call.data["entity_id"]
+            state = self.hass.states.get(entity)
+            attrs = dict(state.attributes)
+            self.hass.states.async_set(entity, state.state, {**attrs, "alice_state": "SPEAKING"})
+            await asyncio.sleep(0)
+            self.hass.states.async_set(entity, state.state, {**attrs, "alice_state": "IDLE"})
+
+        self.hass.services.async_register("media_player", "play_media", speak)
+        return manager, component, unsubscribe
+
+    async def test_audio_transitions_only_announce_the_committed_target(self):
+        self.reset(("projector", "off", "off"))
+        manager, component, unsubscribe = await self.prepare_target_announcements()
+        try:
+            for script, target in (("audio_mode_activate", "speaker"),
+                                   ("audio_mode_deactivate", "kodi")):
+                self.calls.clear()
+                await self.scripts[script].async_run({}, context=Context())
+                await self.hass.async_block_till_done()
+                await manager.queue.drain()
+                state = self.hass.states.get(controller_module.TARGET)
+                self.assertEqual(state.state, target)
+                self.assertTrue(state.attributes["initialized"])
+                speech = [data for name, data in self.calls if name == "media_player.play_media"]
+                self.assertEqual(len(speech), 1)
+                self.assertIn("dialogs-upload/", speech[0]["media_content_id"])
+                self.assertEqual(manager.status, "ready")
+                self.assertEqual([call for call in self.calls if call[0] in {
+                    "script.music_remote_command", "aisis_speaker.send_directive",
+                }], [])
+        finally:
+            unsubscribe()
+            await manager.queue.stop()
+            await component.async_remove_entity(controller_module.TARGET)
+
+    async def test_single_audio_press_preserves_normal_play_pause(self):
+        self.reset()
+        await self.scripts["audio_mode_handle_press"].async_run({}, context=Context())
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "off")
+        self.assertEqual([call for call in self.calls
+                          if call[0] == "script.music_remote_command"], [
+            ("script.music_remote_command", {"command": "play_pause"}),
+        ])
 
     async def test_pending_power_does_not_block_smart_ac_or_input(self):
         self.reset()

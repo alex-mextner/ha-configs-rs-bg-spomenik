@@ -766,7 +766,8 @@ script:
           native: "{{ route.native }}"
 
   # ========== Audio mode (selected music backend) ==========
-  # Backend-specific sound support is handled by the music command router.
+  # Explicit legacy beeps remain available to existing callers. Mode changes
+  # are confirmed only by the canonical target announcement listener.
   audio_mode_beep_on:
     alias: Audio mode — activation beep
     mode: single
@@ -791,7 +792,6 @@ script:
         target: { entity_id: input_boolean.audio_mode }
       - action: input_boolean.turn_off
         target: { entity_id: input_boolean.audio_was_playing }
-      - action: script.audio_mode_beep_on
 
   audio_mode_deactivate:
     alias: Audio mode — deactivate
@@ -805,7 +805,6 @@ script:
           entity_id:
             - input_boolean.audio_mode
             - input_boolean.audio_was_playing
-      - action: script.audio_mode_beep_off
       # Never resume music here: it would undo a requested Pause or Power action.
 
   # Handler for the 'audio' button itself. Detects double-tap, toggles mode,
