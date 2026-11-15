@@ -1,6 +1,7 @@
 """Bind private keyboard providers after the native integrations have started."""
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlsplit
 
 from homeassistant.helpers import entity_registry as er
@@ -9,6 +10,8 @@ from .const import DOMAIN, CONF_TV_ANDROIDTV_ENTITY_ID, CONF_TV_KODI_ENTITY_ID
 from .keyboard import KeyboardCoordinator, KeyboardTarget
 from .keyboard_android import AndroidKeyboardProvider, native_remote_id
 from .keyboard_notifications import KeyboardNotifications
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def resolved_host_config(config) -> tuple[str, str] | None:
@@ -68,14 +71,22 @@ async def async_start_keyboard(hass, entry) -> None:
                 await async_stop_keyboard(hass, entry)
                 return
         await coordinator.async_start(KeyboardNotifications(hass, targets))
-    except Exception:
-        await async_stop_keyboard(hass, entry)
+    except Exception as exc:
+        _LOGGER.warning("Keyboard initialization failed (%s)", type(exc).__name__)
+        await _async_close_keyboard(hass, entry)
         # A phone transport failure must not stop physical appliance controls.
 
 
 async def async_stop_keyboard(hass, entry) -> None:
+    """Permanently close keyboard transports when the integration unloads."""
     runtime = entry.runtime_data
     runtime.keyboard_closing = True
+    await _async_close_keyboard(hass, entry)
+
+
+async def _async_close_keyboard(hass, entry) -> None:
+    """Release partial initialization without turning a failure into unload."""
+    runtime = entry.runtime_data
     data = hass.data.setdefault(DOMAIN, {})
     coordinator = getattr(runtime, "keyboard_coordinator", None)
     if data.get("keyboard_owner") == entry.entry_id:

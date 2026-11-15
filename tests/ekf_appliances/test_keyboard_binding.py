@@ -113,3 +113,35 @@ class KeyboardBindingTests(unittest.IsolatedAsyncioTestCase):
             config["rest_command"]["host_kodi_start"]["url"] = url
             self.assertIsNone(self.setup.resolved_host_config(config))
         self.assertIsNone(self.setup.resolved_host_config({}))
+
+    async def test_failed_keyboard_start_can_retry_but_unload_remains_closed(self):
+        import tempfile
+        from homeassistant.core import HomeAssistant
+
+        with tempfile.TemporaryDirectory() as config_dir:
+            hass = HomeAssistant(config_dir)
+            hass.config_entries = self.hass.config_entries
+            runtime = SimpleNamespace()
+            entry = SimpleNamespace(
+                entry_id="ekf-test", runtime_data=runtime,
+                data={self.setup.CONF_TV_ANDROIDTV_ENTITY_ID: "media_player.televizor"},
+                options={},
+            )
+            try:
+                with patch.object(self.setup, "native_remote_id", return_value="remote.televizor"):
+                    with self.assertLogs(self.setup.__name__, level="WARNING") as logs:
+                        with patch.object(self.old, "subscribe", side_effect=RuntimeError("PRIVATE-FAILURE-TEXT")):
+                            await self.setup.async_start_keyboard(hass, entry)
+                    self.assertNotIn("PRIVATE-FAILURE-TEXT", "\n".join(logs.output))
+                    self.assertNotIn("keyboard_owner", hass.data[self.setup.DOMAIN])
+                    self.assertFalse(getattr(runtime, "keyboard_closing", False))
+                    await self.setup.async_start_keyboard(hass, entry)
+                    provider = runtime.keyboard_coordinator.targets["tv"].provider
+                    self.assertEqual((await provider.async_snapshot())["text"], "OLD-FIELD")
+                    await self.setup.async_stop_keyboard(hass, entry)
+                    await self.setup.async_start_keyboard(hass, entry)
+                    self.assertIsNone(runtime.keyboard_coordinator)
+                    self.assertNotIn("keyboard_owner", hass.data[self.setup.DOMAIN])
+            finally:
+                await self.setup.async_stop_keyboard(hass, entry)
+                await hass.async_block_till_done()
