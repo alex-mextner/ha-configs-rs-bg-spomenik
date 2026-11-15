@@ -7,9 +7,11 @@ from .const import (
     CONF_TV_SOURCE_ENTITY_ID,
 )
 
-MEDIA_CONFIG_KEYS = (
+TV_PLAYBACK_CONFIG_KEYS = (
     CONF_TV_CAST_ENTITY_ID, CONF_TV_ANDROIDTV_ENTITY_ID,
-    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID, CONF_TV_KODI_ENTITY_ID,
+    CONF_TV_MUSIC_ASSISTANT_ENTITY_ID,
+)
+MEDIA_CONFIG_KEYS = (*TV_PLAYBACK_CONFIG_KEYS, CONF_TV_KODI_ENTITY_ID,
     CONF_TV_SOURCE_ENTITY_ID,
 )
 _ACTIVE = {"playing", "paused", "buffering"}
@@ -50,7 +52,7 @@ class TelevisionMediaRouting:
 
     @property
     def configured(self):
-        return any(self.entity_id(key) for key in MEDIA_CONFIG_KEYS[:-1])
+        return any(self.entity_id(key) for key in TV_PLAYBACK_CONFIG_KEYS)
 
     def same_cast_player(self):
         registry = er.async_get(self.hass)
@@ -106,7 +108,7 @@ class TelevisionMediaRouting:
         if not self.configured:
             return [native] if native is not None else []
         states = [
-            state for key in (CONF_TV_CAST_ENTITY_ID, CONF_TV_ANDROIDTV_ENTITY_ID, CONF_TV_MUSIC_ASSISTANT_ENTITY_ID)
+            state for key in TV_PLAYBACK_CONFIG_KEYS
             if (state := self.state(key)) is not None
         ]
         return states or ([native] if native is not None else [])

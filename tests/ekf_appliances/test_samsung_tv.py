@@ -420,6 +420,33 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wire_code(self.commands[-1]["command"]), 0xE0E019E6)
         self.assertEqual(self.player.state, "off")
 
+    async def test_failed_on_does_not_discard_queued_off(self):
+        release = asyncio.Event()
+
+        async def send(call):
+            self.commands.append(dict(call.data))
+            self.sent.set()
+            if len(self.commands) == 1:
+                await release.wait()
+                self.set_native("on")
+                raise HomeAssistantError("Power acknowledgment failed")
+            self.set_native("off")
+
+        self.hass.services.async_register("remote", "send_command", send)
+        first = asyncio.create_task(self.player.async_turn_on())
+        await self.sent.wait()
+        duplicate = asyncio.create_task(self.player.async_turn_on())
+        opposite = asyncio.create_task(self.player.async_turn_off())
+        await self.real_sleep(0)
+        release.set()
+        results = await asyncio.gather(first, duplicate, opposite, return_exceptions=True)
+        self.assertIsInstance(results[0], HomeAssistantError)
+        self.assertIsInstance(results[1], HomeAssistantError)
+        self.assertIsNone(results[2])
+        self.assertEqual(len(self.commands), 2)
+        self.assertEqual(wire_code(self.commands[-1]["command"]), 0xE0E019E6)
+        self.assertEqual(self.player.state, "off")
+
     async def test_timeout_and_transport_failure_do_not_retry_or_invent_state(self):
         with patch("custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.03):
             results = await asyncio.gather(
@@ -454,6 +481,20 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(self.player.async_toggle(), self.player.async_toggle())
         self.assertEqual([wire_code(call["command"]) for call in self.commands], [0xE0E040BF])
         self.assertIsNone(self.player.state)
+
+    async def test_optional_projector_kodi_does_not_hide_native_tv_controls(self):
+        kodi_entry = await self.add_entry("kodi-only", "kodi", {})
+        kodi = er.async_get(self.hass).async_get_or_create(
+            "media_player", "kodi", "optional-projector-kodi",
+            suggested_object_id="optional_projector_kodi", config_entry=kodi_entry,
+        )
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, "tv_kodi_entity_id": kodi.entity_id},
+        )
+        self.hass.states.async_set(kodi.entity_id, "off")
+        self.set_native("on")
+        await self.player.async_media_pause()
+        self.assertEqual(self.native_calls, [("media_pause", {"entity_id": self.backend.entity_id})])
 
     async def test_nonpower_services_forward_exact_parameters_only_to_backend(self):
         self.set_native("on")

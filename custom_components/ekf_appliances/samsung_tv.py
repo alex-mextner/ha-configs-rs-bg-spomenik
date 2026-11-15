@@ -290,7 +290,11 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
                     self._async_transition(target), "EKF Samsung power transition"
                 )
         # Caller cancellation cannot release the guard while the TV is booting.
-        await asyncio.shield(task)
+        try:
+            await asyncio.shield(task)
+        except HomeAssistantError:
+            if not retry_after:
+                raise
         if retry_after:
             await self._async_power(turn_on)
 
