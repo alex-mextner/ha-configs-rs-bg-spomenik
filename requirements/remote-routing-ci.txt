@@ -1,0 +1,11 @@
+# Home Assistant and Kodi transport match the running production container.
+# Pytest versions match the isolated development checks.
+homeassistant==2026.9.3
+pytest==9.2.0
+pytest-asyncio==1.5.0
+PyYAML==6.0.3
+pykodi==0.2.7
+jsonrpc-base==2.2.0
+jsonrpc-websocket==3.2.1
+ha-ffmpeg==3.2.2
+mutagen==1.48.1

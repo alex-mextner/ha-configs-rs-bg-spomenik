@@ -1,0 +1,113 @@
+name: HA remote routing
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  maintained-regressions:
+    name: Maintained HA regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+      - name: Run the existing maintained regression gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/ha-remote-maintained-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          trap 'rc=$?; printf "%s finished rc=%s elapsed=%ss log=%s\n" "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting commit=%s log=%s\n' "$(date -Is)" "$(git rev-parse HEAD)" "$task_log"
+          git submodule update --init --recursive submodules/home-generative-agent
+          python3 -m pip install uv
+          make test-regressions PYTHON_BIN=python3.14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: remote-maintained-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ha-remote-maintained-*.log
+            .cache/test-results/*.log
+          retention-days: 14
+
+  remote-routing:
+    name: EKF routing and announcements
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+      - name: Exercise routing and speech against the live HA version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/ha-remote-routing-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          trap 'rc=$?; printf "%s finished rc=%s elapsed=%ss log=%s\n" "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting commit=%s log=%s\n' "$(date -Is)" "$(git rev-parse HEAD)" "$task_log"
+          python3 -m pip install -r requirements/remote-routing-ci.txt
+          mkdir -p .cache/test-results
+          # PairBindingsTests covers the changed integration; the separate host
+          # bridge contract class is outside this routing delivery.
+          PYTHONPATH="$PWD:$PWD/scripts" python3 -m pytest -q --import-mode=importlib \
+            --junitxml=.cache/test-results/remote-routing.xml \
+            tests/ekf_appliances/test_config_flow.py \
+            tests/ekf_appliances/test_feedback_freshness.py \
+            tests/ekf_appliances/test_integration.py \
+            tests/ekf_appliances/test_ir_receiver.py \
+            tests/ekf_appliances/test_keyboard_binding.py \
+            tests/ekf_appliances/test_keyboard_notifications.py \
+            tests/ekf_appliances/test_keyboard_ws.py \
+            tests/ekf_appliances/test_kodi_keyboard_client.py \
+            tests/ekf_appliances/test_mode_press_boundaries.py \
+            tests/ekf_appliances/test_native_ir.py \
+            tests/ekf_appliances/test_native_mode_observation.py \
+            tests/ekf_appliances/test_paired_media.py::PairBindingsTests \
+            tests/ekf_appliances/test_power_pair.py \
+            tests/ekf_appliances/test_projector_shutdown_state.py \
+            tests/ekf_appliances/test_protocol.py \
+            tests/ekf_appliances/test_remote_control_boundary.py \
+            tests/ekf_appliances/test_remote_mode_state.py \
+            tests/ekf_appliances/test_samsung_power.py \
+            tests/ekf_appliances/test_samsung_tv.py \
+            tests/ekf_appliances/test_transport.py \
+            tests/ekf_appliances/test_universal_remote_dispatch.py \
+            tests/ekf_appliances/test_universal_remote_yaml_contract.py \
+            tests/submodule_updates/test_yaml_validation.py \
+            tests/test_remote_announcements.py \
+            tests/test_remote_announcements_ha.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: remote-routing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ha-remote-routing-*.log
+            .cache/test-results/remote-routing.xml
+          retention-days: 14

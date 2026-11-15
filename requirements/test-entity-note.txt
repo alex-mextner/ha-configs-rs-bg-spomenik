@@ -8,3 +8,7 @@ home-assistant-frontend==20260826.7
 gazetteer-matcher==1.1.0
 hassil==3.12.1
 home-assistant-intents==2026.8.28
+
+# Cached remote announcements import Home Assistant TTS audio helpers.
+ha-ffmpeg==3.2.2
+mutagen==1.48.1
