@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
-from aiohttp import WSMsgType, web
+from aiohttp import WSMsgType, web, ClientTimeout
 from homeassistant.auth.models import User
 from homeassistant.components import panel_custom
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
@@ -16,11 +16,16 @@ from homeassistant.helpers import config_validation as cv
 
 BASE = "/api/chatgpt_native"
 DEFAULT_BACKEND = "http://127.0.0.1:6081"
-CONFIG_SCHEMA = vol.Schema({
-    "chatgpt_native": vol.Schema({
-        vol.Optional("backend_url", default=DEFAULT_BACKEND): cv.url,
-    }),
-}, extra=vol.ALLOW_EXTRA)
+CONFIG_SCHEMA = vol.Schema(
+    {
+        "chatgpt_native": vol.Schema(
+            {
+                vol.Optional("backend_url", default=DEFAULT_BACKEND): cv.url,
+            }
+        ),
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 COOKIE = "ha_ingress_session"
 
 
@@ -65,6 +70,81 @@ class SessionView(HomeAssistantView):
             max_age=300,
         )
         return response
+
+
+class ClipboardView(HomeAssistantView):
+    """Text clipboard commands require a currently active HA administrator."""
+
+    url = BASE + "/clipboard"
+    name = "api:chatgpt_native:clipboard"
+    requires_auth = True
+
+    def __init__(self, hass, backend):
+        self.client = async_get_clientsession(hass)
+        self.backend = backend.rstrip("/")
+
+    @staticmethod
+    def authorize(request):
+        user = request.get("hass_user")
+        if user is None:
+            raise web.HTTPUnauthorized()
+        if not user.is_active or not user.is_admin:
+            raise web.HTTPForbidden()
+
+    async def _proxy(self, method, data=None):
+        try:
+            async with self.client.request(
+                method,
+                self.backend + "/clipboard",
+                json=data,
+                timeout=ClientTimeout(total=12),
+                allow_redirects=False,
+            ) as response:
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(8192):
+                    body.extend(chunk)
+                    if len(body) > 400000:
+                        raise web.HTTPBadGateway()
+                return web.Response(
+                    body=body,
+                    status=response.status,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Cache-Control": "no-store",
+                    },
+                )
+        except (OSError, TimeoutError):
+            raise web.HTTPServiceUnavailable() from None
+
+    async def get(self, request):
+        self.authorize(request)
+        return await self._proxy("GET")
+
+    async def post(self, request):
+        self.authorize(request)
+        if request.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType()
+        body = bytearray()
+        async for chunk in request.content.iter_chunked(8192):
+            body.extend(chunk)
+            if len(body) > 400000:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=400000, actual_size=len(body)
+                )
+        import json
+
+        try:
+            payload = json.loads(body)
+            text = payload.get("text") if isinstance(payload, dict) else None
+            if (
+                not isinstance(text, str)
+                or "\0" in text
+                or len(text.encode("utf-8")) > 65536
+            ):
+                raise ValueError()
+        except (ValueError, UnicodeError):
+            raise web.HTTPBadRequest() from None
+        return await self._proxy("POST", {"text": text})
 
 
 class GUIView(HomeAssistantView):
@@ -136,6 +216,9 @@ class GUIView(HomeAssistantView):
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Register the protected proxy and administrator sidebar panel."""
     hass.http.register_view(SessionView(hass))
+    hass.http.register_view(
+        ClipboardView(hass, _config["chatgpt_native"]["backend_url"])
+    )
     hass.http.register_view(GUIView(hass, _config["chatgpt_native"]["backend_url"]))
     await hass.http.async_register_static_paths(
         [
