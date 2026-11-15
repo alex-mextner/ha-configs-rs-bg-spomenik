@@ -10,11 +10,16 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant import loader
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import frame
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 
 from custom_components.ekf_appliances.paired_media import install_power_pairs, observed_boolean
+from custom_components.ekf_appliances.media_routing import TelevisionMediaRouting
+from custom_components.ekf_appliances.media_player import ProjectorMediaPlayer
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,9 +30,18 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.hass = HomeAssistant(self.temp.name)
         loader.async_setup(self.hass)
         frame.async_setup(self.hass)
+        self.hass.config_entries = ConfigEntries(self.hass, {})
+        dr.async_setup(self.hass)
+        await dr.async_load(self.hass, load_empty=True)
+        await er.async_load(self.hass, load_empty=True)
+        er.async_get(self.hass).async_get_or_create(
+            "media_player", "androidtv_remote", "android-fixture",
+            suggested_object_id="android",
+        )
+        self.unload = []
         self.entry = SimpleNamespace(
-            data={"tv_androidtv_entity_id": "media_player.android"},
-            async_on_unload=Mock(),
+            data={"tv_androidtv_entity_id": "media_player.android", "tv_kodi_entity_id": "media_player.home"},
+            async_on_unload=self.unload.append,
         )
         self.calls = []
         self.starts = []
@@ -57,6 +71,7 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.television = SimpleNamespace(
             hass=self.hass, entity_id="media_player.tv", async_write_ha_state=Mock(),
             _async_power=tv_power,
+            media_routing=TelevisionMediaRouting(self.hass, self.entry),
             coordinator=SimpleNamespace(
                 data=False,
                 async_add_listener=lambda callback: self.tv_listeners.append(callback) or (lambda: None),
@@ -72,7 +87,7 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
                     "sensor.kodi_service_state", "on" if call.service == "host_kodi_start" else "off"
                 )
             else:
-                self.hass.states.async_set("media_player.android", "on" if call.service == "turn_on" else "off")
+                self.hass.states.async_set(call.data["entity_id"], "on" if call.service == "turn_on" else "off")
         for name in ("host_kodi_start", "host_kodi_stop"):
             self.hass.services.async_register("rest_command", name, service)
         for name in ("turn_on", "turn_off"):
@@ -90,6 +105,8 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         for pair in self.runtime.power_pairs:
             await pair.close()
+        for unsubscribe in reversed(self.unload):
+            unsubscribe()
         await self.hass.async_block_till_done()
         self.temp.cleanup()
 
@@ -126,7 +143,65 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         self.assertIn(("projector", False), self.calls)
 
+    async def test_android_rename_rebinds_commands_and_external_power_observation(self):
+        old_id = "media_player.android"
+        new_id = "media_player.android_renamed"
+        er.async_get(self.hass).async_update_entity(old_id, new_entity_id=new_id)
+        self.hass.states.async_remove(old_id)
+        self.hass.states.async_set(new_id, "off")
+        await self.hass.async_block_till_done()
+        self.runtime.tv_power_pair.timeout = 0.2
+        await self.runtime.tv_power_pair.request(True)
+        self.assertIn(("media_player", "turn_on", {"entity_id": new_id}), self.calls)
+        self.assertTrue(self.television.coordinator.data)
+        self.calls.clear()
+        self.hass.states.async_set(new_id, "off")
+        await self.hass.async_block_till_done()
+        self.assertIn(("tv", False), self.calls)
+
+    async def test_projector_without_optional_kodi_does_not_start_unselected_player(self):
+        with tempfile.TemporaryDirectory() as config_dir:
+            hass = HomeAssistant(config_dir)
+            calls, starts, unload = [], [], []
+            hass.states.async_set("binary_sensor.hdmi", "off")
+            hass.states.async_set("sensor.kodi_service_state", "off")
+
+            async def projector_power(target):
+                calls.append(("projector", target))
+                hass.states.async_set("binary_sensor.hdmi", "on" if target else "off")
+
+            async def kodi_power(call):
+                calls.append(("kodi", call.service))
+                hass.states.async_set("sensor.kodi_service_state", "on")
+
+            hass.services.async_register("rest_command", "host_kodi_start", kodi_power)
+            entry = SimpleNamespace(entry_id="no-kodi", data={}, async_on_unload=unload.append)
+            runtime = SimpleNamespace(
+                hass=hass, entry=entry, device_info=lambda _kind: {},
+                projector_power_entity_id="binary_sensor.hdmi", projector_power_state=False,
+                async_projector_power=projector_power, projector_shutting_down=False,
+                power_pairs=[], projector_power_pair=None, tv_power_pair=None,
+                note_projector_off_requested=Mock(),
+            )
+            projector = ProjectorMediaPlayer(runtime)
+            with patch("custom_components.ekf_appliances.paired_media.async_at_started",
+                       lambda _hass, start: starts.append(start) or (lambda: None)):
+                install_power_pairs(runtime, projector)
+            try:
+                for start in starts:
+                    await start(hass)
+                await projector.async_turn_on()
+                self.assertEqual(calls, [("projector", True)])
+                self.assertEqual(hass.states.get("binary_sensor.hdmi").state, "on")
+            finally:
+                for pair in runtime.power_pairs:
+                    await pair.close()
+                for unsubscribe in reversed(unload):
+                    unsubscribe()
+                await hass.async_block_till_done()
+
     async def test_observation_rejects_restored_unknown_and_stale_data(self):
+        self.assertIsNone(observed_boolean(self.hass, None))
         self.hass.states.async_set("sensor.sample", "on", {"restored": True})
         self.assertIsNone(observed_boolean(self.hass, "sensor.sample"))
         self.hass.states.async_set("sensor.sample", "unknown")
