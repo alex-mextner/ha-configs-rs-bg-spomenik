@@ -188,6 +188,7 @@ class OwnedPlayback:
         }
 
     def _publish(self, observed, *, error=None):
+        self._confirm_playback(observed)
         owned = self._owner is not None
         valid = not observed.get("foreign_player")
         if error:
@@ -239,6 +240,7 @@ class OwnedPlayback:
         return {**self._publish(current), "repeat_superseded": True}
 
     def _release_observed_repeat(self, current):
+        """Unchanged unconfirmed/restored modes do not prove a newer intent."""
         if (
             self._owner["phase"] in {"armed", "restoring"}
             and current["repeat"] == self._owner["prior_repeat"]
@@ -248,10 +250,20 @@ class OwnedPlayback:
         return self._repeat_superseded(current)
 
     def _confirm_looping(self):
-        if self._owner["phase"] == "armed":
+        if self._owner["phase"] in {"armed", "restoring"}:
             receipt = {**self._owner, "phase": "looping"}
             self._persist(receipt)
             self._owner = receipt
+
+    def _confirm_playback(self, observed):
+        """A positively matched return cancels the old restoration disposition."""
+        if (
+            self._owner is not None
+            and not observed.get("foreign_player")
+            and observed.get("file_matches")
+            and observed.get("repeat") == "one"
+        ):
+            self._confirm_looping()
 
     def _restore_repeat(self, latest, prior, deadline):
         if prior != "one":
@@ -275,7 +287,8 @@ class OwnedPlayback:
             # Covers external off/all, a crash before SetRepeat, and a crash
             # after successful restoration. Never replay an old repeat intent.
             return self._release_observed_repeat(current)
-        self._confirm_looping()
+        if self._owner["phase"] == "armed":
+            self._confirm_looping()
         if current["file_matches"]:
             self._idle_since = None
             return self._publish(current)
@@ -343,6 +356,7 @@ class OwnedPlayback:
             try:
                 current = self._read(deadline)
                 if current["file_matches"] and current["speed"] > 0:
+                    self._confirm_playback(current)
                     return current
             except FireplaceError as exc:
                 # The old preferred playlist can persist briefly after Open.
@@ -494,6 +508,7 @@ class OwnedPlayback:
             deadline = self._bounded_deadline(deadline)
             try:
                 current = self._read(deadline)
+                self._confirm_playback(current)
                 if current["foreign_player"]:
                     return self._publish(current, error="foreign_player_active")
                 if current["repeat"] != "one":
@@ -504,6 +519,7 @@ class OwnedPlayback:
                 if proof.get("repeat_superseded") is True:
                     return {**proof, "stopped": False}
                 latest = self._read(deadline)
+                self._confirm_playback(latest)
                 if (
                     not latest["foreign_player"]
                     and proof["repeat"] in MODES

@@ -143,3 +143,46 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.controller.stop()
         self.assertEqual(self.kodi.repeat, "off")
         self.assertFalse(self.receipt.exists())
+
+    def test_final_stop_read_reconfirms_a_returning_restoration_candidate(self):
+        self.controller.start()
+        self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
+        self.controller._idle_since = self.module.time.monotonic() - 3
+        persist = self.controller._persist
+
+        def defer_restoration(receipt):
+            persist(receipt)
+            if receipt["phase"] == "restoring":
+                self.kodi.active, self.kodi.file, self.kodi.speed = 0, "/human/audio", 1
+
+        with patch.object(self.controller, "_persist", side_effect=defer_restoration):
+            self.controller.observe()
+        self.assertEqual(self.controller._owner["phase"], "restoring")
+        self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
+        self.kodi.calls.clear()
+        reads = []
+
+        def return_after_foreign_observation(method, _params):
+            if method != "Player.GetActivePlayers":
+                return
+            reads.append(True)
+            if len(reads) == 2:
+                self.kodi.active, self.kodi.file, self.kodi.speed = 0, "/human/audio", 1
+            elif len(reads) == 3:
+                self.kodi.active, self.kodi.file, self.kodi.speed = (
+                    1,
+                    str(self.media),
+                    1,
+                )
+
+        self.kodi.before_call = return_after_foreign_observation
+        proof = self.controller.stop()
+        self.kodi.before_call = None
+        self.assertEqual(len(reads), 3)
+        self.assertTrue(proof["owned"])
+        self.assertFalse(proof["stopped"])
+        self.kodi.repeat = "off"
+        released = self.controller.stop()
+        self.assertIs(released.get("repeat_superseded"), True)
+        self.assertEqual(self.kodi.file, str(self.media))
+        self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])
