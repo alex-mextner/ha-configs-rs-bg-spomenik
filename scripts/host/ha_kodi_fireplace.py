@@ -234,8 +234,24 @@ class OwnedPlayback:
         return now - self._idle_since < 2.0
 
     def _repeat_superseded(self, current):
+        """Release durable ownership and return a positive transient intent proof."""
         self._forget()
         return {**self._publish(current), "repeat_superseded": True}
+
+    def _release_observed_repeat(self, current):
+        if (
+            self._owner["phase"] in {"armed", "restoring"}
+            and current["repeat"] == self._owner["prior_repeat"]
+        ):
+            self._forget()
+            return self._publish(current)
+        return self._repeat_superseded(current)
+
+    def _confirm_looping(self):
+        if self._owner["phase"] == "armed":
+            receipt = {**self._owner, "phase": "looping"}
+            self._persist(receipt)
+            self._owner = receipt
 
     def _restore_repeat(self, latest, prior, deadline):
         if prior != "one":
@@ -258,7 +274,8 @@ class OwnedPlayback:
         if current["repeat"] != "one":
             # Covers external off/all, a crash before SetRepeat, and a crash
             # after successful restoration. Never replay an old repeat intent.
-            return self._repeat_superseded(current)
+            return self._release_observed_repeat(current)
+        self._confirm_looping()
         if current["file_matches"]:
             self._idle_since = None
             return self._publish(current)
@@ -480,14 +497,18 @@ class OwnedPlayback:
                 if current["foreign_player"]:
                     return self._publish(current, error="foreign_player_active")
                 if current["repeat"] != "one":
-                    return {**self._repeat_superseded(current), "stopped": False}
+                    return {**self._release_observed_repeat(current), "stopped": False}
                 if current["file_matches"]:
                     self._rpc("Player.Stop", {"playerid": 1}, deadline)
                 proof = self._observe(deadline)
                 if proof.get("repeat_superseded") is True:
                     return {**proof, "stopped": False}
                 latest = self._read(deadline)
-                if not latest["foreign_player"] and latest["repeat"] != proof["repeat"]:
+                if (
+                    not latest["foreign_player"]
+                    and proof["repeat"] in MODES
+                    and latest["repeat"] != proof["repeat"]
+                ):
                     proof = self._repeat_superseded(latest)
                 return {
                     **proof,

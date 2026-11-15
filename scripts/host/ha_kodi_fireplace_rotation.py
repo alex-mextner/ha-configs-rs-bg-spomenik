@@ -659,8 +659,8 @@ class RotatingFireplaceController:
     def _await_progress(self, proof, deadline):
         progress_deadline = min(deadline, time.monotonic() + 3)
         while time.monotonic() < progress_deadline:
-            self._check_cancelled()
             self._require_progress_ownership(proof)
+            self._check_cancelled()
             value = self._proof(proof)
             if (
                 value["state"] == "playing"

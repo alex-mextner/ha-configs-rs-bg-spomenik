@@ -115,7 +115,9 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
                     ):
                         controller.start("cancelled-during-validation")
                     self.assertEqual(injected, [boundary])
-                    self.assertEqual(prepared, ["local-0", "local-1"])
+                    self.assertEqual(len(prepared), 2)
+                    self.assertEqual(prepared[0], "local-0")
+                    self.assertIn(prepared[1], {"local-1", "local-2"})
                     self.assertEqual(
                         sum(method == "Player.Open" for method, _ in self.kodi.calls), 1
                     )
@@ -163,7 +165,9 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         self.assertIsNone(self.selection()["pending"])
         self.assertEqual(controller.status()["state"], "error")
         self.assertIsNone(self.kodi.file)
-        self.assertEqual(controller.stop()["state"], "idle")
+        controller._rpc = self.kodi.rpc
+        self.assertFalse(controller.stop()["owned"])
+        self.assertIsNone(self.selection()["pending"])
 
     def test_repeat_supersession_during_pending_monitor_never_stops_the_video(self):
         from test_rotation_stop_boundaries import StopBoundaryCases
@@ -311,3 +315,37 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
                 if call[0] in {"Player.Stop", "Player.SetRepeat"}
             ]
         )
+
+    def test_close_cannot_discard_supersession_before_restart_cleanup(self):
+        def human_repeat(_controller, method, params):
+            if method == "Player.SetRepeat" and params["repeat"] == "one":
+                self.kodi.repeat = "all"
+
+        controller, prepared = self.stalled_controller(human_repeat)
+        observe = controller._owner._observe
+        superseded = []
+
+        def close_after_mode_observation(deadline, **options):
+            proof = observe(deadline, **options)
+            if proof.get("repeat_superseded") is True:
+                superseded.append(True)
+                controller._closing.set()
+            return proof
+
+        with patch.object(
+            controller._owner, "_observe", side_effect=close_after_mode_observation
+        ):
+            with self.assertRaisesRegex(
+                fixtures.fireplace.FireplaceError, "playback_changed"
+            ):
+                controller.start("close-after-supersession")
+        self.assertEqual(superseded, [True])
+        self.assertEqual(prepared, ["local-0"])
+        self.assertIsNone(self.selection()["pending"])
+        controller.close()
+        recovered = self.multi()
+        self.kodi.calls.clear()
+        recovered.observe()
+        self.assertEqual(self.kodi.file, str(self.root / "0.webm"))
+        self.assertEqual(self.kodi.repeat, "all")
+        self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])

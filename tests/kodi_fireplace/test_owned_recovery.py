@@ -113,3 +113,33 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.assertNotIn("Player.SetRepeat", dispatched)
         self.assertFalse(self.receipt.exists())
         self.assertEqual(self.kodi.repeat, "off")
+
+    def test_foreign_repeat_unknown_does_not_supersede_an_unchanged_video_mode(self):
+        self.controller.start()
+        reads = []
+
+        def transition(method, _params):
+            if method != "Player.GetActivePlayers":
+                return
+            reads.append(True)
+            if len(reads) == 2:
+                self.kodi.active, self.kodi.file, self.kodi.speed = 0, "/human/audio", 1
+            elif len(reads) == 3:
+                self.kodi.active, self.kodi.file, self.kodi.speed = (
+                    1,
+                    str(self.media),
+                    1,
+                )
+
+        self.kodi.before_call = transition
+        proof = self.controller.stop()
+        self.kodi.before_call = None
+        self.assertEqual(len(reads), 3)
+        self.assertTrue(proof["owned"])
+        self.assertIsNot(proof.get("repeat_superseded"), True)
+        self.assertFalse(proof["stopped"])
+        self.assertTrue(self.receipt.exists())
+        self.assertEqual(self.kodi.repeat, "one")
+        self.controller.stop()
+        self.assertEqual(self.kodi.repeat, "off")
+        self.assertFalse(self.receipt.exists())
