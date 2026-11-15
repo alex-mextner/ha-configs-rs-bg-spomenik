@@ -1,0 +1,3 @@
+prepare:
+  name: Prepare announcement cache
+  description: Generate missing Bracho clips and prepare configured providers without speaker playback.

@@ -1,0 +1,23 @@
+# Prepared speech follows the confirmed route, including double AUDIO speaker mode.
+# This independent selector never changes the backend used by music controls.
+# Яндекс names the exact current living-room Mini; AISIS explicitly selects the
+# configured studio Mini. A room filter is only used for automatic fallback.
+input_select:
+  remote_announcement_backend:
+    name: Колонка объявлений пульта
+    icon: mdi:account-voice
+    options:
+      - Яндекс
+      - AISIS
+
+remote_announcements:
+  target_entity: sensor.universal_remote_target
+  backend_entity: input_select.remote_announcement_backend
+  yandex_entity: media_player.yandex_station_m0011hm00z86hg
+  aisis_entity: media_player.aisis_speaker_m00zrw3008rajg
+  aisis_connected_entity: sensor.aisis_speaker_m00zrw3008rajg_connected
+  area: gostinaia
+  tts_entity: tts.bracho_bracho
+  volume_floor: 0.5
+  tempo: 1.25
+  music_mode: native
