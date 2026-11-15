@@ -9,7 +9,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import sqlite3
 import subprocess
 import threading
@@ -27,8 +26,10 @@ from typing import Any
 CONFIG_DIR = Path.home() / ".config" / "ha-host-actions"
 TOKEN_FILE = CONFIG_DIR / "token"
 PASSWORD_FILE = CONFIG_DIR / "desktop-password"
-KODI_APP_ID = "tv.kodi.Kodi"
-AGENT_BROWSER = Path(os.environ.get("AGENT_BROWSER", "/home/linuxbrew/.linuxbrew/bin/agent-browser"))
+KODI_UNIT = os.environ.get("KODI_UNIT", "kodi.service")
+AGENT_BROWSER = Path(
+    os.environ.get("AGENT_BROWSER", "/home/linuxbrew/.linuxbrew/bin/agent-browser")
+)
 RUTRACKER_LOGIN_URL = os.environ.get(
     "RUTRACKER_LOGIN_URL", "https://rutracker.org/forum/login.php"
 )
@@ -37,23 +38,45 @@ RUTRACKER_BROWSER_SESSION = os.environ.get(
 )
 KODI_JSONRPC_URL = os.environ.get("KODI_JSONRPC_URL", "http://127.0.0.1:8080/jsonrpc")
 KODI_USERNAME = os.environ.get("KODI_USERNAME", "kodi")
-KODI_PASSWORD = os.environ.get("KODI_PASSWORD", "kodi")
-KODI_USERDATA_DIR = Path(os.environ.get("KODI_USERDATA_DIR", str(Path.home() / ".var/app/tv.kodi.Kodi/data/userdata")))
-KODI_LIBRARY_DIR = Path(os.environ.get("KODI_LIBRARY_DIR", str(Path.home() / "KodiLibrary")))
+KODI_PASSWORD = os.environ.get("KODI_PASSWORD", "")
+KODI_USERDATA_DIR = Path(
+    os.environ.get("KODI_USERDATA_DIR", str(Path.home() / ".kodi/userdata"))
+)
+KODI_LIBRARY_DIR = Path(
+    os.environ.get("KODI_LIBRARY_DIR", str(Path.home() / "KodiLibrary"))
+)
 KODI_SERIES_DIR = KODI_LIBRARY_DIR / "Series"
 KODI_MOVIES_DIR = KODI_LIBRARY_DIR / "Movies"
-TRANSMISSION_RPC_URL = os.environ.get("TRANSMISSION_RPC_URL", "http://127.0.0.1:9091/transmission/rpc")
+TRANSMISSION_RPC_URL = os.environ.get(
+    "TRANSMISSION_RPC_URL", "http://127.0.0.1:9091/transmission/rpc"
+)
 TRANSMISSION_RPC_USERNAME = os.environ.get("TRANSMISSION_RPC_USERNAME", "")
 TRANSMISSION_RPC_PASSWORD = os.environ.get("TRANSMISSION_RPC_PASSWORD", "")
-VIDEO_SUFFIXES = {".avi", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ts", ".webm"}
+VIDEO_SUFFIXES = {
+    ".avi",
+    ".m2ts",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ts",
+    ".webm",
+}
 MIN_VIDEO_SIZE = 50 * 1024 * 1024
 EPISODE_RE = re.compile(
     r"(?:^|[ ._\-\[\(])(?:s(?P<season>\d{1,2})[ ._\-]*e(?P<episode>\d{1,3})|"
     r"(?P<season_alt>\d{1,2})x(?P<episode_alt>\d{1,3}))(?:[ ._\-\]\)]|$)",
     re.IGNORECASE,
 )
-SEASON_HINT_RE = re.compile(r"(?:^|[ ._\-/\\])(?:s(?:eason)?|сезон)[ ._\-]*(\d{1,2})(?:[ ._\-/\\]|$)", re.IGNORECASE)
-SERIES_HINT_RE = re.compile(r"(?:season|series|tv[ ._\-]?show|сезон|сериал|серии|эпизод)", re.IGNORECASE)
+SEASON_HINT_RE = re.compile(
+    r"(?:^|[ ._\-/\\])(?:s(?:eason)?|сезон)[ ._\-]*(\d{1,2})(?:[ ._\-/\\]|$)",
+    re.IGNORECASE,
+)
+SERIES_HINT_RE = re.compile(
+    r"(?:season|series|tv[ ._\-]?show|сезон|сериал|серии|эпизод)", re.IGNORECASE
+)
 TITLE_CUT_RE = re.compile(
     r"\b(?:s\d{1,2}(?:e\d{1,3})?|season|сезон|1080p|720p|2160p|4320p|"
     r"bluray|bdrip|brrip|web[ ._\-]?dl|webrip|hdtv|hdrip|dvdrip|remux|"
@@ -111,7 +134,16 @@ def run(
 
 
 def dbus_call(args: list[str], timeout: float = 5.0) -> dict[str, Any]:
-    proc = run(["gdbus", "call", "--session", *args], timeout=timeout)
+    try:
+        proc = run(["gdbus", "call", "--session", *args], timeout=timeout)
+    except FileNotFoundError:
+        # gdbus is absent on headless hosts; report the probe as unavailable.
+        return {
+            "cmd": " ".join(args),
+            "returncode": None,
+            "stdout": None,
+            "stderr": "gdbus unavailable",
+        }
     return {
         "cmd": " ".join(args),
         "returncode": proc.returncode,
@@ -168,68 +200,35 @@ def lock_screen() -> dict[str, Any]:
 
 
 def kodi_running() -> bool:
-    return bool(kodi_pids())
-
-
-def kodi_pids() -> list[int]:
-    proc = run(["ps", "-eo", "pid=,uid=,comm=,args="], timeout=3)
-    if proc.returncode != 0:
-        return []
-
-    pids: list[int] = []
-    current_uid = str(os.getuid())
-    own_pid = os.getpid()
-    for line in proc.stdout.splitlines():
-        parts = line.strip().split(None, 3)
-        if len(parts) < 4:
-            continue
-        pid_s, uid_s, comm, args = parts
-        if uid_s != current_uid:
-            continue
-        try:
-            pid = int(pid_s)
-        except ValueError:
-            continue
-        if pid == own_pid:
-            continue
-        if "ha-host-actions.py" in args:
-            continue
-        if (
-            "flatpak run tv.kodi.Kodi" in args
-            or "/app/bin/kodi" in args
-            or comm in {"kodi", "kodi.bin"}
-        ):
-            pids.append(pid)
-    return pids
+    return (
+        run(["systemctl", "is-active", "--quiet", KODI_UNIT], timeout=3).returncode == 0
+    )
 
 
 def start_kodi() -> dict[str, Any]:
     if kodi_running():
         return {"kodi": "already_running"}
 
-    unit = f"ha-kodi-projector-{int(time.time())}"
-    proc = subprocess.Popen(
-        [
-            "systemd-run",
-            "--user",
-            "--scope",
-            "--collect",
-            "--unit",
-            unit,
-            "flatpak",
-            "run",
-            KODI_APP_ID,
-        ],
-        env=session_env(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+    # kodi.service is a system unit (DRM/ALSA access, see /usr/local/bin/kodi-session); the sudoers
+    # drop-in /etc/sudoers.d/ha-kodi lets this user start/stop exactly that unit.
+    proc = run(
+        ["sudo", "-n", "systemctl", "start", "--no-block", KODI_UNIT], timeout=10
     )
-    return {"kodi": "starting", "pid": proc.pid, "unit": unit}
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"systemctl start {KODI_UNIT} failed: {proc.stderr.strip()[-300:]}"
+        )
+    return {"kodi": "starting", "unit": KODI_UNIT}
 
 
-def kodi_jsonrpc(method: str, params: dict[str, Any] | None = None, timeout: float = 5.0) -> dict[str, Any]:
-    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": "ha-host-actions", "method": method}
+def kodi_jsonrpc(
+    method: str, params: dict[str, Any] | None = None, timeout: float = 5.0
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": "ha-host-actions",
+        "method": method,
+    }
     if params is not None:
         payload["params"] = params
     request = urllib.request.Request(
@@ -252,7 +251,9 @@ def kodi_jsonrpc(method: str, params: dict[str, Any] | None = None, timeout: flo
     return {"ok": True, "status": response.status, "body": decoded}
 
 
-def transmission_rpc(method: str, arguments: dict[str, Any] | None = None, timeout: float = 10.0) -> dict[str, Any]:
+def transmission_rpc(
+    method: str, arguments: dict[str, Any] | None = None, timeout: float = 10.0
+) -> dict[str, Any]:
     payload = {"method": method, "arguments": arguments or {}}
     body = json.dumps(payload).encode("utf-8")
     session_id = ""
@@ -266,7 +267,11 @@ def transmission_rpc(method: str, arguments: dict[str, Any] | None = None, timeo
         if session_id:
             request.add_header("X-Transmission-Session-Id", session_id)
         if TRANSMISSION_RPC_USERNAME or TRANSMISSION_RPC_PASSWORD:
-            credentials = f"{TRANSMISSION_RPC_USERNAME}:{TRANSMISSION_RPC_PASSWORD}".encode("utf-8")
+            credentials = (
+                f"{TRANSMISSION_RPC_USERNAME}:{TRANSMISSION_RPC_PASSWORD}".encode(
+                    "utf-8"
+                )
+            )
             request.add_header(
                 "Authorization",
                 "Basic " + __import__("base64").b64encode(credentials).decode("ascii"),
@@ -320,41 +325,29 @@ def stop_kodi() -> dict[str, Any]:
         return {"kodi": "not_running"}
 
     rpc_result = kodi_jsonrpc_quit()
-    time.sleep(3)
+    # Kodi needs a few seconds to shut down on this board; killing the unit mid-shutdown also
+    # kills its virtual X server and Kodi then dies with an X IO error (unit left "failed").
+    deadline = time.monotonic() + 8
+    while kodi_running() and time.monotonic() < deadline:
+        time.sleep(0.5)
     if not kodi_running():
         return {"kodi": "stopped", "method": "jsonrpc", "jsonrpc": rpc_result}
 
-    flatpak = run(["flatpak", "kill", KODI_APP_ID], timeout=5)
-    time.sleep(1)
-    if not kodi_running():
-        return {
-            "kodi": "stopped",
-            "method": "flatpak_kill",
-            "jsonrpc": rpc_result,
-            "flatpak_returncode": flatpak.returncode,
-        }
-
-    killed_pids = kodi_pids()
-    for pid in killed_pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    stop = run(["sudo", "-n", "systemctl", "stop", KODI_UNIT], timeout=20)
     return {
-        "kodi": "stop_requested",
-        "method": "pid_term",
+        "kodi": "stopped" if not kodi_running() else "stop_requested",
+        "method": "systemctl_stop",
         "jsonrpc": rpc_result,
-        "flatpak_returncode": flatpak.returncode,
-        "pids": killed_pids,
+        "systemctl_returncode": stop.returncode,
     }
 
 
 def projector_on() -> dict[str, Any]:
-    return {"unlock": wake_and_unlock_screen(), "kodi": start_kodi()}
+    return {"kodi": start_kodi()}
 
 
 def projector_off() -> dict[str, Any]:
-    return {"kodi": stop_kodi(), "lock": lock_screen()}
+    return {"kodi": stop_kodi()}
 
 
 def episode_match(text: str) -> re.Match[str] | None:
@@ -407,7 +400,11 @@ def choose_video_file_from_candidates(candidates: list[Path], media_type: str) -
         raise FileNotFoundError("no completed video files are available")
     if media_type == "series":
         return sorted(candidates, key=season_episode_key)[0]
-    return sorted(candidates, key=lambda path: (path.stat().st_size, str(path).lower()), reverse=True)[0]
+    return sorted(
+        candidates,
+        key=lambda path: (path.stat().st_size, str(path).lower()),
+        reverse=True,
+    )[0]
 
 
 def choose_video_file(root: Path, media_type: str) -> Path:
@@ -444,7 +441,9 @@ def torrent_root_path(torrent: dict[str, Any]) -> Path:
     return download_dir
 
 
-def torrent_matches_payload(torrent: dict[str, Any], payload: dict[str, Any], root: Path | None = None) -> bool:
+def torrent_matches_payload(
+    torrent: dict[str, Any], payload: dict[str, Any], root: Path | None = None
+) -> bool:
     requested_id = str(payload.get("id") or "").strip()
     if requested_id and str(torrent.get("id") or "") == requested_id:
         return True
@@ -485,11 +484,19 @@ def completed_video_files_for_torrent(torrent: dict[str, Any]) -> list[Path]:
         if length < MIN_VIDEO_SIZE:
             continue
 
-        file_stat = stats[index] if isinstance(stats, list) and index < len(stats) and isinstance(stats[index], dict) else {}
+        file_stat = (
+            stats[index]
+            if isinstance(stats, list)
+            and index < len(stats)
+            and isinstance(stats[index], dict)
+            else {}
+        )
         if file_stat.get("wanted") is False:
             continue
 
-        completed = int(file_stat.get("bytesCompleted") or file_info.get("bytesCompleted") or 0)
+        completed = int(
+            file_stat.get("bytesCompleted") or file_info.get("bytesCompleted") or 0
+        )
         if completed < length:
             continue
 
@@ -500,11 +507,18 @@ def completed_video_files_for_torrent(torrent: dict[str, Any]) -> list[Path]:
     return candidates
 
 
-def completed_video_files_for_payload(payload: dict[str, Any], root: Path) -> tuple[list[Path], dict[str, Any] | None, list[dict[str, Any]]]:
+def completed_video_files_for_payload(
+    payload: dict[str, Any], root: Path
+) -> tuple[list[Path], dict[str, Any] | None, list[dict[str, Any]]]:
     torrents = transmission_torrents()
     for torrent in torrents:
         if torrent_matches_payload(torrent, payload, root):
-            completed = [path for path in completed_video_files_for_torrent(torrent) if path_contains(root, path) or path_contains(torrent_root_path(torrent), path)]
+            completed = [
+                path
+                for path in completed_video_files_for_torrent(torrent)
+                if path_contains(root, path)
+                or path_contains(torrent_root_path(torrent), path)
+            ]
             return completed, torrent, torrents
     return [], None, torrents
 
@@ -516,7 +530,9 @@ def detect_media_type(
     torrent: dict[str, Any] | None = None,
 ) -> str:
     payload = payload or {}
-    requested = str(payload.get("media_type") or payload.get("type") or "auto").strip().lower()
+    requested = (
+        str(payload.get("media_type") or payload.get("type") or "auto").strip().lower()
+    )
     if requested in {"series", "movies"}:
         return requested
 
@@ -531,13 +547,18 @@ def detect_media_type(
         str(torrent.get("name") or "") if torrent else "",
         " ".join(labels),
     ]
-    texts.extend(str(path.relative_to(root)) if path_contains(root, path) else str(path) for path in candidates)
+    texts.extend(
+        str(path.relative_to(root)) if path_contains(root, path) else str(path)
+        for path in candidates
+    )
     probe = "\n".join(text for text in texts if text)
 
     if episode_match(probe) or SERIES_HINT_RE.search(probe):
         return "series"
 
-    if len(candidates) >= 3 and any(season_number(path) is not None for path in candidates):
+    if len(candidates) >= 3 and any(
+        season_number(path) is not None for path in candidates
+    ):
         return "series"
     if len(candidates) >= 6:
         return "series"
@@ -589,7 +610,9 @@ def ensure_symlink(src: Path, dest: Path) -> str:
     elif dest.exists():
         if dest.is_file() and dest.stat().st_size == src.stat().st_size:
             return "exists_file"
-        raise FileExistsError(f"destination already exists and is not this video: {dest}")
+        raise FileExistsError(
+            f"destination already exists and is not this video: {dest}"
+        )
 
     os.symlink(src, dest)
     return "created"
@@ -599,7 +622,11 @@ def latest_kodi_video_db() -> Path | None:
     database_dir = KODI_USERDATA_DIR / "Database"
     databases = sorted(
         database_dir.glob("MyVideos*.db"),
-        key=lambda path: int(re.search(r"(\d+)", path.stem).group(1)) if re.search(r"(\d+)", path.stem) else 0,
+        key=lambda path: (
+            int(re.search(r"(\d+)", path.stem).group(1))
+            if re.search(r"(\d+)", path.stem)
+            else 0
+        ),
     )
     return databases[-1] if databases else None
 
@@ -632,7 +659,9 @@ def ensure_kodi_sources_xml() -> dict[str, Any]:
         if source is None:
             source = ET.SubElement(video, "source")
             ET.SubElement(source, "name").text = name
-            ET.SubElement(source, "path", {"pathversion": "1"}).text = trailing_slash(path)
+            ET.SubElement(source, "path", {"pathversion": "1"}).text = trailing_slash(
+                path
+            )
             ET.SubElement(source, "allowsharing").text = "true"
             changed = True
             continue
@@ -671,45 +700,69 @@ def ensure_kodi_video_db_sources() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     conn = sqlite3.connect(db_path, timeout=5)
     try:
-      with conn:
-        conn.execute("PRAGMA busy_timeout=5000")
-        for path, content, scraper, use_folder_names in (
-            (KODI_SERIES_DIR, "tvshows", "metadata.tvshows.themoviedb.org.python", 0),
-            (KODI_MOVIES_DIR, "movies", "metadata.themoviedb.org.python", 1),
-        ):
-            path_text = trailing_slash(path)
-            row = conn.execute(
-                "select idPath, strContent, strScraper, scanRecursive, useFolderNames, noUpdate, exclude from path where strPath = ?",
-                (path_text,),
-            ).fetchone()
-            if row:
-                desired = (content, scraper, 2147483647, use_folder_names, 0, 0)
-                current = (row[1], row[2], row[3], row[4], row[5], row[6])
-                updated = current != desired
-                if updated:
-                    conn.execute(
-                        """
+        with conn:
+            conn.execute("PRAGMA busy_timeout=5000")
+            for path, content, scraper, use_folder_names in (
+                (
+                    KODI_SERIES_DIR,
+                    "tvshows",
+                    "metadata.tvshows.themoviedb.org.python",
+                    0,
+                ),
+                (KODI_MOVIES_DIR, "movies", "metadata.themoviedb.org.python", 1),
+            ):
+                path_text = trailing_slash(path)
+                row = conn.execute(
+                    "select idPath, strContent, strScraper, scanRecursive, useFolderNames, noUpdate, exclude from path where strPath = ?",
+                    (path_text,),
+                ).fetchone()
+                if row:
+                    desired = (content, scraper, 2147483647, use_folder_names, 0, 0)
+                    current = (row[1], row[2], row[3], row[4], row[5], row[6])
+                    updated = current != desired
+                    if updated:
+                        conn.execute(
+                            """
                         update path
                            set strContent = ?, strScraper = ?, scanRecursive = ?,
                                useFolderNames = ?, noUpdate = ?, exclude = ?
                          where strPath = ?
                         """,
-                        (*desired, path_text),
+                            (*desired, path_text),
+                        )
+                        changed = True
+                    rows.append(
+                        {"path": path_text, "idPath": row[0], "updated": updated}
                     )
-                    changed = True
-                rows.append({"path": path_text, "idPath": row[0], "updated": updated})
-            else:
-                conn.execute(
-                    """
+                else:
+                    conn.execute(
+                        """
                     insert into path
                       (strPath, strContent, strScraper, scanRecursive, useFolderNames, noUpdate, exclude, dateAdded)
                     values (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (path_text, content, scraper, 2147483647, use_folder_names, 0, 0, datetime.now().isoformat(timespec="seconds")),
-                )
-                changed = True
-                rows.append({"path": path_text, "idPath": conn.execute("select last_insert_rowid()").fetchone()[0], "updated": False})
-        conn.commit()
+                        (
+                            path_text,
+                            content,
+                            scraper,
+                            2147483647,
+                            use_folder_names,
+                            0,
+                            0,
+                            datetime.now().isoformat(timespec="seconds"),
+                        ),
+                    )
+                    changed = True
+                    rows.append(
+                        {
+                            "path": path_text,
+                            "idPath": conn.execute(
+                                "select last_insert_rowid()"
+                            ).fetchone()[0],
+                            "updated": False,
+                        }
+                    )
+            conn.commit()
     finally:
         conn.close()
 
@@ -718,12 +771,6 @@ def ensure_kodi_video_db_sources() -> dict[str, Any]:
 
 def ensure_kodi_library_setup() -> dict[str, Any]:
     result: dict[str, Any] = {}
-    try:
-        override = run(["flatpak", "override", "--user", f"--filesystem={KODI_LIBRARY_DIR}:ro", KODI_APP_ID], timeout=10)
-        result["flatpak"] = {"returncode": override.returncode, "stderr": override.stderr.strip()[-500:]}
-    except Exception as exc:  # noqa: BLE001 - setup should still continue.
-        result["flatpak"] = {"error": repr(exc)}
-
     result["sources_xml"] = ensure_kodi_sources_xml()
     try:
         result["video_db"] = ensure_kodi_video_db_sources()
@@ -732,7 +779,9 @@ def ensure_kodi_library_setup() -> dict[str, Any]:
     return result
 
 
-def sync_completed_files_to_kodi(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def sync_completed_files_to_kodi(
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     payload = payload or {}
     setup = ensure_kodi_library_setup()
     torrents = transmission_torrents()
@@ -745,7 +794,9 @@ def sync_completed_files_to_kodi(payload: dict[str, Any] | None = None) -> dict[
         if not candidates:
             continue
         root = torrent_root_path(torrent)
-        media_type = detect_media_type(root, candidates, {"name": torrent.get("name")}, torrent)
+        media_type = detect_media_type(
+            root, candidates, {"name": torrent.get("name")}, torrent
+        )
         for src in candidates:
             if path_contains(KODI_LIBRARY_DIR, src):
                 continue
@@ -753,7 +804,9 @@ def sync_completed_files_to_kodi(payload: dict[str, Any] | None = None) -> dict[
                 dest = library_destination(src, torrent, media_type)
                 status = ensure_symlink(src, dest)
                 if status == "created":
-                    touched_roots.add(KODI_SERIES_DIR if media_type == "series" else KODI_MOVIES_DIR)
+                    touched_roots.add(
+                        KODI_SERIES_DIR if media_type == "series" else KODI_MOVIES_DIR
+                    )
                 linked.append(
                     {
                         "source": str(src),
@@ -769,11 +822,30 @@ def sync_completed_files_to_kodi(payload: dict[str, Any] | None = None) -> dict[
     should_scan = bool(payload.get("scan", True))
     if should_scan and payload.get("start_kodi"):
         start_kodi()
-    if should_scan and kodi_running() and (touched_roots or setup.get("sources_xml", {}).get("changed") or setup.get("video_db", {}).get("changed")):
+    if (
+        should_scan
+        and kodi_running()
+        and (
+            touched_roots
+            or setup.get("sources_xml", {}).get("changed")
+            or setup.get("video_db", {}).get("changed")
+        )
+    ):
         try:
             wait_for_kodi_jsonrpc(timeout=20)
-            for root in sorted(touched_roots or {KODI_SERIES_DIR, KODI_MOVIES_DIR}, key=str):
-                scan_result.append({"directory": str(root), "result": kodi_jsonrpc("VideoLibrary.Scan", {"directory": trailing_slash(root)}, timeout=3)})
+            for root in sorted(
+                touched_roots or {KODI_SERIES_DIR, KODI_MOVIES_DIR}, key=str
+            ):
+                scan_result.append(
+                    {
+                        "directory": str(root),
+                        "result": kodi_jsonrpc(
+                            "VideoLibrary.Scan",
+                            {"directory": trailing_slash(root)},
+                            timeout=3,
+                        ),
+                    }
+                )
         except Exception as exc:  # noqa: BLE001 - return scan diagnostics to HA.
             scan_result.append({"error": repr(exc)})
 
@@ -793,7 +865,11 @@ def wait_for_kodi_jsonrpc(timeout: float = 25.0) -> dict[str, Any]:
     last_error = ""
     while time.monotonic() < deadline:
         try:
-            return kodi_jsonrpc("Application.GetProperties", {"properties": ["name", "version"]}, timeout=2)
+            return kodi_jsonrpc(
+                "Application.GetProperties",
+                {"properties": ["name", "version"]},
+                timeout=2,
+            )
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = str(exc)
             time.sleep(1)
@@ -812,7 +888,9 @@ def kodi_play_path(payload: dict[str, Any]) -> dict[str, Any]:
     rpc_error = ""
     matched_torrent: dict[str, Any] | None = None
     try:
-        completed_candidates, matched_torrent, _ = completed_video_files_for_payload(payload, root)
+        completed_candidates, matched_torrent, _ = completed_video_files_for_payload(
+            payload, root
+        )
     except Exception as exc:  # noqa: BLE001 - allow manual local playback without Transmission RPC.
         completed_candidates = []
         rpc_error = repr(exc)
@@ -820,7 +898,9 @@ def kodi_play_path(payload: dict[str, Any]) -> dict[str, Any]:
     if matched_torrent is not None:
         candidates = completed_candidates
         if not candidates:
-            raise FileNotFoundError(f"no fully downloaded video files are available under {root}")
+            raise FileNotFoundError(
+                f"no fully downloaded video files are available under {root}"
+            )
     else:
         candidates = video_candidates(root)
 
@@ -831,7 +911,9 @@ def kodi_play_path(payload: dict[str, Any]) -> dict[str, Any]:
     ready = wait_for_kodi_jsonrpc()
     scan_dir = str(selected.parent if selected.is_file() else selected)
     scan_result = kodi_jsonrpc("VideoLibrary.Scan", {"directory": scan_dir}, timeout=3)
-    open_result = kodi_jsonrpc("Player.Open", {"item": {"file": str(selected)}}, timeout=8)
+    open_result = kodi_jsonrpc(
+        "Player.Open", {"item": {"file": str(selected)}}, timeout=8
+    )
     time.sleep(2)
     players = kodi_jsonrpc("Player.GetActivePlayers", timeout=3)
     active_players = []
@@ -859,7 +941,9 @@ def kodi_play_path(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def agent_browser(args: list[str], timeout: float = 30.0, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
+def agent_browser(
+    args: list[str], timeout: float = 30.0, input_data: str | None = None
+) -> subprocess.CompletedProcess[str]:
     if not AGENT_BROWSER.exists():
         return subprocess.CompletedProcess(
             [str(AGENT_BROWSER), *args],
@@ -970,7 +1054,9 @@ def rutracker_browser_login(payload: dict[str, Any]) -> dict[str, Any]:
   return {{ ok: true, url: location.href, title: document.title }};
 }})()
 """
-    submitted = agent_browser(["--json", "eval", "--stdin"], timeout=15, input_data=script)
+    submitted = agent_browser(
+        ["--json", "eval", "--stdin"], timeout=15, input_data=script
+    )
     if submitted.returncode != 0:
         return {
             "ok": False,
@@ -1024,38 +1110,15 @@ def health() -> dict[str, Any]:
     }
 
 
-# Voice stack controls. The HA container has no docker CLI, so HA's
-# shell_command.voice_* call these endpoints instead (fixed allow-list, no args).
-COMPOSE = ["/home/ultra/homeassistant/scripts/ha_compose.sh"]
-SATELLITE = "homeassistant-wyoming-satellite-1"
-APLAY = "aplay -D plughw:CARD=ArrayUAC10,DEV=0"
-VOICE_COMMANDS: dict[str, list[str]] = {
-    "restart-services": [*COMPOSE, "up", "-d", "--force-recreate", "wyoming-openwakeword", "wyoming-satellite"],
-    "restart-satellite": [*COMPOSE, "up", "-d", "--force-recreate", "wyoming-satellite"],
-    "stop-recording": [*COMPOSE, "stop", "wyoming-satellite"],
-    "start-recording": [*COMPOSE, "start", "wyoming-satellite"],
-    "play-last-wake": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} $(ls -1t /tmp/debug/*-wake.wav | head -n1)"],
-    "play-last-stt": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} $(ls -1t /tmp/debug/*-stt.wav | head -n1)"],
-    "play-awake": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} /app/sounds/awake.wav"],
-    "play-done": ["docker", "exec", SATELLITE, "sh", "-c", f"{APLAY} /app/sounds/done.wav"],
-}
-
-
-def voice_action(name: str):
-    def action() -> dict[str, Any]:
-        proc = subprocess.run(VOICE_COMMANDS[name], text=True, capture_output=True, timeout=120)
-        if proc.returncode != 0:
-            raise RuntimeError(f"{name} failed ({proc.returncode}): {proc.stderr.strip()[-500:]}")
-        return {"voice": name, "returncode": proc.returncode}
-
-    return action
-
-
 # Network devices (router-cli). HA's network-devices card reads the inventory and
 # pins/unpins DHCP leases through these endpoints. Every argument is validated and
 # passed as an argv list — never through a shell. `dry_run: true` in a body makes
 # pin/unpin pass --dry-run so the flow can be tested without touching the router.
-ROUTER_BIN = os.environ.get("ROUTER_BIN") or shutil.which("router") or str(Path.home() / ".local/bin/router")
+ROUTER_BIN = (
+    os.environ.get("ROUTER_BIN")
+    or shutil.which("router")
+    or str(Path.home() / ".local/bin/router")
+)
 MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 SINCE_RE = re.compile(r"^\d{1,4}[smhd]$")
 MDI_RE = re.compile(r"^mdi:[a-z0-9-]{1,64}$")
@@ -1069,23 +1132,34 @@ class InvalidInput(ValueError):
     """Bad request data (reported to HA as HTTP 400)."""
 
 
-def router_cmd(args: list[str], timeout: float = 25.0) -> subprocess.CompletedProcess[str]:
+def router_cmd(
+    args: list[str], timeout: float = 25.0
+) -> subprocess.CompletedProcess[str]:
     if not Path(ROUTER_BIN).exists():
         raise RuntimeError(f"router CLI not found at {ROUTER_BIN}")
     return subprocess.run(
-        [ROUTER_BIN, *args], text=True, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL
+        [ROUTER_BIN, *args],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        stdin=subprocess.DEVNULL,
     )
 
 
 def router_result(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     if proc.returncode != 0:
-        raise RuntimeError(f"router failed ({proc.returncode}): {(proc.stderr or proc.stdout).strip()[-500:]}")
+        raise RuntimeError(
+            f"router failed ({proc.returncode}): {(proc.stderr or proc.stdout).strip()[-500:]}"
+        )
     out = proc.stdout.strip()
     try:
         parsed: Any = json.loads(out) if out else None
     except json.JSONDecodeError:
         parsed = None
-    result: dict[str, Any] = {"returncode": proc.returncode, "stderr": proc.stderr.strip()[-800:]}
+    result: dict[str, Any] = {
+        "returncode": proc.returncode,
+        "stderr": proc.stderr.strip()[-800:],
+    }
     if isinstance(parsed, (dict, list)):
         result["result"] = parsed
     else:
@@ -1110,7 +1184,13 @@ def valid_ip(value: Any) -> str:
         ip = ipaddress.ip_address(str(first_value(value) or "").strip())
     except ValueError as exc:
         raise InvalidInput("invalid_ip") from exc
-    if ip.version != 4 or not ip.is_private or ip.is_loopback or ip.is_multicast or ip.is_unspecified:
+    if (
+        ip.version != 4
+        or not ip.is_private
+        or ip.is_loopback
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
         raise InvalidInput("invalid_ip")
     return str(ip)
 
@@ -1123,7 +1203,12 @@ def valid_name(value: Any) -> str:
 
 
 def is_dry_run(payload: dict[str, Any]) -> bool:
-    return str(first_value(payload.get("dry_run", False))).lower() in {"1", "true", "yes", "on"}
+    return str(first_value(payload.get("dry_run", False))).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def network_inventory(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1136,13 +1221,19 @@ def network_inventory(payload: dict[str, Any]) -> dict[str, Any]:
         if not SINCE_RE.match(since):
             raise InvalidInput("invalid_since")
         args += ["--since", since]
-    no_favicons = str(first_value(payload.get("favicons", "1"))).lower() in {"0", "false", "no"}
+    no_favicons = str(first_value(payload.get("favicons", "1"))).lower() in {
+        "0",
+        "false",
+        "no",
+    }
     if no_favicons:
         # Fast path: the CLI never even reads the favicon blobs (the full answer is ~100 KB).
         args.append("--no-favicons")
     proc = router_cmd(args, timeout=20)
     if proc.returncode != 0:
-        raise RuntimeError(f"router inventory failed ({proc.returncode}): {proc.stderr.strip()[-500:]}")
+        raise RuntimeError(
+            f"router inventory failed ({proc.returncode}): {proc.stderr.strip()[-500:]}"
+        )
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
@@ -1153,7 +1244,11 @@ def network_inventory(payload: dict[str, Any]) -> dict[str, Any]:
         for device in data["devices"]:
             for service in device.get("services") or []:
                 service["favicon_data_url"] = None
-    data["scan"] = {"running": _scan_state["running"], "started_at": _scan_state["started_at"], "last": _scan_state["last"]}
+    data["scan"] = {
+        "running": _scan_state["running"],
+        "started_at": _scan_state["started_at"],
+        "last": _scan_state["last"],
+    }
     return data
 
 
@@ -1163,7 +1258,16 @@ def network_inventory(payload: dict[str, Any]) -> dict[str, Any]:
 BUCKET_RE = re.compile(r"^\d{1,3}[mhd]$")
 HISTORY_MAX_BUCKETS = 400
 STATS_MAX_HOURS = 336
-_BUCKET_STEPS = [(300, "5m"), (900, "15m"), (1800, "30m"), (3600, "1h"), (10800, "3h"), (21600, "6h"), (43200, "12h"), (86400, "1d")]
+_BUCKET_STEPS = [
+    (300, "5m"),
+    (900, "15m"),
+    (1800, "30m"),
+    (3600, "1h"),
+    (10800, "3h"),
+    (21600, "6h"),
+    (43200, "12h"),
+    (86400, "1d"),
+]
 
 
 def valid_days(value: Any, default: float = 7.0) -> float:
@@ -1208,14 +1312,28 @@ def network_history(payload: dict[str, Any]) -> dict[str, Any]:
     if not BUCKET_RE.match(bucket) or not 300 <= _bucket_seconds(bucket) <= 86400:
         raise InvalidInput("invalid_bucket")
     for seconds, label in _BUCKET_STEPS:
-        if seconds >= _bucket_seconds(bucket) and days * 86400 / seconds <= HISTORY_MAX_BUCKETS:
+        if (
+            seconds >= _bucket_seconds(bucket)
+            and days * 86400 / seconds <= HISTORY_MAX_BUCKETS
+        ):
             bucket = label
             break
-    args = ["inventory", "history", device, "--json", "--days", f"{days:g}", "--bucket", bucket]
+    args = [
+        "inventory",
+        "history",
+        device,
+        "--json",
+        "--days",
+        f"{days:g}",
+        "--bucket",
+        bucket,
+    ]
     result = router_result(router_cmd(args, timeout=20))
     data = result.get("result")
     if not isinstance(data, dict) or not isinstance(data.get("buckets"), list):
-        raise RuntimeError(f"router inventory history failed: {result.get('stderr') or result.get('stdout')}")
+        raise RuntimeError(
+            f"router inventory history failed: {result.get('stderr') or result.get('stdout')}"
+        )
     return data
 
 
@@ -1240,10 +1358,14 @@ def _downsample_hours(rows: list[dict[str, Any]], limit: int) -> list[dict[str, 
 
 def network_stats(payload: dict[str, Any]) -> dict[str, Any]:
     days = valid_days(payload.get("days"))
-    result = router_result(router_cmd(["inventory", "stats", "--json", "--days", f"{days:g}"], timeout=30))
+    result = router_result(
+        router_cmd(["inventory", "stats", "--json", "--days", f"{days:g}"], timeout=30)
+    )
     data = result.get("result")
     if not isinstance(data, dict) or not isinstance(data.get("per_hour"), list):
-        raise RuntimeError(f"router inventory stats failed: {result.get('stderr') or result.get('stdout')}")
+        raise RuntimeError(
+            f"router inventory stats failed: {result.get('stderr') or result.get('stdout')}"
+        )
     data["per_hour"] = _downsample_hours(data["per_hour"], STATS_MAX_HOURS)
     return data
 
@@ -1251,7 +1373,11 @@ def network_stats(payload: dict[str, Any]) -> dict[str, Any]:
 def _scan_worker(args: list[str], label: str) -> None:
     try:
         proc = subprocess.run(
-            [ROUTER_BIN, *args], text=True, capture_output=True, timeout=1800, stdin=subprocess.DEVNULL
+            [ROUTER_BIN, *args],
+            text=True,
+            capture_output=True,
+            timeout=1800,
+            stdin=subprocess.DEVNULL,
         )
         _scan_state["last"] = {
             "target": label,
@@ -1279,14 +1405,21 @@ def network_scan(payload: dict[str, Any]) -> dict[str, Any]:
     if not _scan_lock.acquire(blocking=False):
         return {"started": False, "busy": True, "running": _scan_state["running"]}
     _scan_state["running"] = label
-    _scan_state["started_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    _scan_state["started_at"] = (
+        datetime.now().astimezone().isoformat(timespec="seconds")
+    )
     worker = threading.Thread(target=_scan_worker, args=(args, label), daemon=True)
     worker.start()
     # A single-host scan usually finishes quickly: wait briefly so the card can refresh
     # right away. Full scans (and slow hosts) keep running in the background.
     worker.join(SCAN_WAIT if label != "all-online" else 0)
     done = not worker.is_alive()
-    return {"started": True, "target": label, "done": done, "last": _scan_state["last"] if done else None}
+    return {
+        "started": True,
+        "target": label,
+        "done": done,
+        "last": _scan_state["last"] if done else None,
+    }
 
 
 # Static-lease writes are serialized. router-cli's reserve/unreserve change the router but
@@ -1301,10 +1434,19 @@ def _refresh_after_write() -> dict[str, Any]:
     if not _update_lock.acquire(timeout=60):
         return {"refreshed": False, "reason": "busy"}
     try:
-        result = router_result(router_cmd(["inventory", "update", "--json", "--wait", "40"], timeout=60))
+        result = router_result(
+            router_cmd(["inventory", "update", "--json", "--wait", "40"], timeout=60)
+        )
         summary = result.get("result") if isinstance(result.get("result"), dict) else {}
-        print(f"network write: inventory refreshed, {summary.get('reservations')} reservations", flush=True)
-        return {"refreshed": True, "last_poll": summary.get("at"), "reservations": summary.get("reservations")}
+        print(
+            f"network write: inventory refreshed, {summary.get('reservations')} reservations",
+            flush=True,
+        )
+        return {
+            "refreshed": True,
+            "last_poll": summary.get("at"),
+            "reservations": summary.get("reservations"),
+        }
     except Exception as exc:  # noqa: BLE001 - the write itself succeeded; report, don't fail it.
         print(f"network write: inventory refresh failed: {exc!r}", flush=True)
         return {"refreshed": False, "error": str(exc)[-300:]}
@@ -1339,7 +1481,13 @@ def network_pin(payload: dict[str, Any]) -> dict[str, Any]:
     name = valid_name(payload.get("name"))
     dry_run = is_dry_run(payload)
     with _write_lock:
-        out = {"action": "pin", "mac": mac, "ip": ip, "dry_run": dry_run, **_reserve(mac, ip, name, dry_run)}
+        out = {
+            "action": "pin",
+            "mac": mac,
+            "ip": ip,
+            "dry_run": dry_run,
+            **_reserve(mac, ip, name, dry_run),
+        }
         if not dry_run:
             out["inventory"] = _refresh_after_write()
     return out
@@ -1349,7 +1497,12 @@ def network_unpin(payload: dict[str, Any]) -> dict[str, Any]:
     mac = valid_mac(payload.get("mac"))
     dry_run = is_dry_run(payload)
     with _write_lock:
-        out = {"action": "unpin", "mac": mac, "dry_run": dry_run, **_unreserve(mac, dry_run)}
+        out = {
+            "action": "unpin",
+            "mac": mac,
+            "dry_run": dry_run,
+            **_unreserve(mac, dry_run),
+        }
         if not dry_run:
             out["inventory"] = _refresh_after_write()
     return out
@@ -1357,11 +1510,18 @@ def network_unpin(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _reserved_devices() -> dict[str, dict[str, Any]]:
     """Current reservations from the local inventory DB (no router traffic)."""
-    proc = router_cmd(["inventory", "list", "--json", "--filter", "reserved", "--no-favicons"], timeout=20)
+    proc = router_cmd(
+        ["inventory", "list", "--json", "--filter", "reserved", "--no-favicons"],
+        timeout=20,
+    )
     if proc.returncode != 0:
-        raise RuntimeError(f"router inventory failed ({proc.returncode}): {proc.stderr.strip()[-300:]}")
+        raise RuntimeError(
+            f"router inventory failed ({proc.returncode}): {proc.stderr.strip()[-300:]}"
+        )
     data = json.loads(proc.stdout)
-    return {str(d.get("mac")): d for d in data.get("devices") or [] if d.get("reserved_ip")}
+    return {
+        str(d.get("mac")): d for d in data.get("devices") or [] if d.get("reserved_ip")
+    }
 
 
 def network_pin_replace(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1383,24 +1543,36 @@ def network_pin_replace(payload: dict[str, Any]) -> dict[str, Any]:
             raise InvalidInput("protected_reservation")
         old_ip = valid_ip(old.get("reserved_ip"))
         out: dict[str, Any] = {
-            "action": "pin-replace", "replace_mac": old_mac, "replace_ip": old_ip,
-            "mac": mac, "ip": ip, "dry_run": dry_run,
+            "action": "pin-replace",
+            "replace_mac": old_mac,
+            "replace_ip": old_ip,
+            "mac": mac,
+            "ip": ip,
+            "dry_run": dry_run,
         }
-        print(f"network pin-replace: {old_mac} {old_ip} -> {mac} {ip} (dry_run={dry_run})", flush=True)
+        print(
+            f"network pin-replace: {old_mac} {old_ip} -> {mac} {ip} (dry_run={dry_run})",
+            flush=True,
+        )
         out["unreserve"] = _unreserve(old_mac, dry_run)
         try:
             out["reserve"] = _reserve(mac, ip, name, dry_run)
         except Exception as exc:
             if dry_run:
                 raise
-            print(f"network pin-replace: reserve failed ({exc!r}); restoring {old_mac} {old_ip}", flush=True)
+            print(
+                f"network pin-replace: reserve failed ({exc!r}); restoring {old_mac} {old_ip}",
+                flush=True,
+            )
             try:
                 _reserve(old_mac, old_ip, "", False)
                 rollback = "restored"
             except Exception as exc2:  # noqa: BLE001 - report both failures.
                 rollback = f"FAILED: {exc2}"
             _refresh_after_write()
-            raise RuntimeError(f"reserve failed: {exc}; old reservation {rollback}") from exc
+            raise RuntimeError(
+                f"reserve failed: {exc}; old reservation {rollback}"
+            ) from exc
         if not dry_run:
             out["inventory"] = _refresh_after_write()
     return out
@@ -1419,7 +1591,11 @@ def network_alias(payload: dict[str, Any]) -> dict[str, Any]:
         args += ["--name", name]
     if icon:
         args += ["--icon", icon]
-    return {"action": "alias", "mac": mac, **router_result(router_cmd(args, timeout=15))}
+    return {
+        "action": "alias",
+        "mac": mac,
+        **router_result(router_cmd(args, timeout=15)),
+    }
 
 
 # The router (Ubee) hangs when polled often. It is polled ONLY by the hourly
@@ -1427,7 +1603,10 @@ def network_alias(payload: dict[str, Any]) -> dict[str, Any]:
 # button.network_devices_update entity). Requests are serialized, and a poll younger than
 # NETWORK_UPDATE_MIN_AGE seconds is reused instead of hitting the router again.
 NETWORK_UPDATE_MIN_AGE = float(os.environ.get("NETWORK_UPDATE_MIN_AGE", "60"))
-ROUTER_DB = Path(os.environ.get("ROUTER_CLI_DB") or Path.home() / ".local/share/router-cli/inventory.sqlite3")
+ROUTER_DB = Path(
+    os.environ.get("ROUTER_CLI_DB")
+    or Path.home() / ".local/share/router-cli/inventory.sqlite3"
+)
 _update_lock = threading.Lock()
 
 
@@ -1436,7 +1615,9 @@ def last_poll() -> tuple[str | None, float | None]:
     try:
         con = sqlite3.connect(f"file:{ROUTER_DB}?mode=ro", uri=True, timeout=5)
         try:
-            row = con.execute("SELECT value FROM meta WHERE key = 'last_poll'").fetchone()
+            row = con.execute(
+                "SELECT value FROM meta WHERE key = 'last_poll'"
+            ).fetchone()
         finally:
             con.close()
     except sqlite3.Error:
@@ -1454,7 +1635,12 @@ def network_update(payload: dict[str, Any]) -> dict[str, Any]:
     at, age = last_poll()
     if age is not None and age < NETWORK_UPDATE_MIN_AGE:
         print(f"network update: skipped, last poll {age:.0f}s ago", flush=True)
-        return {"polled": False, "reason": "fresh", "last_poll": at, "age_s": round(age)}
+        return {
+            "polled": False,
+            "reason": "fresh",
+            "last_poll": at,
+            "age_s": round(age),
+        }
     if not _update_lock.acquire(timeout=45):
         return {"polled": False, "reason": "busy", "last_poll": at}
     try:
@@ -1462,13 +1648,25 @@ def network_update(payload: dict[str, Any]) -> dict[str, Any]:
         at, age = last_poll()
         if age is not None and age < NETWORK_UPDATE_MIN_AGE:
             print(f"network update: joined a poll {age:.0f}s old", flush=True)
-            return {"polled": False, "reason": "fresh", "last_poll": at, "age_s": round(age)}
-        print("network update: polling the router (router inventory update)", flush=True)
+            return {
+                "polled": False,
+                "reason": "fresh",
+                "last_poll": at,
+                "age_s": round(age),
+            }
+        print(
+            "network update: polling the router (router inventory update)", flush=True
+        )
         started = time.monotonic()
-        result = router_result(router_cmd(["inventory", "update", "--json", "--wait", "40"], timeout=60))
+        result = router_result(
+            router_cmd(["inventory", "update", "--json", "--wait", "40"], timeout=60)
+        )
         took = time.monotonic() - started
         summary = result.get("result") if isinstance(result.get("result"), dict) else {}
-        print(f"network update: done in {took:.1f}s, seen {summary.get('seen')}", flush=True)
+        print(
+            f"network update: done in {took:.1f}s, seen {summary.get('seen')}",
+            flush=True,
+        )
         return {
             "polled": not summary.get("skipped", False),
             "last_poll": summary.get("at") or last_poll()[0],
@@ -1485,7 +1683,9 @@ def network_summary(query: dict[str, Any]) -> dict[str, Any]:
     """Compact, local-DB-only view for Home Assistant sensors (never touches the router)."""
     proc = router_cmd(["inventory", "list", "--json", "--filter", "all"], timeout=20)
     if proc.returncode != 0:
-        raise RuntimeError(f"router inventory failed ({proc.returncode}): {proc.stderr.strip()[-300:]}")
+        raise RuntimeError(
+            f"router inventory failed ({proc.returncode}): {proc.stderr.strip()[-300:]}"
+        )
     data = json.loads(proc.stdout)
     devices = data.get("devices") or []
     online = [d for d in devices if d.get("online")]
@@ -1510,7 +1710,9 @@ def network_summary(query: dict[str, Any]) -> dict[str, Any]:
             for d in devices
             if d.get("first_seen") and ts(d["first_seen"]) >= day_ago
         ],
-        "online": [{"name": label(d), "ip": d.get("ip"), "mac": d.get("mac")} for d in online],
+        "online": [
+            {"name": label(d), "ip": d.get("ip"), "mac": d.get("mac")} for d in online
+        ],
         "online_macs": [d.get("mac") for d in online],
         "online_names": sorted({label(d) for d in online}, key=str.casefold),
     }
@@ -1527,7 +1729,6 @@ ROUTES = {
     ("POST", "/screen/lock"): lock_screen,
     ("POST", "/rutracker/login"): rutracker_browser_login,
     ("GET", "/health"): health,
-    **{("POST", f"/voice/{name}"): voice_action(name) for name in VOICE_COMMANDS},
     ("GET", "/network/inventory"): network_inventory,
     ("POST", "/network/inventory"): network_inventory,
     ("POST", "/network/scan"): network_scan,
