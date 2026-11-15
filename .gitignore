@@ -83,3 +83,6 @@ backups/integration-updates/
 
 # Host-provisioned tools for container commit hooks (not source).
 .tools/
+
+# Written by `3d ha deploy` (3d-cli SHA + time of the last deploy).
+.3d-cli-deployed

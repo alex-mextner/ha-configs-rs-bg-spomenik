@@ -50,10 +50,10 @@ script:
           - action: script.projector_turn_on
 
 automation:
-  # Projector power drives the PC display/Kodi helper and the active source.
-  # Turning the projector on wakes/unlocks the desktop and starts Kodi, then
-  # marks the source as projector. Turning it off stops Kodi and locks the
-  # desktop. Only reverts TV source to chromecast if projector was actually
+  # Projector power drives the Kodi host helper and the active source.
+  # Turning the projector on starts Kodi (system unit on the odroid), then
+  # marks the source as projector. Turning it off stops Kodi. Only reverts
+  # TV source to chromecast if projector was actually
   # active, so a background power correction does not hijack pc/chromecast.
   # tv_source + source_to_chromecast live in universal_remote; packages merge.
   - alias: Projector power follows source
