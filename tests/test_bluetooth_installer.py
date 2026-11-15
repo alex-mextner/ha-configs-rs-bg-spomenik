@@ -354,7 +354,9 @@ exit 0
 class BluetoothHostPreparationTests(unittest.TestCase):
     """Verify adapter failures stay optional after D-Bus and BlueZ are prepared."""
 
-    def test_powered_off_adapter_does_not_fail_host_preparation(self) -> None:
+    def _run_host_script(
+        self, systemctl: str, bluetoothctl: str
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary_directory:
             sandbox = Path(temporary_directory)
             fake_bin = sandbox / "fake-bin"
@@ -375,21 +377,15 @@ class BluetoothHostPreparationTests(unittest.TestCase):
             for name, script in {
                 "bluetoothd": "#!/bin/sh\nexit 0\n",
                 "dbus-send": "#!/bin/sh\nexit 0\n",
-                "rfkill": "#!/bin/sh\nexit 0\n",
-                "systemctl": "#!/bin/sh\nexit 0\n",
-                "bluetoothctl": """#!/bin/sh
-case \"$*\" in
-  *' list'*) echo 'Controller AA:BB:CC:DD:EE:FF Test adapter'; exit 0 ;;
-  *' power on'*) exit 6 ;;
-esac
-exit 0
-""",
+                "rfkill": '#!/bin/sh\necho "rfkill $*" >&2\nexit 0\n',
+                "systemctl": systemctl,
+                "bluetoothctl": bluetoothctl,
             }.items():
                 command = fake_bin / name
                 command.write_text(script)
                 command.chmod(0o755)
 
-            result = subprocess.run(
+            return subprocess.run(
                 [fakeroot_path(), "bash", str(host_script)],
                 text=True,
                 capture_output=True,
@@ -397,8 +393,83 @@ exit 0
                 env=dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}"),
             )
 
+    def test_powered_off_adapter_does_not_fail_host_preparation(self) -> None:
+        result = self._run_host_script(
+            systemctl="#!/bin/sh\nexit 0\n",
+            bluetoothctl="""#!/bin/sh
+case \"$*\" in
+  *' list'*) echo 'Controller AA:BB:CC:DD:EE:FF Test adapter'; exit 0 ;;
+  *' power on'*) exit 6 ;;
+esac
+exit 0
+""",
+        )
+
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("could not be powered on", result.stderr)
+
+    @staticmethod
+    def _inactive_bluez_systemctl(snapshot: str, start_exit: int = 0) -> str:
+        """
+        Fake systemctl for a BlueZ found inactive by the first is-active.
+
+        `show` answers `snapshot`; `start bluetooth.service` exits `start_exit`
+        (the outcome of the start it joins) and, on success, makes is-active pass.
+        """
+        return f"""#!/bin/sh
+case \"$*\" in
+  *'is-active --quiet bluetooth.service'*) [ -e \"$0.started\" ] && exit 0; exit 3 ;;
+  *'show -p ActiveState -p ConditionResult bluetooth.service'*) printf '{snapshot}' ;;
+  'start bluetooth.service')
+    [ {start_exit} -eq 0 ] && : > \"$0.started\"
+    exit {start_exit} ;;
+esac
+exit 0
+"""
+
+    def test_adapter_not_yet_enumerated_does_not_fail_host_preparation(self) -> None:
+        # bluetooth.service is skipped, not failed, while /sys/class/bluetooth is absent
+        # (a USB adapter that enumerates late at boot): inactive with ConditionResult=no.
+        # bluetoothctl would fail without a daemon, so it must not be reached.
+        result = self._run_host_script(
+            systemctl=self._inactive_bluez_systemctl(
+                "ConditionResult=no\\nActiveState=inactive\\n"
+            ),
+            bluetoothctl="#!/bin/sh\necho 'bluetoothctl must not run' >&2\nexit 1\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No Bluetooth adapter", result.stderr)
+        self.assertNotIn("bluetoothctl must not run", result.stderr)
+        self.assertIn("rfkill unblock bluetooth", result.stderr)
+
+    def test_adapter_hotplug_racing_the_check_waits_for_bluez(self) -> None:
+        # The adapter appears between is-active and show: udev's start makes the
+        # ConditionResult yes while BlueZ is still activating. Its outcome decides.
+        for start_exit, returncode in ((0, 0), (1, 1)):
+            with self.subTest(start_exit=start_exit):
+                result = self._run_host_script(
+                    systemctl=self._inactive_bluez_systemctl(
+                        "ConditionResult=yes\\nActiveState=activating\\n", start_exit
+                    ),
+                    bluetoothctl="#!/bin/sh\nexit 0\n",
+                )
+
+                self.assertEqual(result.returncode, returncode, result.stderr)
+                self.assertEqual(
+                    "BlueZ is not active" in result.stderr, returncode == 1
+                )
+
+    def test_bluez_that_fails_with_an_adapter_present_still_fails(self) -> None:
+        result = self._run_host_script(
+            systemctl=self._inactive_bluez_systemctl(
+                "ConditionResult=yes\\nActiveState=failed\\n", start_exit=1
+            ),
+            bluetoothctl="#!/bin/sh\nexit 0\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("BlueZ is not active", result.stderr)
 
 
 if __name__ == "__main__":
