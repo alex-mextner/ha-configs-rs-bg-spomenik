@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import voluptuous as vol
 from homeassistant.components.remote import DATA_COMPONENT as REMOTE_COMPONENT
-from homeassistant.core import SupportsResponse
+from homeassistant.core import SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 
@@ -75,8 +75,8 @@ class IrReceiver:
         return lambda: self.callbacks.remove(callback) if callback in self.callbacks else None
 
     def _notify(self, event=None):
-        for callback in tuple(self.callbacks):
-            callback(event)
+        for listener in tuple(self.callbacks):
+            listener(event)
 
 
     def _native_connection(self):
@@ -125,6 +125,7 @@ class IrReceiver:
     def schedule_update_ha_state(self, *args):
         self._notify()
 
+    @callback
     def _service_called(self, event):
         data = event.data
         domain, service = data.get("domain"), data.get("service")

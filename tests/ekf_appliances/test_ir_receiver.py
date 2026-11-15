@@ -251,6 +251,35 @@ class TestReceiver(unittest.IsolatedAsyncioTestCase):
         self.receiver.on_receive({"202": code()}, False)
         self.assertEqual(self.events, ["up"])
 
+    async def test_real_service_bus_status_subscriber_runs_on_homeassistant_loop(self):
+        import tempfile
+        import threading
+        from homeassistant.core import HomeAssistant
+
+        with tempfile.TemporaryDirectory() as config_dir:
+            hass = HomeAssistant(config_dir)
+            runtime = SimpleNamespace(
+                hass=hass,
+                entry=SimpleNamespace(entry_id="test-loop", data={"remote_entity_id": "remote.ekf"}),
+                transport=SimpleNamespace(_lock=asyncio.Lock()),
+            )
+            with patch("custom_components.ekf_appliances.ir_receiver.Store", return_value=self.store):
+                receiver = IrReceiver(runtime)
+            owner = threading.get_ident()
+            threads = []
+            receiver.add_callback(lambda _event: threads.append(threading.get_ident()))
+            try:
+                hass.bus.async_fire("call_service", {
+                    "domain": "remote", "service": "send_command",
+                    "service_data": {"entity_id": "remote.ekf", "command": "b64:" + code()},
+                })
+                await hass.async_block_till_done()
+                self.assertEqual(receiver.status, "paused_transmit")
+                self.assertEqual(threads, [owner])
+            finally:
+                await receiver.async_close()
+                await hass.async_block_till_done()
+
     async def test_full_status_snapshot_never_replays_old_code(self):
         self.receiver.enabled = True
         self.receiver.on_receive({"202": code()}, True)
