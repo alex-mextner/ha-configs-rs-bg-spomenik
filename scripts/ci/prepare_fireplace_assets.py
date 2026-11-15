@@ -45,6 +45,8 @@ SOURCE_DURATION_TOLERANCE = 0.25
 TARGET_I = -24.0
 TARGET_TP = -2.5
 TARGET_LRA = 7.0
+PEAK_GUARD_DB = -5.0
+PEAK_GUARD_RATE = 192000
 FINAL_TP_MAX = -2.0
 FINAL_LRA_MAX = 10.0
 LOUDNESS_TOLERANCE = 1.0
@@ -488,6 +490,71 @@ def validate_loudness(source_id: str, metrics: dict[str, float]) -> None:
         )
 
 
+def render_audio_filter(measured: dict[str, float]) -> str:
+    """Leave peak headroom for resampling/AAC without changing loudness targets."""
+    limit = 10 ** (PEAK_GUARD_DB / 20)
+    return (
+        loudnorm(measured)
+        + f",aresample={PEAK_GUARD_RATE},alimiter=limit={limit:.9f}"
+        + ":attack=5:release=50:level=false:latency=true"
+        + f",aresample={SAMPLE_RATE}"
+    )
+
+
+def aac_options() -> list[str]:
+    """Keep the cheap encoded-audio check and final asset encoding identical."""
+    return [
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-ac",
+        str(CHANNELS),
+    ]
+
+
+def check_encoded_audio(
+    builder: Builder,
+    source_id: str,
+    inputs: list[str],
+    duration: float,
+    measured: dict[str, float],
+) -> dict[str, float]:
+    """Reject decoded AAC failures before spending CPU on full video encoding."""
+    temporary = builder.work / (source_id + "-audio-check.m4a")
+    graph = (
+        cycle_graph(duration, video=False)
+        + ";[cycle]"
+        + render_audio_filter(measured)
+        + "[aout]"
+    )
+    builder.command(
+        source_id + "-audio-check-encode",
+        [
+            *ffmpeg(),
+            *inputs,
+            "-filter_complex",
+            graph,
+            "-map",
+            "[aout]",
+            *aac_options(),
+            "-t",
+            f"{duration - SEAM_SECONDS:.6f}",
+            "-map_metadata",
+            "-1",
+            str(temporary),
+        ],
+    )
+    metrics = builder.audio_metrics(
+        ["-i", str(temporary)], "[0:a:0]anull[cycle]", source_id + "-audio-check-decode"
+    )
+    validate_loudness(source_id, metrics)
+    temporary.unlink()
+    return metrics
+
+
 def prepare_asset(
     builder: Builder, source: dict[str, Any], original: Path
 ) -> dict[str, Any]:
@@ -508,12 +575,15 @@ def prepare_asset(
     measured = builder.audio_metrics(
         inputs, cycle_graph(duration, video=False), source["id"] + "-audio-pass1"
     )
+    checked_audio = check_encoded_audio(
+        builder, source["id"], inputs, duration, measured
+    )
     temporary = builder.work / (source["id"] + "-candidate.mp4")
     graph = (
         cycle_graph(duration, video=True)
         + ";[cycle]"
-        + loudnorm(measured)
-        + f",aresample={SAMPLE_RATE}[aout]"
+        + render_audio_filter(measured)
+        + "[aout]"
     )
     builder.command(
         source["id"] + "-encode",
@@ -538,14 +608,7 @@ def prepare_asset(
             "yuv420p",
             "-fps_mode",
             "cfr",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ar",
-            str(SAMPLE_RATE),
-            "-ac",
-            "2",
+            *aac_options(),
             "-t",
             f"{expected_duration:.6f}",
             "-map_metadata",
@@ -642,11 +705,16 @@ def prepare_asset(
         "sha256": sha256_file(final),
         "media": actual,
         "normalization_first_pass": measured,
+        "encoded_audio_preflight_metrics": {
+            key: checked_audio[key]
+            for key in ("input_i", "input_tp", "input_lra", "input_thresh")
+        },
         "decoded_aac_metrics": {
             key: final_metrics[key]
             for key in ("input_i", "input_tp", "input_lra", "input_thresh")
         },
         "transform": {
+            "audio_filter": render_audio_filter(measured),
             "source_start_seconds": source["trim_start_seconds"],
             "source_window_seconds": duration,
             "fps": FPS,
@@ -751,6 +819,9 @@ def initial_receipt() -> dict[str, Any]:
             "tolerance_lu": LOUDNESS_TOLERANCE,
             "true_peak_max_dbtp": FINAL_TP_MAX,
             "lra_max_lu": FINAL_LRA_MAX,
+            "normalizer_true_peak_target_dbtp": TARGET_TP,
+            "peak_guard_dbfs": PEAK_GUARD_DB,
+            "peak_guard_sample_rate": PEAK_GUARD_RATE,
         },
     }
 
