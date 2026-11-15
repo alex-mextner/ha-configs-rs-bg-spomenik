@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import voluptuous as vol
 from aiohttp import WSMsgType, web
 from homeassistant.auth.models import User
 from homeassistant.components import panel_custom
@@ -11,9 +12,15 @@ from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers import config_validation as cv
 
 BASE = "/api/chatgpt_native"
-BACKEND = "http://172.20.0.1:6081"
+DEFAULT_BACKEND = "http://127.0.0.1:6081"
+CONFIG_SCHEMA = vol.Schema({
+    "chatgpt_native": vol.Schema({
+        vol.Optional("backend_url", default=DEFAULT_BACKEND): cv.url,
+    }),
+}, extra=vol.ALLOW_EXTRA)
 COOKIE = "ha_ingress_session"
 
 
@@ -67,10 +74,11 @@ class GUIView(HomeAssistantView):
     name = "api:chatgpt_native:gui"
     requires_auth = False
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, backend: str = DEFAULT_BACKEND) -> None:
         """Store the HA instance."""
         self.hass = hass
         self.client = async_get_clientsession(hass)
+        self.backend = backend.rstrip("/")
 
     async def get(self, request: web.Request, path: str) -> web.StreamResponse:
         """Authorize before serving any asset or upgrading a WebSocket."""
@@ -79,7 +87,7 @@ class GUIView(HomeAssistantView):
         # Relative assets only; the backend address is fixed, never user supplied.
         if path.startswith("/") or ".." in path.split("/"):
             raise web.HTTPBadRequest
-        url = BACKEND + "/" + path
+        url = self.backend + "/" + path
         if path == "websockify":
             ws = web.WebSocketResponse(protocols=["binary"])
             async with self.client.ws_connect(url, protocols=["binary"]) as upstream:
@@ -128,7 +136,7 @@ class GUIView(HomeAssistantView):
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Register the protected proxy and administrator sidebar panel."""
     hass.http.register_view(SessionView(hass))
-    hass.http.register_view(GUIView(hass))
+    hass.http.register_view(GUIView(hass, _config["chatgpt_native"]["backend_url"]))
     await hass.http.async_register_static_paths(
         [
             StaticPathConfig(

@@ -1,0 +1,15 @@
+[Unit]
+Description=HA administrator-only bridge to the physical Ubuntu desktop
+After=gnome-remote-desktop.service
+Wants=gnome-remote-desktop.service
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/share/ha-physical-desktop/bridge.py
+EnvironmentFile=%h/.config/ha-physical-desktop/bridge.env
+Restart=on-failure
+RestartSec=5
+MemoryMax=256M
+UMask=0077
+
+[Install]
+WantedBy=default.target
