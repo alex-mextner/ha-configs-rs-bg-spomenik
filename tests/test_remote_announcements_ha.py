@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 from homeassistant import auth, loader
+from homeassistant.components.input_select import InputSelect
 from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import EVENT_STATE_CHANGED, Event, HomeAssistant, State
 from homeassistant.helpers import device_registry as dr
@@ -17,7 +18,7 @@ from homeassistant.helpers import frame, restore_state
 from homeassistant.setup import async_setup_component
 
 from custom_components import remote_announcements as integration
-from custom_components.remote_announcements.providers import ProviderNotReady
+from custom_components.remote_announcements.providers import ProviderNotReadyError
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = yaml.safe_load((ROOT / "packages/remote_announcements.yaml").read_text())
@@ -25,7 +26,9 @@ CONFIG = integration.CONFIG_SCHEMA(PACKAGE)[integration.DOMAIN]
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    """Exercise the actual Home Assistant runtime with simulated speaker services."""
+
+    async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.temp.name)
         loader.async_setup(self.hass)
@@ -50,6 +53,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hold_restore_ack = None
         self.speech_started = []
         self.ignore_cancellation = False
+        self.speech_gate = None
         self.entity = CONFIG["yandex_entity"]
         self.hass.states.async_set(CONFIG["target_entity"], "tv", {"initialized": True})
         self.hass.states.async_set(CONFIG["backend_entity"], "Яндекс")
@@ -72,7 +76,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        async def generate(text):
+        async def generate(_text) -> tuple[bytes, float]:
             return b"fixture-prepared-audio", 0.01
 
         await self.manager.cache.prepare(generate)
@@ -95,17 +99,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.hass.services.async_register("media_player", service, self.media)
 
-    def apply_volume(self, attrs, volume):
+    def apply_volume(self, attrs, volume) -> None:
         attrs["volume_level"] = volume
         attrs["is_volume_muted"] = volume == 0
         if self.change_during_restore and volume == 0.2:
             attrs["volume_level"] = 0.8
             attrs["is_volume_muted"] = False
 
-    async def simulate_speech(self, entity, value, attrs):
+    async def simulate_speech(self, entity, value, attrs) -> bool:
+        if self.speech_gate is not None:
+            await self.speech_gate.wait()
         self.speech_started.append(entity)
         if self.fail_speech:
-            raise RuntimeError("simulated transport failure")
+            message = "simulated transport failure"
+            raise RuntimeError(message)
         if self.missing_speech_events:
             return False
         attrs["alice_state"] = "SPEAKING"
@@ -122,7 +129,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             attrs["media_content_id"] = "new-user-track"
         return True
 
-    async def acknowledge(self, call):
+    async def acknowledge(self, call) -> None:
         hold = self.hold_ack.get(call.service)
         if call.service == "volume_set" and call.data["volume_level"] == 0.2:
             hold = self.hold_restore_ack or hold
@@ -135,7 +142,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     if not self.ignore_cancellation:
                         raise
 
-    async def media(self, call):
+    async def media(self, call) -> None:
         self.calls.append((call.service, dict(call.data)))
         entity = call.data["entity_id"]
         state = self.hass.states.get(entity)
@@ -148,21 +155,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             value = "paused"
             if self.fail_pause_ack:
                 self.hass.states.async_set(entity, value, attrs)
-                raise TimeoutError("simulated lost pause acknowledgement")
+                message = "simulated lost pause acknowledgement"
+                raise TimeoutError(message)
         elif call.service == "media_play":
             value = "playing"
-        elif call.service == "play_media":
-            if not await self.simulate_speech(entity, value, attrs):
-                return
+        elif call.service == "play_media" and not await self.simulate_speech(
+            entity, value, attrs
+        ):
+            return
         self.hass.states.async_set(entity, value, attrs)
         await self.acknowledge(call)
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         await self.manager.queue.stop()
         await self.hass.async_stop(force=True)
         self.temp.cleanup()
 
-    async def test_local_native_clip_preserves_queue_and_restores_volume(self):
+    async def test_local_native_clip_preserves_queue_and_restores_volume(self) -> None:
         await self.manager.announce("tv")
         self.assertEqual(
             [name for name, data in self.calls],
@@ -176,7 +185,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.attributes["volume_level"], 0.2)
         self.assertEqual(self.manager.status, "ready")
 
-    async def test_muted_speaker_gets_floor_then_original_level_and_mute(self):
+    async def test_muted_speaker_gets_floor_then_original_level_and_mute(self) -> None:
         state = self.hass.states.get(self.entity)
         self.hass.states.async_set(
             self.entity, state.state, {**state.attributes, "is_volume_muted": True}
@@ -191,7 +200,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.attributes["is_volume_muted"])
         self.assertEqual(state.attributes["volume_level"], 0.2)
 
-    async def test_zero_volume_is_restored(self):
+    async def test_zero_volume_is_restored(self) -> None:
         state = self.hass.states.get(self.entity)
         self.hass.states.async_set(
             self.entity, state.state, {**state.attributes, "volume_level": 0.0}
@@ -200,7 +209,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[0][1]["volume_level"], 0.5)
         self.assertEqual(self.calls[-1][1]["volume_level"], 0.0)
 
-    async def test_manual_volume_change_wins(self):
+    async def test_manual_volume_change_wins(self) -> None:
         self.manual_volume = 0.8
         await self.manager.announce("tv")
         self.assertEqual(
@@ -208,7 +217,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([name for name, _ in self.calls].count("volume_set"), 1)
 
-    async def test_failure_still_restores_volume(self):
+    async def test_failure_still_restores_volume(self) -> None:
         self.fail_speech = True
         with self.assertRaises(RuntimeError):
             await self.manager.announce("tv")
@@ -216,7 +225,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.get(self.entity).attributes["volume_level"], 0.2
         )
 
-    async def test_user_change_during_restore_is_not_remuted(self):
+    async def test_user_change_during_restore_is_not_remuted(self) -> None:
         state = self.hass.states.get(self.entity)
         self.hass.states.async_set(
             self.entity, state.state, {**state.attributes, "is_volume_muted": True}
@@ -227,7 +236,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.attributes["volume_level"], 0.8)
         self.assertFalse(state.attributes["is_volume_muted"])
 
-    async def test_user_volume_away_and_back_is_preserved(self):
+    async def test_user_volume_away_and_back_is_preserved(self) -> None:
         self.volume_sequence = [0.8, 0.5]
         await self.manager.announce("tv")
         self.assertEqual(
@@ -235,7 +244,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([name for name, _ in self.calls].count("volume_set"), 1)
 
-    async def test_pause_fallback_resumes_only_original_queue(self):
+    async def test_pause_fallback_resumes_only_original_queue(self) -> None:
         self.manager.config["music_mode"] = "pause"
         await self.manager.announce("tv")
         self.assertIn(
@@ -247,7 +256,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.announce("tv")
         self.assertNotIn("media_play", [name for name, _ in self.calls])
 
-    async def test_pause_recovers_when_completion_signal_never_arrives(self):
+    async def test_pause_recovers_when_completion_signal_never_arrives(self) -> None:
         self.manager.config["music_mode"] = "pause"
         self.missing_speech_events = True
         with (
@@ -261,7 +270,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.states.get(self.entity).state, "playing")
         self.assertEqual(self.manager.status, "sent_unconfirmed")
 
-    async def test_native_missing_completion_uses_the_total_budget(self):
+    async def test_native_missing_completion_uses_the_total_budget(self) -> None:
         self.missing_speech_events = True
         with (
             patch.object(integration, "ATTEMPT_BUDGET", 0.4),
@@ -274,14 +283,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.status, "sent_unconfirmed")
         self.assertLess(self.manager.public_status["controller_elapsed_ms"], 800)
 
-    async def test_lost_pause_ack_cannot_delay_recovery_indefinitely(self):
+    async def test_lost_pause_ack_cannot_delay_recovery_indefinitely(self) -> None:
         self.manager.config["music_mode"] = "pause"
         hold = self.hold_ack["media_pause"] = asyncio.Event()
         started = time.monotonic()
         with (
             patch.object(integration, "ATTEMPT_BUDGET", 0.2),
             patch.object(integration, "RECOVERY_RESERVE", 0.08),
-            patch.object(integration, "SERVICE_ACK_LIMIT", 0.03),
+            patch.object(self.manager.services, "limit", 0.03),
             self.assertRaises(TimeoutError),
         ):
             await asyncio.wait_for(self.manager.announce("tv"), 0.3)
@@ -291,13 +300,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(self.speech_started, [])
 
-    async def test_lost_speech_ack_cannot_delay_volume_or_music_recovery(self):
+    async def test_lost_speech_ack_cannot_delay_volume_or_music_recovery(self) -> None:
         self.manager.config["music_mode"] = "pause"
         hold = self.hold_ack["play_media"] = asyncio.Event()
         with (
             patch.object(integration, "ATTEMPT_BUDGET", 0.2),
             patch.object(integration, "RECOVERY_RESERVE", 0.08),
-            patch.object(integration, "SERVICE_ACK_LIMIT", 0.03),
+            patch.object(self.manager.services, "limit", 0.03),
             self.assertRaises(TimeoutError),
         ):
             await asyncio.wait_for(self.manager.announce("tv"), 0.3)
@@ -309,20 +318,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(len(self.speech_started), 1)
 
-    async def test_lost_restore_ack_does_not_block_music_recovery(self):
+    async def test_lost_restore_ack_does_not_block_music_recovery(self) -> None:
         self.manager.config["music_mode"] = "pause"
         self.hold_restore_ack = asyncio.Event()
         with (
             patch.object(integration, "ATTEMPT_BUDGET", 0.2),
             patch.object(integration, "RECOVERY_RESERVE", 0.08),
-            patch.object(integration, "SERVICE_ACK_LIMIT", 0.03),
+            patch.object(self.manager.services, "limit", 0.03),
         ):
             await asyncio.wait_for(self.manager.announce("tv"), 0.3)
         self.assertEqual(self.hass.states.get(self.entity).state, "playing")
         self.assertEqual(self.manager.status, "recovery_unconfirmed")
         self.assertFalse(self.hold_restore_ack.is_set())
 
-    async def test_target_change_during_volume_rpc_suppresses_stale_speech(self):
+    async def test_target_change_during_volume_rpc_suppresses_stale_speech(
+        self,
+    ) -> None:
         hold = self.hold_ack["volume_set"] = asyncio.Event()
         started = self.ack_started["volume_set"] = asyncio.Event()
         attempt = asyncio.create_task(self.manager.announce("tv"))
@@ -337,14 +348,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.get(self.entity).attributes["volume_level"], 0.2
         )
 
-    async def test_uncancellable_provider_is_tracked_and_close_stays_bounded(self):
+    async def test_uncancellable_provider_is_tracked_and_close_stays_bounded(
+        self,
+    ) -> None:
         self.ignore_cancellation = True
         hold = self.hold_ack["play_media"] = asyncio.Event()
         try:
             with (
                 patch.object(integration, "ATTEMPT_BUDGET", 0.2),
                 patch.object(integration, "RECOVERY_RESERVE", 0.08),
-                patch.object(integration, "SERVICE_ACK_LIMIT", 0.03),
+                patch.object(self.manager.services, "limit", 0.03),
                 self.assertRaises(TimeoutError),
             ):
                 await asyncio.wait_for(self.manager.announce("tv"), 0.3)
@@ -353,7 +366,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 CONFIG["target_entity"], "kodi", {"initialized": True}
             )
             with self.assertRaisesRegex(
-                ProviderNotReady, "speaker_service_recovery_pending"
+                ProviderNotReadyError, "speaker_service_recovery_pending"
             ):
                 await self.manager.announce("kodi")
             started = time.monotonic()
@@ -366,7 +379,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.speech_started), 1)
         self.assertEqual(self.manager.services.pending, set())
 
-    async def test_target_away_and_back_invalidates_the_older_attempt(self):
+    async def test_target_away_and_back_invalidates_the_older_attempt(self) -> None:
         self.manager.gate.changed("tv")
         hold = self.hold_ack["volume_set"] = asyncio.Event()
         started = self.ack_started["volume_set"] = asyncio.Event()
@@ -390,7 +403,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.speech_started, [])
         self.assertEqual(self.manager.status, "superseded")
 
-    async def test_pause_ack_timeout_still_recovers_original_music(self):
+    async def test_timed_out_speech_cannot_dispatch_after_a_newer_target(self) -> None:
+        self.manager.config["music_mode"] = "pause"
+        self.speech_gate = asyncio.Event()
+        with (
+            patch.object(self.manager.services, "limit", 0.03),
+            self.assertRaises(TimeoutError),
+        ):
+            await asyncio.wait_for(self.manager.announce("tv"), 0.3)
+        self.hass.states.async_set(
+            CONFIG["target_entity"], "kodi", {"initialized": True}
+        )
+        self.speech_gate.set()
+        await asyncio.sleep(0)
+        self.assertEqual(self.speech_started, [])
+        await self.manager.announce("kodi")
+        self.assertEqual(len(self.speech_started), 1)
+        self.assertEqual(self.manager.public_status["target"], "kodi")
+        self.assertEqual(self.hass.states.get(self.entity).state, "playing")
+
+    async def test_pause_ack_timeout_still_recovers_original_music(self) -> None:
         self.manager.config["music_mode"] = "pause"
         self.fail_pause_ack = True
         with self.assertRaises(asyncio.TimeoutError):
@@ -400,18 +432,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.hass.states.get(self.entity).state, "playing")
 
-    async def test_missing_credentials_never_changes_speaker(self):
+    async def test_missing_credentials_never_changes_speaker(self) -> None:
         self.manager.settings = {}
-        with self.assertRaisesRegex(ProviderNotReady, "needs_dialogs_credentials"):
+        with self.assertRaisesRegex(ProviderNotReadyError, "needs_dialogs_credentials"):
             await self.manager.announce("tv")
         self.assertEqual(self.calls, [])
 
-    async def test_dedicated_selector_does_not_change_music_selector(self):
+    async def test_dedicated_selector_does_not_change_music_selector(self) -> None:
         self.hass.states.async_set("input_select.music_remote_speaker_backend", "AISIS")
         self.assertEqual(self.manager.speaker(), ("yandex", self.entity))
         self.hass.states.async_set(CONFIG["backend_entity"], "AISIS")
         with self.assertRaisesRegex(
-            ProviderNotReady, "selected_aisis_speaker_unavailable"
+            ProviderNotReadyError, "selected_aisis_speaker_unavailable"
         ):
             self.manager.speaker()
         self.assertEqual(
@@ -419,9 +451,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "AISIS",
         )
 
-    async def test_backend_selection_restores_aisis_across_restart(self):
-        from homeassistant.components.input_select import InputSelect
-
+    async def test_backend_selection_restores_aisis_across_restart(self) -> None:
         entity = InputSelect.from_yaml(
             {
                 **PACKAGE["input_select"]["remote_announcement_backend"],
@@ -437,7 +467,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await entity.async_added_to_hass()
         self.assertEqual(entity.current_option, "AISIS")
 
-    async def test_startup_controller_reconciliation_is_quiet(self):
+    async def test_startup_controller_reconciliation_is_quiet(self) -> None:
         self.manager.gate.changed("chromecast")
         self.manager.target_changed(
             Event(
@@ -456,7 +486,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.gate.last, "kodi")
 
-    async def test_explicit_aisis_uses_prepared_marker_in_another_room(self):
+    async def test_explicit_aisis_uses_prepared_marker_in_another_room(self) -> None:
         entity = CONFIG["aisis_entity"]
         self.hass.states.async_set(CONFIG["backend_entity"], "AISIS")
         self.hass.states.async_set(CONFIG["aisis_connected_entity"], "on")
@@ -467,7 +497,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         }
         spoken = []
 
-        async def speak(call):
+        async def speak(call) -> None:
             spoken.append(dict(call.data))
 
         self.hass.services.async_register("aisis_speaker", "speak", speak)
@@ -478,7 +508,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.calls, [])
 
-    async def test_aisis_zero_volume_reports_exact_round_trip_limitation(self):
+    async def test_aisis_zero_volume_reports_exact_round_trip_limitation(self) -> None:
         entity = CONFIG["aisis_entity"]
         self.hass.states.async_set(CONFIG["backend_entity"], "AISIS")
         self.hass.states.async_set(CONFIG["aisis_connected_entity"], "on")
@@ -488,14 +518,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "keys": [clip.key for clip in self.manager.cache.clips.values()],
         }
         with self.assertRaisesRegex(
-            ProviderNotReady, "aisis_cannot_restore_muted_or_zero_volume"
+            ProviderNotReadyError, "aisis_cannot_restore_muted_or_zero_volume"
         ):
             await self.manager.announce("tv")
         self.assertEqual(self.calls, [])
 
-    async def test_real_ha_component_and_sensor_registration_with_prefilled_cache(self):
-        Path(self.temp.name, "custom_components").symlink_to(
-            ROOT / "custom_components", target_is_directory=True
+    async def test_real_ha_component_and_sensor_registration_with_prefilled_cache(
+        self,
+    ) -> None:
+        await asyncio.to_thread(
+            Path(self.temp.name, "custom_components").symlink_to,
+            ROOT / "custom_components",
+            target_is_directory=True,
         )
         self.hass.auth = await auth.auth_manager_from_config(self.hass, [], [])
         # Interface discovery is an OS boundary unavailable in this isolated runner.
@@ -523,7 +557,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.hass.async_block_till_done()
             manager = self.hass.data[integration.DOMAIN]
 
-            def raise_error(error):
+            def raise_error(error) -> None:
                 raise error
 
             with patch.object(manager, "failed", raise_error):

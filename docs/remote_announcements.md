@@ -13,8 +13,9 @@ private provider settings live in `.tts/remote_announcements/`, already ignored
 by Git. Audio binaries must not be committed.
 
 The current living-room Mini is `media_player.yandex_station_m0011hm00z86hg`.
-`input_select.remote_announcement_backend` selects `Яндекс` or `AISIS`, initially
-`Яндекс`. This selector is independent of the music remote's backend.
+`input_select.remote_announcement_backend` selects `Яндекс` or `AISIS`. A new
+helper defaults to `Яндекс`; an existing choice survives HA restarts. This
+selector is independent of the music remote's backend.
 Explicit selection addresses that configured speaker regardless of HA room. The
 configured AISIS Mini `media_player.aisis_speaker_m00zrw3008rajg` is in the studio;
 selecting AISIS intentionally addresses it. Room `gostinaia` is only a filter for
@@ -26,10 +27,20 @@ Both providers use the native speech channel and preserve the selected music
 queue. Firmware controls music attenuation; a ducking level is not yet measured.
 `music_mode: pause` is the explicit fallback: pause known playing content, speak,
 then resume only unchanged original content if still paused.
-In pause mode, waits for speech completion share a two-second budget from the
-start of dispatch; missing completion signals cannot add a further five seconds.
-Service transport and recovery calls can themselves exceed that budget, so it is
-not a guarantee of physical pause length or audible end-to-end latency.
+Both modes use a two-second controller budget, including preparation commands,
+speech completion and recovery. The controller reserves 0.6 seconds for recovery
+and limits each service acknowledgement to 0.4 seconds or the remaining budget.
+Speech completion waits use the cached duration plus 0.2 seconds. Music recovery
+runs independently of volume recovery, so a stalled volume acknowledgement does
+not hold the original music paused indefinitely. Every recovery call rechecks
+the original content or current volume before dispatch.
+
+A target change invalidates an older attempt even if the target changes back
+before its volume command finishes. Cancelled provider tasks remain tracked; if
+a provider ignores cancellation, new announcements are blocked until it settles,
+and shutdown still has a bounded wait. A command already accepted by a physical
+speaker cannot be recalled. These deadlines therefore provide best-effort
+controller recovery, not a guarantee of physical interruption or audible latency.
 
 Speech volume is `max(current volume, 0.5)` (HA 0..1; speaker 0..10). Restore the
 old volume only while the current level still equals our temporary level and the
@@ -39,8 +50,10 @@ changes during speech win. Installed AISIS cannot restore zero/mute (its volume 
 accepts 1..10 and has no mute operation), so that case reports
 `aisis_cannot_restore_muted_or_zero_volume` explicitly. No Alice fallback is used.
 
-`sensor.remote_announcements` reports readiness, dependencies, clip duration and
-service dispatch timing. `physical_latency_verified` stays false until audible
+`sensor.remote_announcements` reports readiness, dependencies, clip duration,
+service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,
+and unfinished provider-call count. Failed recovery is explicitly
+`recovery_unconfirmed`. `physical_latency_verified` stays false until audible
 end-to-end measurement. Removing per-press TTS latency does not guarantee the
 two-second physical target. AISIS has no speech-finished event; its completion is
 reported as unconfirmed after clip duration plus a small buffer.
@@ -81,16 +94,23 @@ a cached marker fast path before voice selection and synthesis, plus an
 authenticated read-only capability endpoint. Ordinary TTS is unchanged. Unknown,
 missing or corrupt markers fail with HTTP 503; no marker is sent to Fish/Alice.
 
-In the AISIS repository add `services/yandex-station/code/announcement_cache.py`
-and apply `adapter.patch`. Deploy through the normal service procedure when no
-AISIS conversation is active. After HA loads the component, import on Ubuntu:
+The AISIS repository companion includes the adapter hook and
+`services/yandex-station/code/announcement_cache.py`. Use its reviewed unit
+deployment procedure with the matching files adjacent to one another, when no
+AISIS conversation is active. The procedure serializes deployment and rollback,
+preserves unknown maintenance ownership, and invalidates only the companion's
+bytecode. Preserve any other work in a dirty checkout before composing the
+reviewed adapter changes. After HA loads the component, import on Ubuntu:
 
 ```sh
 python3 services/yandex-station/code/announcement_cache.py --source http://ODROID_ADDRESS:8123
 ```
 
 This downloads only five checksummed clips to
-`~/.cache/aisis/remote-announcements/`, without synthesis or playback. Read
+`~/.cache/aisis/remote-announcements/`, without synthesis or playback. The importer
+fully validates a new generation before switching one authoritative pointer;
+failed writes preserve the previous playable generation. Previously advertised
+queued markers can still use retained committed generations. Read
 authenticated `GET http://127.0.0.1:31117/v1/remote-announcements/status` with the
 existing adapter credential locally. Save its nonsecret ready response and run:
 

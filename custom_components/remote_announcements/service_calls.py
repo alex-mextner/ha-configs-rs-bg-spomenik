@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 CANCELLATION_GRACE = 0.02
+SERVICE_ACK_LIMIT = 0.4
 
 
 class ServiceTimeoutError(TimeoutError):
@@ -25,9 +26,10 @@ class ServiceTimeoutError(TimeoutError):
 class ServiceCalls:
     """Track provider calls, including providers that suppress cancellation."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, limit: float = SERVICE_ACK_LIMIT) -> None:
         """Retain unfinished tasks until the actual provider call settles."""
         self.hass = hass
+        self.limit = limit
         self.pending: set[asyncio.Task[bool]] = set()
 
     def _finished(self, task: asyncio.Task[bool]) -> None:
@@ -44,11 +46,10 @@ class ServiceCalls:
         data: dict[str, Any],
         *,
         deadline: float,
-        limit: float,
         guard: Callable[[], bool] | None = None,
     ) -> bool:
         """Cancel a late call and return without waiting indefinitely for it."""
-        remaining = min(limit, deadline - time.monotonic())
+        remaining = min(self.limit, deadline - time.monotonic())
         if remaining <= 0:
             raise ServiceTimeoutError
 
@@ -78,11 +79,11 @@ class ServiceCalls:
             task.cancel()
             raise
 
-    async def close(self, timeout: float) -> None:
+    async def close(self, grace_seconds: float) -> None:
         """Request cancellation once and retain tracking beyond bounded shutdown."""
         pending = set(self.pending)
         if not pending:
             return
         for task in pending:
             task.cancel()
-        await asyncio.wait(pending, timeout=timeout)
+        await asyncio.wait(pending, timeout=grace_seconds)

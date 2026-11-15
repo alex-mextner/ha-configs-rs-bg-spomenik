@@ -5,11 +5,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
+    from types import TracebackType
+
+_LOGGER = logging.getLogger(__name__)
 
 PHRASES = {
     "chromecast": "Хромкаст.",
@@ -22,6 +29,15 @@ VOICE_ID = "5cd1ffa5dbb4419cb5766435139c6d92"
 DEFAULT_TEMPO = 1.25
 CACHE_VERSION = 1
 MARKER_PREFIX = "[ha-remote:"
+MAX_CLIP_SECONDS = 2.0
+VOLUME_TOLERANCE = 0.025
+
+
+def exception_info(
+    error: BaseException,
+) -> tuple[type[BaseException], BaseException, TracebackType | None]:
+    """Keep code locations while stripping exception messages and private chains."""
+    return type(error), Exception(type(error).__name__), error.__traceback__
 
 
 def speech_volume(current: float | None, minimum: float) -> float:
@@ -35,13 +51,15 @@ def speech_volume(current: float | None, minimum: float) -> float:
     return min(1.0, max(0.0, minimum, level))
 
 
-def can_restore_volume(current: float | None, applied: float, muted: bool) -> bool:
+def can_restore_volume(current: float | None, applied: float, *, muted: bool) -> bool:
     """Do not undo a human's volume or mute change during an announcement."""
-    return not muted and current is not None and abs(current - applied) < 0.025
+    return (
+        not muted and current is not None and abs(current - applied) < VOLUME_TOLERANCE
+    )
 
 
 def can_resume(
-    before_id: str | None, after_id: str | None, state: str, paused_by_us: bool
+    before_id: str | None, after_id: str | None, state: str, *, paused_by_us: bool
 ) -> bool:
     """Resume only our pause while the original media is still selected."""
     return bool(
@@ -53,9 +71,11 @@ class TargetGate:
     """No startup speech, unknown transitions, or repeated route announcements."""
 
     def __init__(self) -> None:
+        """Start without a route so initial reconciliation remains quiet."""
         self.last: str | None = None
 
     def changed(self, target: str) -> bool:
+        """Accept a known changed route after an initial state has been observed."""
         if target not in PHRASES:
             return False
         previous, self.last = self.last, target
@@ -64,6 +84,8 @@ class TargetGate:
 
 @dataclass(frozen=True)
 class Clip:
+    """Describe one immutable prepared label and its validated cache identity."""
+
     target: str
     key: str
     path: Path
@@ -72,6 +94,7 @@ class Clip:
 
     @property
     def marker(self) -> str:
+        """Return the fixed marker understood by the AISIS cache extension."""
         return f"{MARKER_PREFIX}{self.key}]"
 
 
@@ -100,6 +123,7 @@ class ClipCache:
         tempo: float,
         phrases: dict[str, str] | None = None,
     ) -> None:
+        """Own the voice-specific cache folder and generation lock."""
         self.folder = folder
         self.voice = voice
         self.tempo = tempo
@@ -108,6 +132,7 @@ class ClipCache:
         self.lock = asyncio.Lock()
 
     def key(self, target: str) -> str:
+        """Bind a clip key to the voice, phrase, encoding and brisk tempo."""
         spec = [
             CACHE_VERSION,
             self.voice,
@@ -124,7 +149,7 @@ class ClipCache:
             info = json.loads((self.folder / f"{key}.json").read_text())
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             duration = float(info["duration"])
-            if info["sha256"] != digest or not 0 < duration <= 2:
+            if info["sha256"] != digest or not 0 < duration <= MAX_CLIP_SECONDS:
                 return None
             return Clip(target, key, path, duration, digest)
         except (OSError, KeyError, TypeError, ValueError):
@@ -133,15 +158,15 @@ class ClipCache:
     async def prepare(
         self, generate: Callable[[str], Awaitable[tuple[bytes, float]]]
     ) -> None:
+        """Reuse valid clips and generate only missing or corrupt cache entries."""
         async with self.lock:
             for target, text in self.phrases.items():
                 clip = await asyncio.to_thread(self._read, target)
                 if clip is None:
                     audio, duration = await generate(text)
-                    if not audio or not 0 < duration <= 2:
-                        raise ValueError(
-                            "Generated announcement must be nonempty and at most two seconds"
-                        )
+                    if not audio or not 0 < duration <= MAX_CLIP_SECONDS:
+                        message = "Generated announcement must last at most two seconds"
+                        raise ValueError(message)
                     key = self.key(target)
                     digest = hashlib.sha256(audio).hexdigest()
                     path = self.folder / f"{key}.ogg"
@@ -162,6 +187,7 @@ class ClipCache:
                 self.clips[target] = clip
 
     def get(self, target: str) -> Clip | None:
+        """Read prepared metadata without network, synthesis or filesystem work."""
         return self.clips.get(target)
 
 
@@ -174,13 +200,15 @@ class LatestAnnouncement:
         debounce: float = 0.075,
         on_error: Callable[[Exception], None] | None = None,
     ) -> None:
+        """Serialize active recovery while coalescing later pending targets."""
         self.announce = announce
         self.debounce = debounce
-        self.on_error = on_error or (lambda error: None)
+        self.on_error = on_error or (lambda _error: None)
         self.pending: str | None = None
         self.task: asyncio.Task | None = None
 
     def submit(self, target: str) -> None:
+        """Replace the pending target without cancelling an active recovery."""
         self.pending = target
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._run())
@@ -194,19 +222,24 @@ class LatestAnnouncement:
             try:
                 await self.announce(target)
             except Exception as error:
+                _LOGGER.exception(
+                    "Announcement task failed", exc_info=exception_info(error)
+                )
                 self.on_error(error)
 
     async def drain(self) -> None:
+        """Wait for submitted work, including the active recovery, to finish."""
         if self.task is not None:
             await self.task
 
-    async def stop(self, timeout: float | None = None) -> None:
+    async def stop(self, grace_seconds: float | None = None) -> None:
+        """Drop pending work and bound shutdown without abandoning task ownership."""
         self.pending = None
         if self.task is None:
             return
-        if timeout is None:
+        if grace_seconds is None:
             await self.drain()
             return
-        done, _ = await asyncio.wait({self.task}, timeout=timeout)
+        done, _ = await asyncio.wait({self.task}, timeout=grace_seconds)
         if self.task not in done:
             self.task.cancel()
