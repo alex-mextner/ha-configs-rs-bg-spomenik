@@ -12,14 +12,14 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.states = {"display": False, "player": False}
         self.calls = []
         self.hold = {}
-        self.fail = set()
+        self.failed_endpoints = set()
 
         def endpoint(name):
             async def command(target):
                 self.calls.append((name, target))
                 if name in self.hold:
                     await self.hold[name].wait()
-                if name in self.fail:
+                if name in self.failed_endpoints:
                     raise HomeAssistantError("Disconnected")
                 self.states[name] = target
                 self.pair.observe()
@@ -125,12 +125,36 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("confirm", self.pair.last_error.lower())
 
     async def test_failed_service_does_not_report_success_or_retry(self):
-        self.fail.add("display")
+        self.failed_endpoints.add("display")
         with self.assertRaises(HomeAssistantError):
             await self.pair.request(True)
         await self.settle()
         self.assertEqual(self.calls.count(("display", True)), 1)
         self.assertIsNotNone(self.pair.last_error)
+
+    async def assert_empty_command_failure(self, failure):
+        async def fail_without_message(target):
+            self.calls.append(("display", target))
+            raise failure
+
+        self.pair.endpoints["display"] = PowerEndpoint(
+            lambda: self.states["display"], fail_without_message
+        )
+        with self.assertRaises(HomeAssistantError):
+            await self.pair.request(True)
+        await self.settle()
+        self.assertTrue(self.pair.last_error)
+        self.assertEqual(self.calls.count(("display", True)), 1)
+        self.assertIsNone(self.pair.target)
+
+    async def test_message_less_service_error_is_a_failure(self):
+        await self.assert_empty_command_failure(HomeAssistantError())
+
+    async def test_message_less_command_timeout_is_a_failure(self):
+        await self.assert_empty_command_failure(TimeoutError())
+
+    async def test_cancelled_endpoint_command_is_a_failure(self):
+        await self.assert_empty_command_failure(asyncio.CancelledError())
 
     async def test_latest_off_wins_over_delayed_old_on_feedback(self):
         self.hold["display"] = asyncio.Event()
@@ -146,6 +170,83 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls.count(("display", True)), 1)
         self.assertEqual(self.calls.count(("display", False)), 1)
         self.assertIsNone(self.pair.target)
+
+    async def test_late_on_feedback_cannot_reverse_a_completed_off(self):
+        async def delayed_player_feedback(target):
+            self.calls.append(("player", target))
+            if not target:
+                self.states["player"] = False
+                self.pair.observe()
+
+        self.pair.endpoints["player"] = PowerEndpoint(
+            lambda: self.states["player"], delayed_player_feedback
+        )
+        old = asyncio.create_task(self.pair.request(True))
+        await self.settle()
+        await self.pair.request(False)
+        with self.assertRaises(HomeAssistantError):
+            await old
+        completed_revision = self.pair.intent_revision
+        self.assertEqual(self.states, {"display": False, "player": False})
+
+        await self.physical("player", True)
+        self.assertEqual(self.states, {"display": False, "player": False})
+        self.assertEqual(self.calls, [
+            ("display", True), ("player", True),
+            ("display", False), ("player", False),
+        ])
+        self.assertIs(self.pair.last_intent, False)
+        self.assertEqual(self.pair.intent_revision, completed_revision)
+        self.assertIsNone(self.pair.target)
+
+        # The consumed acknowledgement cannot suppress a later real ON.
+        await self.physical("player", True)
+        self.assertEqual(self.states, {"display": True, "player": True})
+        self.assertIs(self.pair.last_intent, True)
+
+    async def test_expired_unconfirmed_feedback_does_not_mask_a_new_physical_on(self):
+        async def no_player_feedback(target):
+            self.calls.append(("player", target))
+
+        self.pair.endpoints["player"] = PowerEndpoint(
+            lambda: self.states["player"], no_player_feedback
+        )
+        self.pair.timeout = 0.02
+        old = asyncio.create_task(self.pair.request(True))
+        await self.settle()
+        await self.pair.request(False)
+        with self.assertRaises(HomeAssistantError):
+            await old
+        await asyncio.sleep(0.03)
+        await self.physical("player", True)
+        self.assertEqual(self.states, {"display": True, "player": True})
+        self.assertIs(self.pair.last_intent, True)
+
+    async def test_late_on_reasserts_off_while_the_display_is_still_stopping(self):
+        async def delayed_player_feedback(target):
+            self.calls.append(("player", target))
+            if not target:
+                self.states["player"] = False
+                self.pair.observe()
+
+        self.pair.endpoints["player"] = PowerEndpoint(
+            lambda: self.states["player"], delayed_player_feedback
+        )
+        old = asyncio.create_task(self.pair.request(True))
+        await self.settle()
+        # The native read can advance before its queued state observer runs.
+        self.states["player"] = True
+        self.hold["display"] = asyncio.Event()
+        latest = asyncio.create_task(self.pair.request(False))
+        await self.settle()
+        await self.physical("player", True)
+        self.hold["display"].set()
+        with self.assertRaises(HomeAssistantError):
+            await old
+        await latest
+        self.assertEqual(self.states, {"display": False, "player": False})
+        self.assertEqual(self.calls.count(("player", False)), 2)
+        self.assertEqual(self.calls.count(("display", True)), 1)
 
     async def test_physical_player_off_during_tv_boot_is_latest_intent(self):
         self.hold["display"] = asyncio.Event()

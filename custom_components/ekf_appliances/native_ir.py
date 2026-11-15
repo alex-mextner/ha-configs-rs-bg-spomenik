@@ -12,7 +12,7 @@ import time
 
 from homeassistant.exceptions import HomeAssistantError
 
-from .ir_decode import RemoteMapper, decode_frames, pulses_from_code
+from .ir_decode import HOLD, MAIN, RemoteMapper, decode_frames, pulses_from_code
 
 # Linux include/uapi/linux/lirc.h. The ioctl changes this open file only.
 _LIRC_SET_REC_MODE = 0x40046912
@@ -87,6 +87,7 @@ class NativeIrReceiver:
         self._echo_until = {}
         self.frame_observer = None
         self._mode_frames = {}
+        self._press_mappers = {}
 
     @property
     def connected(self):
@@ -123,6 +124,7 @@ class NativeIrReceiver:
         self._accept_after_ns = time.monotonic_ns()
         self._reset()
         self._mode_frames.clear()
+        self._press_mappers.clear()
         self._notify()
 
     def note_transmit(self, commands, *, repeats=1, delay=0.0):
@@ -222,6 +224,29 @@ class NativeIrReceiver:
             for name in names:
                 self._notify(name)
 
+    def _press_mapper(self, frame):
+        if frame["address"] != 0xBF00 or MAIN.get(frame["command"]) not in HOLD | {"power"}:
+            return self.mapper
+        # Keep only the four physical power/hold gestures across unrelated IR
+        # and transmit echoes. Navigation and T9 still reset immediately.
+        self.mapper = RemoteMapper()
+        command = frame["command"]
+        if command not in self._press_mappers:
+            self._press_mappers[command] = RemoteMapper()
+        return self._press_mappers[command]
+
+    def _map_names(self, frame, identity, flags, timestamp_ns, continued_mode):
+        mapper = self._press_mapper(frame)
+        protected = mapper is not self.mapper
+        semantic = self._semantic_frame(frame, identity, flags, timestamp_ns, continued_mode)
+        if semantic is not None:
+            return mapper.feed([semantic], timestamp_ns / 1e9)
+        # An orphan repeat cannot emit an event, but still proves that a known
+        # physical burst has not ended. Do not erase a held key's silence gap.
+        if protected and flags & _REPEAT and 0 <= timestamp_ns / 1e9 - mapper.last_at <= .6:
+            mapper.last_at = timestamp_ns / 1e9
+        return []
+
     def _process_record(self, record, received_ns, received_wall):
         timestamp_ns, flags, protocol, keycode, scancode = record
         self.capture_count += 1
@@ -247,9 +272,8 @@ class NativeIrReceiver:
             self.frame_observer(frame, captured_wall)
         if not self._accept_universal_frame(frame, timestamp_ns, keycode):
             return
-        frame = self._semantic_frame(frame, (protocol, scancode), flags, timestamp_ns, continued_mode)
-        if frame is not None:
-            self._publish_names(self.mapper.feed([frame], timestamp_ns / 1e9), captured_wall)
+        names = self._map_names(frame, (protocol, scancode), flags, timestamp_ns, continued_mode)
+        self._publish_names(names, captured_wall)
 
     async def async_start(self, _hass=None):
         if self._closing:
@@ -277,6 +301,7 @@ class NativeIrReceiver:
         self._accept_after_ns = time.monotonic_ns()
         self._reset()
         self._mode_frames.clear()
+        self._press_mappers.clear()
         self.last_error = None
         self.status = "listening"
         try:

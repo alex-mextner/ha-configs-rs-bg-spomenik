@@ -163,10 +163,9 @@ class RemoteMapper:
             return self._digit_event(digit, now)
         if not name:
             return None
-        if (name in {"input", "audio"} and self.last == name
+        if (name in {"input", "audio", "power"} | HOLD and self.last == name
                 and now - self.last_at < MODE_PRESS_GAP - 1e-9):
-            self.last_at = now
-            return None
+            return self._repeat_event(now)
         self.digit = None
         self.last, self.initial, self.last_at = name, now, now
         self.repeats, self.held = 0, False

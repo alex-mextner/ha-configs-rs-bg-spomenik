@@ -46,7 +46,11 @@ class PowerPair:
         self._intent_epoch = uuid4().hex
         self._intent_sequence = 0
         self._last = {side: None for side in self.endpoints}
-        self._expected: dict[str, tuple[int, bool]] = {}
+        # Retain at most ON and OFF feedback for each endpoint. A command may
+        # return before its observed acknowledgement, even after a newer intent
+        # has finished. The existing confirmation timeout bounds that window.
+        self._expected: dict[tuple[str, bool], tuple[int, float]] = {}
+        self._retry_sides: set[str] = set()
         self._started = False
         self._baseline_ready = False
         self._generation = 0
@@ -103,13 +107,16 @@ class PowerPair:
         self._last[side] = value
         if previous is None or value == previous:
             return False
-        expected = self._expected.get(side)
+        expected = self._expected.pop((side, value), None)
         # An older requested ON can arrive after a newer OFF was requested.
         # It is confirmation of that old command, not a new human request.
-        if expected and expected[1] is value:
-            self._expected.pop(side, None)
-            if expected[0] < self._generation:
-                return False
+        if expected and expected[1] >= asyncio.get_running_loop().time():
+            if self.last_intent is not None and value != self.last_intent:
+                if self.target is None:
+                    self._sync_to(self.last_intent)
+                else:
+                    self._retry_sides.add(side)
+            return False
         return value != self.target
 
     def _request(self, target: bool) -> asyncio.Future[None]:
@@ -118,6 +125,10 @@ class PowerPair:
         self.requested(target)
         self._intent_sequence += 1
         self.last_intent = target
+        return self._sync_to(target)
+
+    def _sync_to(self, target: bool) -> asyncio.Future[None]:
+        """Reconcile accepted intent without treating late feedback as intent."""
         if self.target is target and self._future is not None and not self._future.done():
             self.changed()
             return self._future
@@ -126,6 +137,7 @@ class PowerPair:
                 f"{self.name}: power request was superseded by a newer request"
             ))
         self._generation += 1
+        self._retry_sides.clear()
         self.target = target
         self.last_error = None
         self._deadline = asyncio.get_running_loop().time() + self.timeout
@@ -186,12 +198,17 @@ class PowerPair:
         for side, endpoint in self.endpoints.items():
             if values["display"] is None and not self.endpoints["display"].allow_unknown_command:
                 break
-            if values[side] is target or (generation, side) in attempted:
+            if values[side] is target:
+                continue
+            if (generation, side) in attempted and side not in self._retry_sides:
                 continue
             if values[side] is None and not endpoint.allow_unknown_command:
                 continue
             attempted.add((generation, side))
-            self._expected[side] = (generation, target)
+            self._retry_sides.discard(side)
+            self._expected[side, target] = (
+                generation, asyncio.get_running_loop().time() + self.timeout
+            )
             commands.append(endpoint.command(target))
         return commands
 
@@ -205,7 +222,8 @@ class PowerPair:
             return
         failures = [result for result in results if isinstance(result, BaseException)]
         if failures:
-            self._finish(generation, str(failures[0]))
+            failure = failures[0]
+            self._finish(generation, str(failure) or type(failure).__name__)
 
     async def _async_wait_for_feedback(self, remaining):
         self._wake.clear()
@@ -221,9 +239,9 @@ class PowerPair:
             return
         self.target = None
         self.last_error = error
-        self._expected.clear()
+        self._retry_sides.clear()
         if self._future is not None and not self._future.done():
-            if error:
+            if error is not None:
                 _LOGGER.error("%s power synchronization: %s", self.name, error)
                 self._future.set_exception(HomeAssistantError(f"{self.name}: {error}"))
             else:
@@ -240,3 +258,4 @@ class PowerPair:
             self._future.cancel()
         self.target = None
         self._expected.clear()
+        self._retry_sides.clear()

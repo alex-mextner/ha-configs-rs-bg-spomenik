@@ -18,6 +18,10 @@ core.callback = lambda fn: fn
 core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
 errors = ModuleType("homeassistant.exceptions")
 errors.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+errors.Unauthorized = type("Unauthorized", (errors.HomeAssistantError,), {})
+errors.UnknownUser = type("UnknownUser", (errors.Unauthorized,), {})
+permissions = ModuleType("homeassistant.auth.permissions.const")
+permissions.POLICY_CONTROL = "control"
 helpers = ModuleType("homeassistant.helpers")
 helpers.config_validation = SimpleNamespace()
 event = ModuleType("homeassistant.helpers.event")
@@ -25,6 +29,7 @@ event.async_track_state_change_event = lambda *args: lambda: None
 with patch.dict(sys.modules, {PREFIX:package, PREFIX + ".runtime":runtime,
     "voluptuous":ModuleType("voluptuous"), "homeassistant.core":core,
     "homeassistant.exceptions":errors, "homeassistant.helpers":helpers,
+    "homeassistant.auth.permissions.const":permissions,
     "homeassistant.helpers.event":event}):
     controller_module = importlib.import_module(PREFIX + ".remote_control")
 

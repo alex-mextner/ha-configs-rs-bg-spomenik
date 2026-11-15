@@ -94,6 +94,7 @@ jobs:
             tests/ekf_appliances/test_projector_shutdown_state.py \
             tests/ekf_appliances/test_protocol.py \
             tests/ekf_appliances/test_remote_control_boundary.py \
+            tests/ekf_appliances/test_remote_service_context.py \
             tests/ekf_appliances/test_remote_mode_state.py \
             tests/ekf_appliances/test_samsung_power.py \
             tests/ekf_appliances/test_samsung_tv.py \

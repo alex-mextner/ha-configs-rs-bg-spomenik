@@ -481,6 +481,52 @@ class ApplianceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.player.state, "off")
 
+    async def test_queued_off_survives_a_failed_boot_request(self):
+        began, release = asyncio.Event(), asyncio.Event()
+
+        async def failed_boot(call):
+            self.script_calls.append("on")
+            began.set()
+            await release.wait()
+            raise HomeAssistantError("Boot service failed after hardware turned on")
+
+        self.hass.services.async_register("script", "projector_turn_on", failed_boot)
+        first = asyncio.create_task(self.runtime.async_projector_power(True))
+        await began.wait()
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        latest = asyncio.create_task(self.runtime.async_projector_power(False))
+        await self.real_sleep(0)
+        release.set()
+        first_result, latest_result = await asyncio.gather(first, latest, return_exceptions=True)
+        self.assertIsInstance(first_result, HomeAssistantError)
+        self.assertIsNone(latest_result)
+        self.assertEqual(self.script_calls, ["on", "off"])
+        self.assertIs(self.runtime.projector_power_state, False)
+
+    async def test_cancelled_queued_off_does_not_retry_or_cancel_predecessor(self):
+        began, release = asyncio.Event(), asyncio.Event()
+
+        async def failed_boot(call):
+            self.script_calls.append("on")
+            began.set()
+            await release.wait()
+            raise HomeAssistantError("Boot service failed")
+
+        self.hass.services.async_register("script", "projector_turn_on", failed_boot)
+        first = asyncio.create_task(self.runtime.async_projector_power(True))
+        await began.wait()
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        latest = asyncio.create_task(self.runtime.async_projector_power(False))
+        await self.real_sleep(0)
+        latest.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await latest
+        self.assertFalse(self.runtime._projector_power_task.done())
+        release.set()
+        with self.assertRaises(HomeAssistantError):
+            await first
+        self.assertEqual(self.script_calls, ["on"])
+
     async def test_unknown_absolute_power_does_not_guess_or_transmit(self):
         self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "unknown")
         for action in (self.player.async_turn_on, self.player.async_turn_off):

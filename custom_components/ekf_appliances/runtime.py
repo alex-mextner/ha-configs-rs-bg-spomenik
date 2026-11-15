@@ -199,7 +199,13 @@ class ApplianceRuntime:
 
         # A caller timeout must not release the pending guard and permit a
         # second POWER during the projector's measured 17-second boot.
-        await asyncio.shield(task)
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            # A failed earlier direction does not cancel an explicitly queued
+            # opposite request. Caller cancellation still propagates unchanged.
+            if not retry_after:
+                raise
         if retry_after:
             await self.async_projector_power(turn_on)
 

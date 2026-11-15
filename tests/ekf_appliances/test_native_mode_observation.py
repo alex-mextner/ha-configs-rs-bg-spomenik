@@ -61,6 +61,23 @@ class NativeModeObservationTests(unittest.TestCase):
         held = b"".join(packet(0xBF12, 10 + index * .110) for index in range(7))
         self.feed(held + packet(0xBD01, 10.70) + packet(0xBF12, 10.77))
         self.assertEqual([name for name, stamp in self.events], ["input"])
+    def test_own_ir_echo_does_not_retrigger_held_power_or_prime(self):
+        for scan, expected in ((0xBF0D, ["power"]), (0xBFBB, ["prime", "prime_hold"])):
+            with self.subTest(scan=scan):
+                self.setUp()
+                self.reader._echo_until[(0xBD00, 0xFE01)] = 11_000_000_000
+                held = b"".join(packet(scan, 10 + index * .110) for index in range(7))
+                self.feed(held + packet(0xBD01, 10.70) + packet(scan, 10.77))
+                self.assertEqual([name for name, stamp in self.events], expected)
+                self.feed(packet(scan, 10.92), received=10.92)
+                self.assertEqual([name for name, stamp in self.events], expected + [expected[0]])
+    def test_protected_press_still_ends_the_previous_t9_cycle(self):
+        self.feed(packet(0xBF02, 10.0) + packet(0xBFBB, 10.1) + packet(0xBF02, 10.2))
+        self.assertEqual([name for name, stamp in self.events], ["t9_add_2_a", "prime", "t9_add_2_a"])
+    def test_orphan_repeat_preserves_power_silence_without_a_new_press(self):
+        self.feed(packet(0xBF0D, 10.0) + packet(0xFF18, 10.05)
+                  + packet(0xBF0D, 10.11, flags=2) + packet(0xBF0D, 10.22))
+        self.assertEqual([name for name, stamp in self.events], ["power"])
     def test_orphan_repeat_still_updates_mode_button_physical_silence(self):
         held = b"".join(packet(0xBF12, 10 + index * .110) for index in range(6))
         self.feed(held + packet(0xFF18, 10.60) + packet(0xBF12, 10.66, flags=2)

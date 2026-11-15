@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import logging
 import time
 
 import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.core import SupportsResponse, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_state_change_event
 
@@ -20,6 +22,18 @@ TV = "media_player.ue48j5500_ue48j5500"
 PROJECTOR = "media_player.projector"
 TARGET = "sensor.universal_remote_target"
 _ON = {"on", "playing", "paused", "idle", "buffering"}
+_SERVICE_CONTEXT = ContextVar("universal_remote_service_context", default=None)
+
+
+def _with_service_context(handler):
+    """Retain caller identity in nested services, tasks and delayed callbacks."""
+    async def handle(call):
+        token = _SERVICE_CONTEXT.set(call.context)
+        try:
+            return await handler(call)
+        finally:
+            _SERVICE_CONTEXT.reset(token)
+    return handle
 
 
 class RemoteController:
@@ -160,7 +174,8 @@ class RemoteController:
                 service = service or "turn_" + wanted
                 if self.hass.services.has_service(domain, service):
                     await self.hass.services.async_call(domain, service,
-                        {"entity_id": entity_id, **({field: wanted} if field else {})}, blocking=True)
+                        {"entity_id": entity_id, **({field: wanted} if field else {})}, blocking=True,
+                        context=_SERVICE_CONTEXT.get())
 
     def _wake(self, pair, revision):
         async def wake():
@@ -171,7 +186,7 @@ class RemoteController:
                 await self.hass.services.async_call(DOMAIN, "wake_if_current", {
                     "entity_id": PROJECTOR if pair == "projector" else TV,
                     "expected_revision": revision,
-                }, blocking=True)
+                }, blocking=True, context=_SERVICE_CONTEXT.get())
             except HomeAssistantError as err:
                 _LOGGER.warning("Remote single INPUT wake was not accepted: %s", err)
             finally:
@@ -184,14 +199,20 @@ class RemoteController:
 
     def physical_press(self, name, received_at):
         """Commit trusted receiver timing before asynchronous YAML dispatch."""
-        button = name.split("_", 3)[2] if name.startswith(("t9_add_", "t9_cycle_")) else name
-        key = self._capture_key(button, received_at * 1000)
-        if key in self._captured_routes:
-            return
-        self.refresh(physical_at=received_at)
-        self._captured_routes[key] = self.mode.press(button, received_at)
-        if len(self._captured_routes) > 256:
-            del self._captured_routes[next(iter(self._captured_routes))]
+        # A service may drain an already-ready receiver frame. That physical
+        # action belongs to the receiver, not to the unrelated service caller.
+        token = _SERVICE_CONTEXT.set(None)
+        try:
+            button = name.split("_", 3)[2] if name.startswith(("t9_add_", "t9_cycle_")) else name
+            key = self._capture_key(button, received_at * 1000)
+            if key in self._captured_routes:
+                return
+            self.refresh(physical_at=received_at)
+            self._captured_routes[key] = self.mode.press(button, received_at)
+            if len(self._captured_routes) > 256:
+                del self._captured_routes[next(iter(self._captured_routes))]
+        finally:
+            _SERVICE_CONTEXT.reset(token)
 
     async def async_prepare(self, data):
         received = data.get("received_ms")
@@ -218,21 +239,36 @@ class RemoteController:
         self.refresh()
         return self.mode.resolve(data.get("pair"), data.get("native"))
 
+    async def _async_check_control(self, entity):
+        context = _SERVICE_CONTEXT.get()
+        if context is None or not context.user_id:
+            return
+        user = await self.hass.auth.async_get_user(context.user_id)
+        if user is None:
+            raise UnknownUser(context=context)
+        if not user.is_admin and not user.permissions.check_entity(entity, POLICY_CONTROL):
+            raise Unauthorized(context=context, entity_id=entity, permission=POLICY_CONTROL)
+
     async def async_power(self, data):
         route = self.resolve(data)
+        entity = PROJECTOR if route["pair"] == "projector" else TV
+        await self._async_check_control(entity)
         if route["pair"] == "projector":
+            self.refresh()
+            if self.runtime.projector_shutting_down:
+                return {"sent": False, "blocked": "projector_shutting_down"}
             observed = self.runtime.projector_power_state
             if observed is True:
                 self.runtime.note_projector_off_requested()
             # This accepted lifecycle operation owns its confirmation frames.
-            # Later remote actions see the latch before this first await.
+            # Later remote actions see the latch before transport dispatch.
             service = "toggle" if observed is None else "turn_off" if observed else "turn_on"
-            entity = PROJECTOR
         else:
-            service, entity = "toggle", TV
+            service = "toggle"
         token = UNIVERSAL_PROJECTOR_COMMAND.set(False)
         try:
-            await self.hass.services.async_call("media_player", service, {"entity_id": entity}, blocking=True)
+            await self.hass.services.async_call("media_player", service, {"entity_id": entity}, blocking=True,
+                                                context=_SERVICE_CONTEXT.get())
         finally:
             UNIVERSAL_PROJECTOR_COMMAND.reset(token)
         return {"sent": True}
@@ -259,6 +295,7 @@ class RemoteController:
             result = await self.hass.services.async_call(
                 domain, service, payload, blocking=True,
                 return_response=data.get("return_response", False),
+                context=_SERVICE_CONTEXT.get(),
             )
         except asyncio.CancelledError:
             if projector_action and self.runtime.projector_shutting_down:
@@ -316,5 +353,5 @@ def async_register_remote_services(hass):
         }),
     }
     for name, (handler, schema) in services.items():
-        hass.services.async_register(DOMAIN, name, handler, schema=vol.Schema(schema),
+        hass.services.async_register(DOMAIN, name, _with_service_context(handler), schema=vol.Schema(schema),
                                      supports_response=SupportsResponse.OPTIONAL)

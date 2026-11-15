@@ -48,6 +48,24 @@ class ModePressBoundaries(unittest.TestCase):
             events += mapper.feed([frame(0x9966)], 10 + index * .108)
         self.assertEqual(events, ["audio"])
 
+    def test_full_frame_power_hold_emits_one_power_until_release(self):
+        mapper = decoder.RemoteMapper()
+        events = []
+        for index in range(12):
+            events += mapper.feed([frame(0xF20D)], 10 + index * .110)
+        self.assertEqual(events, ["power"])
+        self.assertEqual(mapper.feed([frame(0xF20D)], 10 + 11 * .110 + .150), ["power"])
+
+    def test_full_frames_preserve_single_press_and_one_hold_action(self):
+        for command, name in ((0x44BB, "prime"), (0x956A, "disney"), (0xEA15, "ok")):
+            with self.subTest(name=name):
+                mapper = decoder.RemoteMapper()
+                events = []
+                for index in range(12):
+                    events += mapper.feed([frame(command)], 10 + index * .110)
+                self.assertEqual(events, [name, name + "_hold"])
+                self.assertEqual(mapper.feed([frame(command)], 10 + 11 * .110 + .150), [name])
+
     def test_fast_navigation_and_t9_keep_existing_behavior(self):
         mapper = decoder.RemoteMapper()
         self.assertEqual(mapper.feed([frame(0xE718)], 10), ["right"])
