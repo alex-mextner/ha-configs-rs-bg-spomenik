@@ -1,6 +1,11 @@
 {
   "domain": "ekf_appliances",
   "name": "EKF Appliances",
+  "after_dependencies": [
+    "androidtv_remote",
+    "kodi",
+    "mobile_app"
+  ],
   "codeowners": [
     "@alex-mextner"
   ],
@@ -13,10 +18,5 @@
   "integration_type": "hub",
   "iot_class": "assumed_state",
   "requirements": [],
-  "version": "0.1.0",
-  "after_dependencies": [
-    "androidtv_remote",
-    "kodi",
-    "mobile_app"
-  ]
+  "version": "0.1.0"
 }

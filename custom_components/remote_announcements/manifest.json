@@ -1,11 +1,21 @@
 {
   "domain": "remote_announcements",
   "name": "Remote announcements",
-  "version": "1.0.0",
+  "after_dependencies": [
+    "fish_audio",
+    "yandex_station",
+    "aisis_speaker"
+  ],
+  "codeowners": [
+    "@alex-mextner"
+  ],
+  "dependencies": [
+    "http",
+    "media_player",
+    "tts"
+  ],
   "documentation": "https://github.com/alex-mextner/ha-configs-rs-bg-spomenik/blob/main/docs/remote_announcements.md",
-  "codeowners": ["@alex-mextner"],
-  "dependencies": ["http", "media_player", "tts"],
-  "after_dependencies": ["fish_audio", "yandex_station", "aisis_speaker"],
   "iot_class": "local_push",
-  "requirements": []
+  "requirements": [],
+  "version": "1.0.0"
 }

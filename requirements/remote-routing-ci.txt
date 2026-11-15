@@ -9,3 +9,7 @@ jsonrpc-base==2.2.0
 jsonrpc-websocket==3.2.1
 ha-ffmpeg==3.2.2
 mutagen==1.48.1
+
+# HA command_line and rest imports used by the feedback freshness contracts.
+jsonpath-python==1.1.6
+xmltodict==1.0.4
