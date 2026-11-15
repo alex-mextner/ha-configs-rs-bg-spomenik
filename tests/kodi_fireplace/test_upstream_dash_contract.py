@@ -258,3 +258,34 @@ class UpstreamDashContractTests(unittest.TestCase):
             + " bytes="
             + str(len(payload))
         )
+
+    def test_real_smarttube_live_flags_reject_publication(self):
+        for flag in ("isLive", "isLiveNow"):
+            with self.subTest(flag=flag):
+                response = public_player_response()
+                if flag == "isLive":
+                    response["videoDetails"][flag] = True
+                else:
+                    response["microformat"] = {
+                        "playerMicroformatRenderer": {
+                            "liveBroadcastDetails": {flag: True}
+                        }
+                    }
+                raw = json.dumps(response).encode()
+                with (
+                    patch.object(
+                        self.resolver,
+                        "smarttube_modules",
+                        return_value=(self.inner, self.smart_dash),
+                    ),
+                    patch.object(
+                        self.resolver,
+                        "urlopen",
+                        side_effect=lambda *_args, **_kwargs: io.BytesIO(raw),
+                    ),
+                    self.assertRaisesRegex(
+                        self.resolver.ResolveError, "hd_audio_video_unavailable"
+                    ),
+                ):
+                    self.resolver.resolve(VIDEO_ID, self.request_id, self.home, Mock())
+                self.assertFalse((self.state / "requests" / self.request_id).exists())

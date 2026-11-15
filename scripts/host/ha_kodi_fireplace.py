@@ -6,15 +6,15 @@ only exists while a receipt remains. It never touches an active audio player.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 MEDIA_PATH = Path("/home/ultra/KodiLibrary/Ambience/fireplace-fastily-1080p.webm")
@@ -204,6 +204,7 @@ class OwnedPlayback:
             "state": state,
             "owned": owned,
             "file_matches": bool(observed.get("file_matches")),
+            "active": observed.get("active"),
             "repeat": observed.get("repeat"),
             "observed_at": datetime.now(timezone.utc).isoformat(),
             "error": error,
@@ -216,6 +217,7 @@ class OwnedPlayback:
             "state": "unknown",
             "owned": self._owner is not None,
             "file_matches": False,
+            "active": None,
             "repeat": None,
             "observed_at": None,
             "error": code,
@@ -467,7 +469,9 @@ class OwnedPlayback:
                 latest = self._read(deadline)
                 return {
                     **proof,
-                    "stopped": not latest["foreign_player"] and not latest["active"],
+                    "stopped": current["file_matches"]
+                    and not latest["foreign_player"]
+                    and not latest["active"],
                 }
             except FireplaceError:
                 raise
@@ -535,5 +539,6 @@ class FireplaceController(_rotation.RotatingFireplaceController):
             rpc,
             receipt_path,
             state_writer=atomic_json,
+            rejected_error_type=RpcNotDispatchedError,
             **options,
         )

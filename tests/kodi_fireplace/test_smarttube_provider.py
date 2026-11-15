@@ -29,7 +29,7 @@ def public_player_response():
             "videoId": VIDEO_ID,
             "title": "Fast public fireplace",
             "lengthSeconds": "36012",
-            "isLiveContent": False,
+            "isLive": False,
         },
         "streamingData": {
             "adaptiveFormats": [
@@ -63,7 +63,12 @@ def parsed_player_response(raw):
     return {
         "playable": raw["playabilityStatus"]["status"] == "OK",
         "title": details["title"],
-        "is_live": details["isLiveContent"],
+        "is_live": details.get("isLive") is True
+        or raw.get("microformat", {})
+        .get("playerMicroformatRenderer", {})
+        .get("liveBroadcastDetails", {})
+        .get("isLiveNow")
+        is True,
         "length_seconds": int(details["lengthSeconds"]),
         "adaptive": raw["streamingData"]["adaptiveFormats"],
     }
@@ -103,7 +108,6 @@ class SmartTubeProviderTests(unittest.TestCase):
             self.module,
             "smarttube_modules",
             return_value=(self.inner, self.dash),
-            create=True,
         )
         self.runtime_lookup = self.runtime_patch.start()
         self.addCleanup(self.runtime_patch.stop)
@@ -116,7 +120,7 @@ class SmartTubeProviderTests(unittest.TestCase):
         self.slow_lookup = self.slow_patch.start()
         self.addCleanup(self.slow_patch.stop)
         self.transport_patch = patch.object(
-            self.module, "urlopen", side_effect=self.transport, create=True
+            self.module, "urlopen", side_effect=self.transport
         )
         self.http = self.transport_patch.start()
         self.addCleanup(self.transport_patch.stop)
@@ -168,12 +172,22 @@ class SmartTubeProviderTests(unittest.TestCase):
                 self.assertFalse((self.state / "requests" / self.request_id).exists())
 
     def test_live_source_is_rejected(self):
-        self.raw["videoDetails"]["isLiveContent"] = True
-        with self.assertRaisesRegex(
-            self.module.ResolveError, "hd_audio_video_unavailable"
-        ):
-            self.resolve()
-        self.dash.manifest.assert_not_called()
+        for flag in ("isLive", "isLiveNow"):
+            with self.subTest(flag=flag):
+                self.raw = public_player_response()
+                if flag == "isLive":
+                    self.raw["videoDetails"][flag] = True
+                else:
+                    self.raw["microformat"] = {
+                        "playerMicroformatRenderer": {
+                            "liveBroadcastDetails": {flag: True}
+                        }
+                    }
+                with self.assertRaisesRegex(
+                    self.module.ResolveError, "hd_audio_video_unavailable"
+                ):
+                    self.resolve()
+                self.dash.manifest.assert_not_called()
 
     def test_hd_requires_aac_and_safe_media_origin(self):
         formats = self.raw["streamingData"]["adaptiveFormats"]

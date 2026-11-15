@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import random
 import re
 import signal
@@ -14,6 +12,8 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 REQUEST_ID = re.compile(r"[A-Za-z0-9_.:+-]{1,96}\Z")
@@ -171,6 +171,7 @@ class RotatingFireplaceController:
         receipt_path,
         *,
         state_writer,
+        rejected_error_type=None,
         sources=None,
         resolver=None,
         media_path=None,
@@ -183,6 +184,7 @@ class RotatingFireplaceController:
         **owner_options,
     ):
         self.Error = error_type
+        self.NotDispatched = rejected_error_type or error_type
         self._rpc = rpc
         self._write_state = state_writer
         self._receipt = Path(receipt_path)
@@ -207,6 +209,7 @@ class RotatingFireplaceController:
         self._last_time = self._last_title = self._progress = None
         self._failed_request = self._launching = self._opening = False
         self._launch_admitted = False
+        self._fallback_repeat = None
         self._stop_requested = False
         self._intent_seq = 0
         self._snapshot = self._empty()
@@ -395,12 +398,29 @@ class RotatingFireplaceController:
         self._pending["phase"] = "opening"
         self._store()
         self._check_deadline(deadline)
+        try:
+            self._check_fallback_intent(deadline)
+        except Exception:
+            self._pending["phase"] = "prepared"
+            self._store()
+            raise
         self._opening = True
         return self._rpc(
             "Player.Open",
             {"item": {"file": self._target.get("open_file", self._target["file"])}},
             deadline,
         )
+
+    def _check_fallback_intent(self, deadline):
+        if self._fallback_repeat is None:
+            return
+        if self._rpc("Player.GetActivePlayers", {}, deadline) != []:
+            raise self.Error("playback_changed")
+        mode = self._rpc(
+            "Player.GetProperties", {"playerid": 1, "properties": ["repeat"]}, deadline
+        )
+        if not isinstance(mode, dict) or mode.get("repeat") != self._fallback_repeat:
+            raise self.Error("playback_changed")
 
     def _identities(self):
         if self._launching and self._opening and self._pending is not None:
@@ -439,7 +459,7 @@ class RotatingFireplaceController:
 
     def _rpc_adapter(self, method, params, deadline):
         if self._closing.is_set():
-            raise self.Error("stopped")
+            raise self.NotDispatched("stopped")
         params = dict(params)
         if method == "Player.Open":
             return self._open_candidate(params, deadline)
@@ -592,6 +612,8 @@ class RotatingFireplaceController:
         except Exception as error:
             self._cancel_attempt()
             self._check_cancelled()
+            if str(error) == "playback_changed":
+                raise
             if not self._opening:
                 raise self.Error("sources_unavailable") from error
             raise self.Error("open_unconfirmed") from error
@@ -606,8 +628,10 @@ class RotatingFireplaceController:
 
     def _require_progress_ownership(self, proof):
         if not proof["owned"]:
-            # External playback or repeat intent supersedes this failed launch.
             self._cancel_attempt()
+            if proof.get("active") is not True:
+                # Absence is not proof that a delayed native Open was cancelled.
+                raise self.Error("open_unconfirmed")
             self._active = self._pending = None
             self._store()
             raise self.Error("playback_changed")
@@ -640,6 +664,7 @@ class RotatingFireplaceController:
                 raise self.Error("stop_unconfirmed")
         except Exception as error:
             raise self.Error("stop_unconfirmed") from error
+        self._fallback_repeat = stopped["repeat"]
         self._active = self._pending = None
         self._store()
         return None
@@ -691,6 +716,7 @@ class RotatingFireplaceController:
                 raise self.Error(self._load_error or "stopped")
             candidates = self._candidates()
             self._failed_request = False
+            self._fallback_repeat = None
             self._launching, self._opening = True, False
             starting = {**self._empty(), **request, "state": "starting"}
             self._publish(starting)
@@ -735,6 +761,8 @@ class RotatingFireplaceController:
         self._store()
 
     def _finish_observation(self, proof):
+        if not self._settlement_still_current(proof):
+            return self._unresolved_opening()
         value = self._proof(proof)
         if (
             not self._cancelled.is_set()
@@ -744,8 +772,10 @@ class RotatingFireplaceController:
             and value["progressing"]
         ):
             self._promote()
-        if not proof["owned"] and (
-            self._active is not None or self._pending is not None
+        if (
+            not proof["owned"]
+            and proof["state"] != "unknown"
+            and (self._active is not None or self._pending is not None)
         ):
             self._active = self._pending = None
             self._store()
@@ -756,27 +786,42 @@ class RotatingFireplaceController:
                 return self._publish(previous)
             return self._publish(value)
 
-    def _fence_pending(self):
+    def _cleanup_identity(self):
+        if self._pending is not None and self._pending.get("phase") == "opening":
+            return self._pending
+        return self._active if self._stop_requested else None
+
+    def _fence_identity(self, identity):
         with self._cancel_lock:
             current = json.loads(self._generation.read_text())
-            if current.get("request_id") == self._pending.get("attempt_id"):
+            if current.get("request_id") == identity.get("attempt_id"):
                 self._write_generation(str(uuid4()))
 
     def _settle_unleased(self, proof):
+        identity = self._cleanup_identity()
+        if identity is None or proof["owned"]:
+            return True
+        self._fence_identity(identity)
+        if proof.get("stopped") is True and self._matched is identity:
+            return True
         if (
-            self._pending is None
-            or self._pending.get("phase") != "opening"
-            or proof["owned"]
+            identity is self._active
+            and proof["state"] != "unknown"
+            and not proof["file_matches"]
         ):
             return True
-        self._fence_pending()
-        if proof.get("stopped") is True and self._matched is self._pending:
-            return True
-        return self._stop_unleased_candidate()
+        return self._stop_unleased_candidate(identity)
+
+    def _settlement_still_current(self, proof):
+        return (
+            self._cleanup_identity() is None
+            or proof["owned"]
+            or (proof["state"] != "unknown" and not proof["file_matches"])
+        )
 
     def _unresolved_opening(self):
         value = self.status()
-        identity = self._pending or {}
+        identity = self._pending or self._active or {}
         value.update(
             {
                 key: identity.get(key)
@@ -804,11 +849,13 @@ class RotatingFireplaceController:
         try:
             self._recover_prepared()
             proof = (
-                self._owner.stop() if self._stop_requested else self._owner.observe()
+                self._owner.stop()
+                if self._stop_requested and self._owner.status()["owned"]
+                else self._owner.observe()
             )
             if not self._settle_unleased(proof):
                 return self._unresolved_opening()
-            if self._pending is not None and not proof["owned"]:
+            if self._cleanup_identity() is not None and not proof["owned"]:
                 proof = self._owner.observe()
             return self._finish_observation(proof)
         except Exception:
@@ -828,12 +875,8 @@ class RotatingFireplaceController:
             raise self.Error("stopped")
         return self._rpc(method, params, deadline)
 
-    def _stop_unleased_candidate(self):
-        if (
-            self._pending is None
-            or self._pending.get("phase") != "opening"
-            or self._owner.status()["owned"]
-        ):
+    def _stop_unleased_candidate(self, identity):
+        if self._owner.status()["owned"]:
             return False
         deadline = time.monotonic() + 3
         players = self._recovery_rpc("Player.GetActivePlayers", {}, deadline)
@@ -849,11 +892,12 @@ class RotatingFireplaceController:
             "Player.GetItem", {"playerid": 1, "properties": ["file"]}, deadline
         )
         raw = item.get("item", {}).get("file")
-        expected = {self._pending.get("file_hash"), self._pending.get("open_hash")}
+        expected = {identity.get("file_hash"), identity.get("open_hash")}
         if not isinstance(raw, str) or file_hash(raw) not in expected:
             return False
         self._recovery_rpc("Player.Stop", {"playerid": 1}, deadline)
-        if self._recovery_rpc("Player.GetActivePlayers", {}, deadline):
+        remaining = self._recovery_rpc("Player.GetActivePlayers", {}, deadline)
+        if not isinstance(remaining, list) or remaining:
             raise self.Error("stop_unconfirmed")
 
         return True
@@ -883,8 +927,10 @@ class RotatingFireplaceController:
                 proof = self._owner.stop()
                 if not self._settle_unleased(proof):
                     raise self.Error("stop_unconfirmed")
-                if self._pending is not None and not proof["owned"]:
+                if self._cleanup_identity() is not None and not proof["owned"]:
                     proof = self._owner.observe()
+                if not self._settlement_still_current(proof):
+                    raise self.Error("stop_unconfirmed")
                 self._failed_request = False
                 if not proof["owned"]:
                     self._active = self._pending = None
@@ -899,7 +945,11 @@ class RotatingFireplaceController:
                 raise self.Error("stop_unconfirmed") from error
 
     def _recovery_pending(self):
-        return self._owner.status()["owned"] or self._pending is not None
+        return (
+            self._owner.status()["owned"]
+            or self._pending is not None
+            or self._active is not None
+        )
 
     def start_monitor(self):
         with self._lock:

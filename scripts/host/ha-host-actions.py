@@ -1449,7 +1449,7 @@ def network_summary(query: dict[str, Any]) -> dict[str, Any]:
 def _fireplace_rpc(method: str, params: dict[str, Any], deadline: float) -> Any:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise FireplaceError("deadline")
+        raise _fireplace_module.RpcNotDispatchedError("deadline")
     call_timeout = 8.0 if method in {"Player.Open", "Player.Stop"} else 1.0
     response = kodi_jsonrpc(method, params, timeout=min(call_timeout, remaining))
     body = response.get("body")

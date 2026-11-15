@@ -75,3 +75,41 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
         self.assertNotIn("Player.SetRepeat", [method for method, _ in self.kodi.calls])
         self.assertEqual(self.kodi.repeat, "off")
+
+    def test_empty_stop_is_not_evidence_of_an_exact_player_stop(self) -> None:
+        self.controller.start()
+        self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
+        self.kodi.calls.clear()
+        proof = self.controller.stop()
+        self.assertFalse(proof["stopped"])
+        self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])
+
+    def test_actual_bridge_expiry_before_setrepeat_drops_the_unmutated_arm(
+        self,
+    ) -> None:
+        from test_manifest_http import bridge
+
+        now = [100.0]
+        dispatched = []
+
+        def transport(method, params, *, timeout):
+            dispatched.append(method)
+            result = self.kodi.rpc(method, params, timeout)
+            return {"ok": True, "body": {"result": result}}
+
+        def callback(method, params, deadline):
+            if method == "Player.SetRepeat":
+                now[0] = deadline
+            return bridge._fireplace_rpc(method, params, deadline)
+
+        self.controller._rpc_callback = callback
+        with (
+            patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(bridge, "_fireplace_module", self.module),
+            patch.object(bridge, "kodi_jsonrpc", side_effect=transport),
+        ):
+            with self.assertRaises(self.module.FireplaceError):
+                self.controller.start()
+        self.assertNotIn("Player.SetRepeat", dispatched)
+        self.assertFalse(self.receipt.exists())
+        self.assertEqual(self.kodi.repeat, "off")
