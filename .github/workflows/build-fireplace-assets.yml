@@ -1,0 +1,114 @@
+name: Build fireplace asset candidates
+
+on:
+  push:
+    paths:
+      - scripts/ci/prepare_fireplace_assets.py
+      - scripts/ci/fireplace-sources.json
+      - .github/workflows/build-fireplace-assets.yml
+  workflow_dispatch:
+    inputs:
+      source_only:
+        description: Download and verify originals without encoding candidates
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fireplace-assets-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-candidates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_ONLY: ${{ inputs.source_only || false }}
+      OMP_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install the runner's FFmpeg package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/fireplace-assets-setup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          finish_setup() {
+            setup_rc=$?
+            printf '%s completed rc=%s elapsed=%ss log=%s\n' \
+              "$(date -Is)" "$setup_rc" "$((SECONDS-task_started))" "$task_log"
+            exit "$setup_rc"
+          }
+          trap finish_setup EXIT
+          printf '%s starting log=%s\n' "$(date -Is)" "$task_log"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg curl util-linux
+          ffmpeg -version
+      - name: Prepare and measure the actual candidate files
+        id: build
+        env:
+          ASSET_OUTPUT: ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          arguments=(--output-dir "$ASSET_OUTPUT")
+          if [[ "$SOURCE_ONLY" == true ]]; then
+            arguments+=(--source-only)
+          fi
+          exec python3 scripts/ci/prepare_fireplace_assets.py "${arguments[@]}"
+      - name: Upload validated candidates and exact-byte receipts
+        if: success() && inputs.source_only != true
+        id: candidates
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fireplace-candidates-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}/assets/
+            ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}/review/
+            ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json
+            ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}/sources.json
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record uploaded artifact identity
+        if: success() && steps.candidates.outputs.artifact-id != ''
+        env:
+          ARTIFACT_URL: ${{ steps.candidates.outputs.artifact-url }}
+          ARTIFACT_SHA256: ${{ steps.candidates.outputs.artifact-digest }}
+          ASSET_RECEIPT: ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/fireplace-assets-identity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          finish_identity() {
+            identity_rc=$?
+            printf '%s completed rc=%s elapsed=%ss log=%s\n' \
+              "$(date -Is)" "$identity_rc" "$((SECONDS-task_started))" "$task_log"
+            exit "$identity_rc"
+          }
+          trap finish_identity EXIT
+          printf '%s starting log=%s\n' "$(date -Is)" "$task_log"
+          read -r receipt_sha256 _ < <(sha256sum "$ASSET_RECEIPT")
+          printf 'Candidate artifact: %s\n\nArtifact SHA-256: %s\n\nReceipt SHA-256: %s\n\nCandidates remain disabled pending source and sound review.\n' \
+            "$ARTIFACT_URL" "$ARTIFACT_SHA256" "$receipt_sha256" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Preserve source verification and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fireplace-build-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json
+            ${{ runner.temp }}/fireplace-assets-${{ github.run_id }}-${{ github.run_attempt }}/sources.json
+            /tmp/prepare-fireplace-assets-*/
+            /tmp/fireplace-assets-setup-*.log
+            /tmp/fireplace-assets-identity-*.log
+          if-no-files-found: error
+          retention-days: 14

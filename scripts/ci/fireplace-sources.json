@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "valley-forge-1080p",
+      "url": "https://www.nps.gov/nps-audiovideo/audiovideo/fef1b01c-3943-466e-b2c9-65708a91eb171080p.mp4",
+      "bytes": 1146258886,
+      "sha256": null,
+      "first_digest_from_ci": true,
+      "dimensions": [1920, 1080],
+      "duration_seconds": 1689.5879,
+      "trim_start_seconds": 10,
+      "trim_duration_seconds": 600,
+      "provenance": {
+        "title": "Valley Forge Yule Log",
+        "credit": "NPS Video / Gregory Purifoy; Valley Forge National Historical Park",
+        "source": "https://www.nps.gov/media/video/view.htm?id=90196f2b-725b-4e94-b09b-d1210b0127ab",
+        "rights": "U.S. federal government/NPS work; source-based public-domain assessment",
+        "rights_evidence": [
+          "Exact item credits NPS Video / Gregory Purifoy without a copyright symbol.",
+          "Official park announcement identifies the video as park programming and credits its creator.",
+          "DOI states federal-agency-produced material is generally public domain; current item has a generic ownership caveat. Do not infer all NPS media are free."
+        ],
+        "rights_urls": [
+          "https://www.nps.gov/vafo/learn/news/2020-12-4-new-film-virtual-march-in.htm",
+          "https://www.doi.gov/copyright"
+        ],
+        "sound_evidence": "Original AAC track; official captions contain only crackling-fire cues. No auditory approval yet.",
+        "captions": "https://www.nps.gov/nps-audiovideo/closed-caption/7557A8EA-E853-1CF1-D2026D7A7CBC04DC.vtt",
+        "checked_date": "2026-11-15"
+      }
+    },
+    {
+      "id": "split-log-720p",
+      "url": "https://videos.pexels.com/video-files/855381/855381-hd_1920_1080_30fps.mp4",
+      "bytes": 14028513,
+      "sha256": "5df2be129563ff91945f84aacfe3b03c04ce8ca168d3412fa64ed809b8ba45a8",
+      "first_digest_from_ci": false,
+      "dimensions": [1280, 720],
+      "duration_seconds": 40.788333,
+      "trim_start_seconds": 0,
+      "trim_duration_seconds": 40.788333,
+      "provenance": {
+        "title": "Fireplace",
+        "credit": "Pixabay / Pexels",
+        "source": "https://www.pexels.com/video/fireplace-855381/",
+        "rights": "Item-specific CC0 designation; current Pexels license also permits personal use and modification",
+        "rights_evidence": [
+          "Indexed exact item page explicitly says Free to use (CC0).",
+          "Current exact item License/Free link resolves to the Pexels CC0 page; visible label currently says Free.",
+          "Retain this item-specific evidence; do not infer all Pexels media are CC0. General Pexels terms restrict stock/wallpaper redistribution and misleading endorsement."
+        ],
+        "rights_urls": [
+          "https://creativecommons.org/publicdomain/zero/1.0/",
+          "https://www.pexels.com/creative-commons-images/",
+          "https://www.pexels.com/license/"
+        ],
+        "resolution_note": "Actual bytes are 1280x720 despite the original URL and item page saying 1920x1080. Do not upscale and relabel.",
+        "sound_evidence": "Original AAC track; source description identifies crackling logs. No auditory approval yet.",
+        "checked_date": "2026-11-15"
+      }
+    }
+  ]
+}
