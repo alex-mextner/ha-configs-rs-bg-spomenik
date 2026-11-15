@@ -6,11 +6,12 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import tempfile
 import time
 import types
 import unittest
+from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs
 from uuid import uuid4
@@ -19,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "scripts/host/kodi/plugin.video.hayoutube/default.py"
 
 
-def load_adapter():
+def load_adapter() -> Any:
     spec = importlib.util.spec_from_file_location(
         "ha_youtube_adapter_under_test", SOURCE
     )
@@ -34,30 +35,34 @@ def load_adapter():
 
 
 class FakeItem:
-    def __init__(self, label="", path="", callback=None):
+    """Exercise FakeItem contracts without a real Kodi process."""
+
+    def __init__(self, label="", path="", callback=None) -> None:
         self.label = label
         self.path = path
         self.properties = {}
         self.info = Mock()
         self.callback = callback
 
-    def getVideoInfoTag(self):
+    def getVideoInfoTag(self) -> Any:  # noqa: N802 - mirror the native Kodi API
         return self.info
 
-    def setProperty(self, key, value):
+    def setProperty(self, key, value) -> None:  # noqa: N802 - mirror the native Kodi API
         self.properties[key] = value
         if self.callback:
             self.callback(key)
 
-    def setMimeType(self, value):
+    def setMimeType(self, value) -> None:  # noqa: N802 - mirror the native Kodi API
         self.mime = value
 
-    def setContentLookup(self, value):
+    def setContentLookup(self, value) -> None:  # noqa: N802 - mirror the native Kodi API
         self.content_lookup = value
 
 
 class AdapterTests(unittest.TestCase):
-    def setUp(self):
+    """Exercise AdapterTests contracts without a real Kodi process."""
+
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name) / ".config/ha-host-actions/youtube"
@@ -96,20 +101,20 @@ class AdapterTests(unittest.TestCase):
         self.module.xbmcplugin.setResolvedUrl = self.resolved
         self.module.xbmcgui.ListItem = FakeItem
 
-    def set_generation(self, value):
+    def set_generation(self, value) -> Any:
         (self.state / "current-request.json").write_text(
             json.dumps({"request_id": value})
         )
 
-    def save_descriptor(self):
+    def save_descriptor(self) -> Any:
         (self.directory / "descriptor.json").write_text(json.dumps(self.descriptor))
 
-    def change_manifest(self, payload):
+    def change_manifest(self, payload) -> Any:
         self.manifest.write_bytes(payload)
         self.descriptor["manifest_sha256"] = hashlib.sha256(payload).hexdigest()
         self.save_descriptor()
 
-    def test_current_request_sets_http_identity_and_isolates_auth_headers(self):
+    def test_current_request_sets_http_identity_and_isolates_auth_headers(self) -> None:
         self.module.resolve_item(self.state, self.query, 7)
         handle, succeeded, item = self.resolved.call_args.args
         self.assertEqual((handle, succeeded), (7, True))
@@ -129,14 +134,14 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("X-HA-Host-Token", stream_headers)
         self.assertNotIn("unit-test-private-host-token", str(stream_headers))
 
-    def test_stale_generation_never_resolves(self):
+    def test_stale_generation_never_resolves(self) -> None:
         self.set_generation(str(uuid4()))
         with self.assertRaisesRegex(self.module.RequestError, "request_cancelled"):
             self.module.resolve_item(self.state, self.query, 7)
         self.resolved.assert_not_called()
 
-    def test_generation_change_at_last_property_cannot_resolve(self):
-        def change_generation(key):
+    def test_generation_change_at_last_property_cannot_resolve(self) -> None:
+        def change_generation(key) -> Any:
             if key == "inputstream.adaptive.manifest_headers":
                 self.set_generation(str(uuid4()))
 
@@ -147,13 +152,13 @@ class AdapterTests(unittest.TestCase):
             self.module.resolve_item(self.state, self.query, 7)
         self.resolved.assert_not_called()
 
-    def test_changed_manifest_is_rejected(self):
+    def test_changed_manifest_is_rejected(self) -> None:
         self.manifest.write_bytes(b"<MPD>changed</MPD>")
         with self.assertRaisesRegex(self.module.RequestError, "manifest_changed"):
             self.module.resolve_item(self.state, self.query, 7)
         self.resolved.assert_not_called()
 
-    def test_malformed_uuid_and_extra_query_are_rejected(self):
+    def test_malformed_uuid_and_extra_query_are_rejected(self) -> None:
         for query in (
             "?request_id=../../elsewhere",
             self.query + "&file=/tmp/elsewhere",
@@ -162,21 +167,21 @@ class AdapterTests(unittest.TestCase):
                 self.module.resolve_item(self.state, query, 7)
         self.resolved.assert_not_called()
 
-    def test_descriptor_cannot_redirect_manifest_origin(self):
+    def test_descriptor_cannot_redirect_manifest_origin(self) -> None:
         self.descriptor["file"] = "https://example.com/manifest.mpd"
         self.save_descriptor()
         with self.assertRaisesRegex(self.module.RequestError, "descriptor_invalid"):
             self.module.resolve_item(self.state, self.query, 7)
         self.resolved.assert_not_called()
 
-    def test_host_token_in_media_headers_is_rejected(self):
+    def test_host_token_in_media_headers_is_rejected(self) -> None:
         self.descriptor["headers"]["X-HA-Host-Token"] = "must-not-send"
         self.save_descriptor()
         with self.assertRaisesRegex(self.module.RequestError, "headers_invalid"):
             self.module.resolve_item(self.state, self.query, 7)
         self.resolved.assert_not_called()
 
-    def test_linked_manifest_cannot_receive_host_token(self):
+    def test_linked_manifest_cannot_receive_host_token(self) -> None:
         self.change_manifest(
             b"<MPD><Location>https://example.com/manifest.mpd</Location></MPD>"
         )
@@ -186,13 +191,13 @@ class AdapterTests(unittest.TestCase):
             self.module.resolve_item(self.state, self.query, 7)
         self.resolved.assert_not_called()
 
-    def test_media_origin_must_be_googlevideo_https(self):
+    def test_media_origin_must_be_googlevideo_https(self) -> None:
         self.change_manifest(b"<MPD><BaseURL>https://example.com/media</BaseURL></MPD>")
         with self.assertRaisesRegex(self.module.RequestError, "media_origin_invalid"):
             self.module.resolve_item(self.state, self.query, 7)
         self.resolved.assert_not_called()
 
-    def test_log_retention_preserves_recent_unknown_and_symlinked_files(self):
+    def test_log_retention_preserves_recent_unknown_and_symlinked_files(self) -> None:
         logs = Path(self.temp.name) / "logs"
         logs.mkdir()
         now = time.time()

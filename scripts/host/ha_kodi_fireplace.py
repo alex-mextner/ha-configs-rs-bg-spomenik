@@ -1,4 +1,5 @@
-"""Verified fireplace playback with durable, narrowly owned repeat cleanup.
+"""
+Verified fireplace playback with durable, narrowly owned repeat cleanup.
 
 No caller-controlled paths or RPC methods cross the HTTP boundary. The observer
 only exists while a receipt remains. It never touches an active audio player.
@@ -13,13 +14,19 @@ import os
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 MEDIA_PATH = Path("/home/ultra/KodiLibrary/Ambience/fireplace-fastily-1080p.webm")
 MEDIA_SHA256 = "248cc597abdf1e53e3d55ab998e1aadfff3c96f7c48ca2ce30362b74d5959267"
 MODES = {"off", "one", "all"}
+ABSENCE_GRACE_SECONDS = 2.0
+OBSERVATION_MAX_AGE_SECONDS = 5.0
 
 
 class FireplaceError(Exception):
@@ -30,7 +37,7 @@ class RpcNotDispatchedError(FireplaceError):
     """The local deadline/closing guard rejected a call before dispatch."""
 
 
-def atomic_json(path, value):
+def atomic_json(path: Path, value: object) -> None:
     """Durably replace a private JSON record, including its directory entry."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary = tempfile.mkstemp(prefix=".fireplace-", dir=path.parent)
@@ -40,30 +47,34 @@ def atomic_json(path, value):
             json.dump(value, stream, sort_keys=True)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        Path(temporary).replace(path)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
         finally:
             os.close(directory)
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        if Path(temporary).exists():
+            Path(temporary).unlink()
 
 
 class OwnedPlayback:
-    def __init__(
+    """Maintain a durable repeat lease for one precisely identified video."""
+
+    # Preserve the established dependency-injected constructor API.
+    def __init__(  # noqa: PLR0913
         self,
-        rpc,
+        rpc: Callable[[str, dict[str, Any], float], Any],
         receipt_path: Path,
         *,
-        media_path=MEDIA_PATH,
-        expected_sha256=MEDIA_SHA256,
-        auto_monitor=True,
-        operation_timeout=8.0,
-        poll_interval=0.05,
-        asset_check=None,
-    ):
+        media_path: Path | str = MEDIA_PATH,
+        expected_sha256: str = MEDIA_SHA256,
+        auto_monitor: bool = True,
+        operation_timeout: float = 8.0,
+        poll_interval: float = 0.05,
+        asset_check: Callable[[], None] | None = None,
+    ) -> None:
+        """Configure callbacks, budgets and any durable prior repeat lease."""
         self._rpc_callback = rpc
         self._receipt_path = Path(receipt_path)
         self._media = Path(media_path)
@@ -83,14 +94,7 @@ class OwnedPlayback:
         try:
             if self._receipt_path.exists():
                 receipt = json.loads(self._receipt_path.read_text())
-                if (
-                    not isinstance(receipt, dict)
-                    or receipt.get("version") != 1
-                    or receipt.get("prior_repeat") not in MODES
-                    or receipt.get("phase") not in {"armed", "looping", "restoring"}
-                    or not isinstance(receipt.get("token"), str)
-                ):
-                    raise ValueError("invalid receipt")
+                self._validate_receipt(receipt)
                 self._owner = receipt
                 self._snapshot["owned"] = True
                 self._snapshot["state"] = "recovering"
@@ -100,7 +104,19 @@ class OwnedPlayback:
             self._snapshot["error"] = "owner_unreadable"
 
     @staticmethod
-    def _empty():
+    def _validate_receipt(receipt: object) -> None:
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("version") != 1
+            or receipt.get("prior_repeat") not in MODES
+            or receipt.get("phase") not in {"armed", "looping", "restoring"}
+            or not isinstance(receipt.get("token"), str)
+        ):
+            error_message = "invalid receipt"
+            raise ValueError(error_message)
+
+    @staticmethod
+    def _empty() -> dict[str, Any]:
         return {
             "state": "idle",
             "owned": False,
@@ -110,18 +126,20 @@ class OwnedPlayback:
             "error": None,
         }
 
-    def _rpc(self, method, params, deadline):
+    def _rpc(self, method: str, params: dict[str, Any], deadline: float) -> Any:
         if self._closing.is_set():
-            raise RpcNotDispatchedError("stopped")
+            error_message = "stopped"
+            raise RpcNotDispatchedError(error_message)
         if time.monotonic() >= deadline:
-            raise RpcNotDispatchedError("deadline")
+            error_message = "deadline"
+            raise RpcNotDispatchedError(error_message)
         return self._rpc_callback(method, params, deadline)
 
-    def _persist(self, receipt):
+    def _persist(self, receipt: dict[str, Any]) -> None:
         """Fsync both data and rename before the first repeat mutation."""
         atomic_json(self._receipt_path, receipt)
 
-    def _forget(self):
+    def _forget(self) -> None:
         self._receipt_path.unlink(missing_ok=True)
         if self._receipt_path.parent.exists():
             directory = os.open(self._receipt_path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -131,7 +149,9 @@ class OwnedPlayback:
                 os.close(directory)
         self._owner = None
 
-    def _read_video_item(self, active, deadline):
+    def _read_video_item(
+        self, active: list[dict[str, Any]], deadline: float
+    ) -> dict[str, Any] | None:
         if not active:
             return None
         response = self._rpc(
@@ -143,15 +163,18 @@ class OwnedPlayback:
             or not isinstance(item.get("file"), str)
             or not item["file"]
         ):
-            raise FireplaceError("invalid_item_state")
+            error_message = "invalid_item_state"
+            raise FireplaceError(error_message)
         return item
 
-    def _read(self, deadline):
+    def _read(self, deadline: float) -> dict[str, Any]:
         active = self._rpc("Player.GetActivePlayers", {}, deadline)
         if not isinstance(active, list):
-            raise FireplaceError("invalid_player_state")
+            error_message = "invalid_player_state"
+            raise FireplaceError(error_message)
         if any(not isinstance(item, dict) for item in active):
-            raise FireplaceError("invalid_player_state")
+            error_message = "invalid_player_state"
+            raise FireplaceError(error_message)
         # Never query/set playlist 1 while another player is active. Kodi may
         # otherwise resolve properties against its preferred audio player.
         if any(
@@ -173,12 +196,15 @@ class OwnedPlayback:
                 deadline,
             )
         except Exception as exc:
-            raise FireplaceError("video_properties_unavailable") from exc
+            error_message = "video_properties_unavailable"
+            raise FireplaceError(error_message) from exc
         if not isinstance(values, dict) or values.get("repeat") not in MODES:
-            raise FireplaceError("invalid_repeat_state")
+            error_message = "invalid_repeat_state"
+            raise FireplaceError(error_message)
         speed = values.get("speed", 0)
         if type(speed) not in {int, float}:
-            raise FireplaceError("invalid_speed_state")
+            error_message = "invalid_speed_state"
+            raise FireplaceError(error_message)
         return {
             "foreign_player": False,
             "active": bool(active),
@@ -187,7 +213,9 @@ class OwnedPlayback:
             "speed": speed,
         }
 
-    def _publish(self, observed, *, error=None):
+    def _publish(
+        self, observed: dict[str, Any], *, error: str | None = None
+    ) -> dict[str, Any]:
         self._confirm_playback(observed)
         owned = self._owner is not None
         valid = not observed.get("foreign_player")
@@ -207,12 +235,12 @@ class OwnedPlayback:
             "file_matches": bool(observed.get("file_matches")),
             "active": observed.get("active"),
             "repeat": observed.get("repeat"),
-            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "observed_at": datetime.now(UTC).isoformat(),
             "error": error,
         }
         return dict(self._snapshot)
 
-    def _failed(self, code):
+    def _failed(self, code: str) -> dict[str, Any]:
         self._snapshot = {
             **self._snapshot,
             "state": "unknown",
@@ -225,21 +253,21 @@ class OwnedPlayback:
         }
         return dict(self._snapshot)
 
-    def _defer_absence(self, current, grace):
+    def _defer_absence(self, current: dict[str, Any], *, grace: bool) -> bool:
         if current["active"] or self._stop_requested or not grace:
             self._idle_since = None
             return False
         now = time.monotonic()
         if self._idle_since is None:
             self._idle_since = now
-        return now - self._idle_since < 2.0
+        return now - self._idle_since < ABSENCE_GRACE_SECONDS
 
-    def _repeat_superseded(self, current):
+    def _repeat_superseded(self, current: dict[str, Any]) -> dict[str, Any]:
         """Release durable ownership and return a positive transient intent proof."""
         self._forget()
         return {**self._publish(current), "repeat_superseded": True}
 
-    def _release_observed_repeat(self, current):
+    def _release_observed_repeat(self, current: dict[str, Any]) -> dict[str, Any]:
         """Unchanged unconfirmed/restored modes do not prove a newer intent."""
         if (
             self._owner["phase"] in {"armed", "restoring"}
@@ -249,7 +277,7 @@ class OwnedPlayback:
             return self._publish(current)
         return self._repeat_superseded(current)
 
-    def _confirm_looping(self):
+    def _confirm_looping(self) -> bool:
         if self._owner["phase"] in {"armed", "restoring"}:
             receipt = {**self._owner, "phase": "looping"}
             self._persist(receipt)
@@ -257,8 +285,8 @@ class OwnedPlayback:
             return True
         return False
 
-    def _confirm_playback(self, observed):
-        """A positively matched return cancels the old restoration disposition."""
+    def _confirm_playback(self, observed: dict[str, Any]) -> bool:
+        """Confirm a matching loop; return whether its receipt was durably changed."""
         if (
             self._owner is not None
             and not observed.get("foreign_player")
@@ -268,7 +296,9 @@ class OwnedPlayback:
             return self._confirm_looping()
         return False
 
-    def _restore_repeat(self, latest, prior, deadline):
+    def _restore_repeat(
+        self, latest: dict[str, Any], prior: str, deadline: float
+    ) -> dict[str, Any]:
         if prior != "one":
             self._rpc("Player.SetRepeat", {"playerid": 1, "repeat": prior}, deadline)
             latest = self._read(deadline)
@@ -279,7 +309,8 @@ class OwnedPlayback:
         self._forget()
         return self._publish(latest)
 
-    def _observe(self, deadline, *, grace=False):
+    # Preserve the mutually exclusive guards and their audited RPC/write order.
+    def _observe(self, deadline: float, *, grace: bool = False) -> dict[str, Any]:  # noqa: PLR0911
         current = self._read(deadline)
         if self._owner is None:
             return self._publish(current)
@@ -295,10 +326,8 @@ class OwnedPlayback:
         if current["file_matches"]:
             self._idle_since = None
             return self._publish(current)
-        if self._defer_absence(current, grace):
+        if self._defer_absence(current, grace=grace):
             return self._publish(current)
-        # Recheck the value immediately before cleanup. This detects an external
-        # mode edit made while the first observation was in flight.
         latest = self._read(deadline)
         if latest["foreign_player"]:
             return self._publish(latest, error="foreign_player_active")
@@ -310,8 +339,6 @@ class OwnedPlayback:
         receipt = {**self._owner, "phase": "restoring"}
         self._persist(receipt)
         self._owner = receipt
-        # A durable write may block. An external mode/content change during it
-        # must win over this older cleanup intent.
         latest = self._read(deadline)
         if latest["foreign_player"]:
             return self._publish(latest, error="foreign_player_active")
@@ -321,13 +348,16 @@ class OwnedPlayback:
             return self._publish(latest)
         return self._restore_repeat(latest, prior, deadline)
 
-    def _bounded_deadline(self, deadline, limit=None):
+    def _bounded_deadline(
+        self, deadline: float | None, limit: float | None = None
+    ) -> float:
         end = time.monotonic() + min(
             self._operation_timeout, limit or self._operation_timeout
         )
         return min(end, deadline) if deadline is not None else end
 
-    def observe(self, *, deadline=None):
+    def observe(self, *, deadline: float | None = None) -> dict[str, Any]:
+        """Read current ownership evidence without exposing callback failures."""
         with self._lock:
             if self._closing.is_set():
                 return self._failed("stopped")
@@ -335,24 +365,24 @@ class OwnedPlayback:
                 return dict(self._snapshot)
             try:
                 return self._observe(self._bounded_deadline(deadline, 3.0), grace=True)
-            except Exception:
+            # Preserve a safe snapshot for every callback failure; never log responses.
+            except Exception:  # noqa: BLE001
                 return self._failed("observation_failed")
 
-    def status(self):
+    def status(self) -> dict[str, Any]:
+        """Return the latest snapshot, marking expired evidence as unknown."""
         with self._lock:
             snapshot = dict(self._snapshot)
             stamp = snapshot.get("observed_at")
             if snapshot["state"] in {"playing", "paused"} and (
                 not stamp
-                or (
-                    datetime.now(timezone.utc) - datetime.fromisoformat(stamp)
-                ).total_seconds()
-                > 5
+                or (datetime.now(UTC) - datetime.fromisoformat(stamp)).total_seconds()
+                > OBSERVATION_MAX_AGE_SECONDS
             ):
                 snapshot.update(state="unknown", error="stale_observation")
             return snapshot
 
-    def _open_confirmed(self, deadline):
+    def _open_confirmed(self, deadline: float) -> dict[str, Any]:
         # Exactly one mutation. Missing/ambiguous ACK never triggers another Open.
         self._rpc("Player.Open", {"item": {"file": str(self._media)}}, deadline)
         while True:
@@ -367,28 +397,33 @@ class OwnedPlayback:
                 if str(exc) != "video_properties_unavailable":
                     raise
             if self._closing.wait(self._poll_interval):
-                raise FireplaceError("stopped")
+                error_message = "stopped"
+                raise FireplaceError(error_message)
 
-    def _verify_asset(self):
+    def _verify_asset(self) -> None:
         digest = hashlib.sha256()
         with self._media.open("rb") as source:
             for chunk in iter(lambda: source.read(65536), b""):
                 digest.update(chunk)
         if digest.hexdigest() != self._sha:
-            raise FireplaceError("asset_unverified")
+            error_message = "asset_unverified"
+            raise FireplaceError(error_message)
 
-    def _existing_observation(self, deadline):
+    def _existing_observation(
+        self, deadline: float
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         try:
             return None, self._observe(deadline)
         except FireplaceError as exc:
             if str(exc) != "video_properties_unavailable":
                 raise
             if self._rpc("Player.GetActivePlayers", {}, deadline) != []:
-                raise FireplaceError("previous_owner_pending") from exc
+                error_message = "previous_owner_pending"
+                raise FireplaceError(error_message) from exc
             opened = self._open_confirmed(deadline)
             return opened, self._observe(deadline)
 
-    def _only_audio_active(self, deadline):
+    def _only_audio_active(self, deadline: float) -> bool:
         players = self._rpc("Player.GetActivePlayers", {}, deadline)
         return (
             isinstance(players, list)
@@ -398,14 +433,19 @@ class OwnedPlayback:
             and players[0].get("type") == "audio"
         )
 
-    def _resume_owned(self, deadline, force_new):
+    def _resume_owned(
+        self, deadline: float, *, force_new: bool
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if not self._owner:
             return None, None
         opened, proof = self._existing_observation(deadline)
-        if opened is None and proof.get("error") == "foreign_player_active":
-            if self._only_audio_active(deadline):
-                opened = self._open_confirmed(deadline)
-                proof = self._observe(deadline)
+        if (
+            opened is None
+            and proof.get("error") == "foreign_player_active"
+            and self._only_audio_active(deadline)
+        ):
+            opened = self._open_confirmed(deadline)
+            proof = self._observe(deadline)
         if force_new and opened is None and proof["state"] in {"playing", "paused"}:
             # Explicit replacement retains the existing prior-repeat lease.
             # The callback atomically records the pending source before Open.
@@ -419,17 +459,21 @@ class OwnedPlayback:
         if proof["state"] == "playing":
             return opened, proof
         if self._owner:
-            raise FireplaceError("previous_owner_pending")
+            error_message = "previous_owner_pending"
+            raise FireplaceError(error_message)
         return opened, None
 
-    def _prior_mode(self, deadline):
+    def _prior_mode(self, deadline: float) -> str:
         try:
             previous = self._read(deadline)
             return previous["repeat"] if previous["repeat"] in MODES else "off"
-        except Exception:
+        # An unavailable callback cannot supply a reliable prior repeat mode.
+        except Exception:  # noqa: BLE001
             return "off"
 
-    def _arm_loop(self, current, prior, deadline):
+    def _arm_loop(
+        self, current: dict[str, Any], prior: str, deadline: float
+    ) -> dict[str, Any]:
         prior = current["repeat"] if current["repeat"] in MODES else prior
         receipt = {
             "version": 1,
@@ -439,6 +483,7 @@ class OwnedPlayback:
         }
         self._persist(receipt)
         self._owner = receipt
+        # Keep validation inside the shared pre-mutation lease cleanup boundary.
         try:
             latest = self._read(deadline)
             if (
@@ -453,7 +498,8 @@ class OwnedPlayback:
                 or latest["speed"] <= 0
                 or latest["repeat"] != current["repeat"]
             ):
-                raise FireplaceError("content_changed")
+                error_message = "content_changed"
+                raise FireplaceError(error_message)  # noqa: TRY301
         except Exception:
             # No repeat mutation has been sent. A failed/expired durable arm
             # must not leave a receipt that can later reclaim unrelated repeat.
@@ -469,21 +515,27 @@ class OwnedPlayback:
             return proof
         self.start_monitor()
         if proof["state"] != "playing":
-            raise FireplaceError("loop_unconfirmed")
+            error_message = "loop_unconfirmed"
+            raise FireplaceError(error_message)
         return proof
 
-    def start(self, *, force_new=False, deadline=None):
+    def start(
+        self, *, force_new: bool = False, deadline: float | None = None
+    ) -> dict[str, Any]:
+        """Open the requested source and confirm its owned repeat lease."""
         with self._lock:
             if self._closing.is_set():
-                raise FireplaceError("stopped")
+                error_message = "stopped"
+                raise FireplaceError(error_message)
             if self._load_error:
-                raise FireplaceError("owner_unreadable")
+                error_message = "owner_unreadable"
+                raise FireplaceError(error_message)
             deadline = self._bounded_deadline(deadline)
             self._stop_requested = False
             self._idle_since = None
             try:
                 self._asset_check()
-                opened, proof = self._resume_owned(deadline, force_new)
+                opened, proof = self._resume_owned(deadline, force_new=force_new)
                 if proof is not None:
                     self.start_monitor()
                     return proof
@@ -499,12 +551,15 @@ class OwnedPlayback:
             except Exception as exc:
                 self._failed("start_unconfirmed")
                 self.start_monitor()
-                raise FireplaceError("start_unconfirmed") from exc
+                error_message = "start_unconfirmed"
+                raise FireplaceError(error_message) from exc
 
-    def stop(self, *, deadline=None):
+    def stop(self, *, deadline: float | None = None) -> dict[str, Any]:
+        """Stop only the currently owned video while preserving newer user intent."""
         with self._lock:
             if self._closing.is_set():
-                raise FireplaceError("stopped")
+                error_message = "stopped"
+                raise FireplaceError(error_message)
             self._stop_requested = True
             if not self._owner:
                 return {**self.status(), "stopped": False}
@@ -541,16 +596,17 @@ class OwnedPlayback:
                 raise
             except Exception as exc:
                 self._failed("stop_unconfirmed")
-                raise FireplaceError("stop_unconfirmed") from exc
+                error_message = "stop_unconfirmed"
+                raise FireplaceError(error_message) from exc
 
-    def start_monitor(self):
+    def start_monitor(self) -> None:
+        """Start one observer only while a durable repeat lease exists."""
         with self._lock:
             if (
                 not self._auto_monitor
                 or self._closing.is_set()
                 or self._owner is None
-                or self._thread is not None
-                and self._thread.is_alive()
+                or (self._thread is not None and self._thread.is_alive())
             ):
                 return
             self._thread = threading.Thread(
@@ -558,7 +614,7 @@ class OwnedPlayback:
             )
             self._thread.start()
 
-    def _monitor(self):
+    def _monitor(self) -> None:
         try:
             while not self._closing.is_set():
                 proof = self.observe()
@@ -575,9 +631,10 @@ class OwnedPlayback:
                 # is between its final check and thread exit. Do not strand it.
                 self.start_monitor()
 
-    def close(self):
+    def close(self) -> None:
         # Keep the receipt: restarting the bridge must not change user playback.
         # Each RPC has a bounded deadline; no new RPC starts after this flag.
+        """Stop observation while retaining the durable receipt for recovery."""
         self._closing.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
@@ -595,7 +652,15 @@ SourceUnavailable = _rotation.SourceUnavailable
 
 
 class FireplaceController(_rotation.RotatingFireplaceController):
-    def __init__(self, rpc, receipt_path, **options):
+    """Compose source rotation with the repeat-ownership implementation."""
+
+    def __init__(
+        self,
+        rpc: Callable[[str, dict[str, Any], float], Any],
+        receipt_path: Path,
+        **options: Any,
+    ) -> None:
+        """Bind the shared ownership implementation and legacy asset metadata."""
         options.setdefault("expected_sha256", MEDIA_SHA256)
         super().__init__(
             OwnedPlayback,

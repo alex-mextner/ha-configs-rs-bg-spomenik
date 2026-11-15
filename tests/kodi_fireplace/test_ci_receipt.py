@@ -1,16 +1,20 @@
 """The remote-only ship gate must reject stale or skipped verification."""
 
+from __future__ import annotations
+
 import importlib.util
 import io
 import json
 import subprocess
 import sys
 import unittest
-from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, Mock, patch
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
@@ -123,9 +127,9 @@ class CiReceiptTests(unittest.TestCase):
                 gate, "capture", return_value='{"nameWithOwner":"example/repo"}'
             ),
             patch.object(gate, "verify_workflow"),
+            self.assertRaisesRegex(gate.GateError, "changed"),
         ):
-            with self.assertRaisesRegex(gate.GateError, "changed"):
-                gate.verify_all(Mock(), Mock())
+            gate.verify_all(Mock(), Mock())
 
     def test_merge_tree_manual_and_missing_event_receipts_are_rejected(self) -> None:
         for event in ("pull_request", "pull_request_target", "workflow_dispatch", None):
@@ -165,16 +169,18 @@ class CiReceiptTests(unittest.TestCase):
                 return json.dumps([merged, pushed])
             return json.dumps(pushed if arguments[3] == "201" else merged)
 
-        with patch.object(gate, "capture", side_effect=response):
-            with self.assertRaises(gate.GateError):
-                gate.verify_workflow(
-                    "example/repo",
-                    "required-commit",
-                    "ha-regressions.yml",
-                    ("maintained-suites",),
-                    Mock(),
-                    io.StringIO(),
-                )
+        with (
+            patch.object(gate, "capture", side_effect=response),
+            self.assertRaises(gate.GateError),
+        ):
+            gate.verify_workflow(
+                "example/repo",
+                "required-commit",
+                "ha-regressions.yml",
+                ("maintained-suites",),
+                Mock(),
+                io.StringIO(),
+            )
         self.assertEqual(observed[-1][3], "201")
 
     def test_newest_push_failure_cannot_borrow_an_older_push_success(self) -> None:
@@ -186,16 +192,18 @@ class CiReceiptTests(unittest.TestCase):
                 return json.dumps([old, latest])
             return json.dumps(latest if arguments[3] == "201" else old)
 
-        with patch.object(gate, "capture", side_effect=response):
-            with self.assertRaises(gate.GateError):
-                gate.verify_workflow(
-                    "example/repo",
-                    "required-commit",
-                    "ha-regressions.yml",
-                    ("maintained-suites",),
-                    Mock(),
-                    io.StringIO(),
-                )
+        with (
+            patch.object(gate, "capture", side_effect=response),
+            self.assertRaises(gate.GateError),
+        ):
+            gate.verify_workflow(
+                "example/repo",
+                "required-commit",
+                "ha-regressions.yml",
+                ("maintained-suites",),
+                Mock(),
+                io.StringIO(),
+            )
 
     def test_lint_failure_blocks_after_both_regression_workflows_pass(self) -> None:
         with (
@@ -231,9 +239,11 @@ class CiReceiptTests(unittest.TestCase):
             f"(https://api.github.com/private?token={sensitive}) "
             f"Authorization: Bearer {sensitive}",
         )
-        with patch.object(gate.subprocess, "run", return_value=failure):
-            with self.assertRaises(gate.GateError) as caught:
-                gate.capture(arguments)
+        with (
+            patch.object(gate.subprocess, "run", return_value=failure),
+            self.assertRaises(gate.GateError) as caught,
+        ):
+            gate.capture(arguments)
         message = str(caught.exception)
         self.assertIn("gh repo view", message)
         self.assertIn("exit=4", message)

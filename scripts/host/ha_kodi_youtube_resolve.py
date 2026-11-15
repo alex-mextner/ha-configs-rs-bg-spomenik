@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Prepare a private HD YouTube manifest using installed upstream runtimes.
+"""
+Prepare a private HD YouTube manifest using installed upstream runtimes.
 
 The controller owns current-request.json and the process group. This helper never
 changes that generation, starts Kodi, or downloads media. The installed,
@@ -19,16 +19,28 @@ import stat
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NoReturn
+
+if TYPE_CHECKING:
+    from types import FrameType, ModuleType
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import UUID
 
+MAX_AUDIO_CHANNELS = 2
+MIN_VIDEO_HEIGHT = 720
+MAX_VIDEO_HEIGHT = 1080
+MAX_VIDEO_WIDTH = 1920
+MAX_VIDEO_FPS = 60
 DEADLINE_SECONDS = 75
 MANIFEST_BASE_URL = "http://172.20.0.1:8787/kodi/youtube/manifest"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+PRIVATE_FILE_MODE = 0o600
+LOG_ACTIVE_GRACE_SECONDS = 120
+LOG_DIRECTORY = Path("/tmp")  # noqa: S108 - private owned log directory
 MAX_DESCRIPTOR_BYTES = 64 * 1024
 RETAIN_REQUESTS = 32
 RETENTION_SECONDS = 24 * 60 * 60
@@ -63,8 +75,9 @@ class ResolveError(Exception):
 class SafeLog:
     """Write safe stages to stderr and a private per-run log automatically."""
 
-    def __init__(self):
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    def __init__(self) -> None:
+        """Open a private per-run log before resolver work."""
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         fd, path = tempfile.mkstemp(
             prefix=f"ha-kodi-youtube-resolve-{stamp}-", suffix=".log", dir="/tmp"
         )
@@ -78,19 +91,22 @@ class SafeLog:
         except OSError as exc:
             self.write(f"log_cleanup_failed type={type(exc).__name__}")
 
-    def write(self, message):
-        line = f"{datetime.now(timezone.utc).isoformat()} {message}"
-        print(line, file=sys.stderr, flush=True)
+    def write(self, message: str) -> None:
+        """Write a sanitized stage to the terminal and private file."""
+        line = f"{datetime.now(UTC).isoformat()} {message}"
+        print(line, file=sys.stderr, flush=True)  # noqa: T201 - required CLI or CI evidence output
         print(line, file=self.stream, flush=True)
 
-    def finish(self, code):
+    def finish(self, code: int) -> None:
+        """Record the final return code and close the log."""
         self.write(
-            f"completed rc={code} elapsed={time.monotonic() - self.started:.1f}s log={self.path}"
+            f"completed rc={code} elapsed={time.monotonic() - self.started:.1f}s "
+            f"log={self.path}"
         )
         self.stream.close()
 
 
-def owned_log_mtime(path):
+def owned_log_mtime(path: Path) -> float | None:
     """Recognize a private regular log by filename, user, and startup marker."""
     if not LOG_NAME.fullmatch(path.name):
         return None
@@ -98,18 +114,22 @@ def owned_log_mtime(path):
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
             return None
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
+        if stat.S_IMODE(metadata.st_mode) != PRIVATE_FILE_MODE:
             return None
         with path.open("r") as stream:
             first_line = stream.readline(512)
         if " starting log=" + str(path) not in first_line:
             return None
-        return metadata.st_mtime
     except (OSError, UnicodeError):
         return None
+    return metadata.st_mtime
 
 
-def prune_logs(directory=Path("/tmp"), now=None, keep=64):
+def prune_logs(
+    directory: Path = LOG_DIRECTORY,
+    now: float | None = None,
+    keep: int = 64,
+) -> None:
     """Bound only this helper's own old logs, preserving active and unknown files."""
     now = time.time() if now is None else now
     owned = []
@@ -118,55 +138,62 @@ def prune_logs(directory=Path("/tmp"), now=None, keep=64):
         if modified is not None:
             owned.append((modified, path))
     for index, (modified, path) in enumerate(sorted(owned, reverse=True)):
-        if now - modified < 120:
+        if now - modified < LOG_ACTIVE_GRACE_SECONDS:
             continue
         if index >= keep or now - modified > 7 * 86400:
             path.unlink(missing_ok=True)
 
 
-def canonical_request_id(value):
+def canonical_request_id(value: Any) -> str:
     """Accept one canonical UUID, never a caller-supplied file path."""
     try:
         if str(UUID(value)) != value:
-            raise ValueError
+            raise ValueError  # noqa: TRY301 - normalize every malformed UUID
     except (ValueError, TypeError, AttributeError) as exc:
-        raise ResolveError("invalid_request_id") from exc
+        msg = "invalid_request_id"
+        raise ResolveError(msg) from exc
     return value
 
 
-def read_json(path, limit):
+def read_json(path: Path, limit: int) -> dict[str, Any]:
     """Read only a bounded, regular, private task file."""
     if path.is_symlink() or not path.is_file():
-        raise ResolveError("state_missing")
+        msg = "state_missing"
+        raise ResolveError(msg)
     with path.open("rb") as stream:
         raw = stream.read(limit + 1)
     if len(raw) > limit:
-        raise ResolveError("state_oversize")
+        msg = "state_oversize"
+        raise ResolveError(msg)
     try:
         value = json.loads(raw)
     except (ValueError, UnicodeError) as exc:
-        raise ResolveError("state_invalid") from exc
+        msg = "state_invalid"
+        raise ResolveError(msg) from exc
     if not isinstance(value, dict):
-        raise ResolveError("state_invalid")
+        msg = "state_invalid"
+        raise ResolveError(msg)
     return value
 
 
-def require_current(state, request_id):
+def require_current(state: Path, request_id: str) -> None:
     """Refuse publication when the controller has cancelled this attempt."""
     value = read_json(state / "current-request.json", 4096)
     if value.get("request_id") != request_id:
-        raise ResolveError("request_cancelled")
+        msg = "request_cancelled"
+        raise ResolveError(msg)
 
 
-def private_directory(path):
+def private_directory(path: Path) -> None:
     """Create task-owned private directories without following a symlink."""
     if path.is_symlink():
-        raise ResolveError("state_path_invalid")
+        msg = "state_path_invalid"
+        raise ResolveError(msg)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
 
 
-def atomic_private_write(path, payload, temporary_name):
+def atomic_private_write(path: Path, payload: bytes, temporary_name: str) -> None:
     """Publish a complete task file with private permissions."""
     temporary = path.parent / temporary_name
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -175,7 +202,7 @@ def atomic_private_write(path, payload, temporary_name):
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        temporary.replace(path)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -185,7 +212,7 @@ def atomic_private_write(path, payload, temporary_name):
         temporary.unlink(missing_ok=True)
 
 
-def only_owned_files(directory):
+def only_owned_files(directory: Path) -> bool:
     """Keep directories containing any unknown name, subdirectory, or symlink."""
     return all(
         item.name in OWNED_FILES and item.is_file() and not item.is_symlink()
@@ -193,7 +220,7 @@ def only_owned_files(directory):
     )
 
 
-def protected_request_ids(state):
+def protected_request_ids(state: Path) -> set[str] | None:
     """Read durable playback references, or refuse cleanup when state is uncertain."""
     try:
         generation = read_json(state / "current-request.json", 4096)
@@ -210,12 +237,12 @@ def protected_request_ids(state):
             if not isinstance(identity, dict):
                 return None
             protected.add(canonical_request_id(identity.get("attempt_id")))
-        return protected
     except (KeyError, OSError, ResolveError):
         return None
+    return protected
 
 
-def owned_request_mtime(directory, protected):
+def owned_request_mtime(directory: Path, protected: set[str]) -> float | None:
     """Recognize owned preparations that no durable playback state protects."""
     if directory.is_symlink() or not directory.is_dir() or directory.name in protected:
         return None
@@ -231,21 +258,21 @@ def owned_request_mtime(directory, protected):
         return None
 
 
-def remove_owned_files(directory):
+def remove_owned_files(directory: Path) -> None:
     """Remove only the fixed task filenames from one already owned directory."""
     for name in OWNED_FILES:
         (directory / name).unlink(missing_ok=True)
     directory.rmdir()
 
 
-def remove_obsolete_request(state, directory):
+def remove_obsolete_request(state: Path, directory: Path) -> None:
     """Recheck durable playback references and ownership immediately before deletion."""
     protected = protected_request_ids(state)
     if protected is not None and owned_request_mtime(directory, protected) is not None:
         remove_owned_files(directory)
 
 
-def cleanup_obsolete(state, now):
+def cleanup_obsolete(state: Path, now: float | None) -> None:
     """Bound obsolete storage while preserving durable playback and unknown files."""
     requests = state / "requests"
     if not requests.is_dir() or requests.is_symlink():
@@ -263,19 +290,22 @@ def cleanup_obsolete(state, now):
             remove_obsolete_request(state, directory)
 
 
-def load_pinned_module(directory, filename, digest):
+def load_pinned_module(directory: Path, filename: str, digest: str) -> ModuleType:
     """Import only the exact reviewed SmartTube release module."""
     path = directory / filename
     if path.is_symlink() or not path.is_file():
-        raise ResolveError("upstream_source_missing")
+        msg = "upstream_source_missing"
+        raise ResolveError(msg)
     with path.open("rb") as stream:
         payload = stream.read(MAX_UPSTREAM_SOURCE_BYTES + 1)
     if hashlib.sha256(payload).hexdigest() != digest:
-        raise ResolveError("upstream_source_mismatch")
+        msg = "upstream_source_mismatch"
+        raise ResolveError(msg)
     name = "ha_youtube_smarttube_" + path.stem
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise ResolveError("upstream_source_missing")
+        msg = "upstream_source_missing"
+        raise ResolveError(msg)
     module = importlib.util.module_from_spec(spec)
     # Execute the verified buffer, never a reopened source or cached bytecode.
     code = compile(payload, str(path), "exec", dont_inherit=True)
@@ -283,7 +313,7 @@ def load_pinned_module(directory, filename, digest):
     return module
 
 
-def smarttube_modules(home):
+def smarttube_modules(home: Path) -> tuple[ModuleType, ...]:
     """Load maintained pure modules without Kodi, yt-dlp, or a JS subprocess."""
     directory = home / ".kodi/addons/plugin.video.smarttube/resources/lib"
     return tuple(
@@ -292,28 +322,34 @@ def smarttube_modules(home):
     )
 
 
-def bounded_player_response(video_id, url, data, headers, timeout):
+def bounded_player_response(
+    video_id: str, url: str, data: bytes, headers: Any, timeout: float
+) -> bytes:
     """Bound upstream HTTP and verify identity before its parser drops videoId."""
-    request = Request(url, data=data, headers=headers, method="POST")
-    with urlopen(request, timeout=min(timeout, PLAYER_TIMEOUT_SECONDS)) as response:
+    request = Request(url, data=data, headers=headers, method="POST")  # noqa: S310 - pinned client owns HTTPS endpoints
+    with urlopen(request, timeout=min(timeout, PLAYER_TIMEOUT_SECONDS)) as response:  # noqa: S310 - pinned client owns HTTPS endpoints
         raw = response.read(MAX_PLAYER_BYTES + 1)
     if len(raw) > MAX_PLAYER_BYTES:
-        raise ResolveError("player_response_oversize")
+        msg = "player_response_oversize"
+        raise ResolveError(msg)
     try:
         value = json.loads(raw)
     except (ValueError, UnicodeError) as exc:
-        raise ResolveError("player_response_invalid") from exc
+        msg = "player_response_invalid"
+        raise ResolveError(msg) from exc
     if not isinstance(value, dict):
-        raise ResolveError("player_response_invalid")
+        msg = "player_response_invalid"
+        raise ResolveError(msg)
     status = value.get("playabilityStatus")
     if isinstance(status, dict) and status.get("status") == "OK":
         details = value.get("videoDetails")
         if not isinstance(details, dict) or details.get("videoId") != video_id:
-            raise ResolveError("unexpected_video")
+            msg = "unexpected_video"
+            raise ResolveError(msg)
     return raw
 
 
-def public_media_url(value):
+def public_media_url(value: Any) -> bool:
     """Accept only the same HTTPS YouTube media origins as the Kodi adapter."""
     try:
         url = urlsplit(value)
@@ -328,28 +364,35 @@ def public_media_url(value):
         return False
 
 
-def allowed_smarttube_format(item, builder):
+def allowed_smarttube_format(item: dict[str, Any], builder: ModuleType) -> bool:
     """Apply projector limits after upstream validates all DASH fields."""
-    if not builder._usable(item) or not public_media_url(item["url"]):
+    if not builder._usable(item) or not public_media_url(item["url"]):  # noqa: SLF001 - reviewed pinned upstream API
         return False
-    mime, codec = builder._mime(item)
+    mime, codec = builder._mime(item)  # noqa: SLF001 - reviewed pinned upstream API
     if mime == "audio/mp4":
-        return codec.startswith("mp4a.") and 0 < (item.get("audioChannels") or 0) <= 2
+        return (
+            codec.startswith("mp4a.")
+            and 0 < (item.get("audioChannels") or 0) <= MAX_AUDIO_CHANNELS
+        )
     return (
         mime == "video/mp4"
         and codec.startswith("avc1.")
-        and 720 <= (item.get("height") or 0) <= 1080
-        and 0 < (item.get("width") or 0) <= 1920
-        and 0 < (item.get("fps") or 0) <= 60
+        and MIN_VIDEO_HEIGHT <= (item.get("height") or 0) <= MAX_VIDEO_HEIGHT
+        and 0 < (item.get("width") or 0) <= MAX_VIDEO_WIDTH
+        and 0 < (item.get("fps") or 0) <= MAX_VIDEO_FPS
     )
 
 
-def select_smarttube_formats(formats, builder):
+def select_smarttube_formats(
+    formats: list[dict[str, Any]], builder: ModuleType
+) -> list[dict[str, Any]]:
     """Keep H264 HD and non-DRC AAC; upstream owns format parsing and ranges."""
     return [item for item in formats if allowed_smarttube_format(item, builder)]
 
 
-def build_smarttube_response(info, client, inner, builder):
+def build_smarttube_response(
+    info: dict[str, Any], client: str, inner: ModuleType, builder: ModuleType
+) -> dict[str, Any] | None:
     """Build one upstream MPD containing both permitted video and AAC audio."""
     if not info.get("playable") or info.get("is_live"):
         return None
@@ -364,7 +407,8 @@ def build_smarttube_response(info, client, inner, builder):
         return None
     payload = manifest.encode("utf-8")
     if len(payload) > MAX_MANIFEST_BYTES:
-        raise ResolveError("manifest_invalid")
+        msg = "manifest_invalid"
+        raise ResolveError(msg)
     return {
         "payload": payload,
         "title": str(info.get("title") or "YouTube")[:500],
@@ -374,7 +418,7 @@ def build_smarttube_response(info, client, inner, builder):
     }
 
 
-def prepare_smarttube(video_id, home, log):
+def prepare_smarttube(video_id: str, home: Path, log: SafeLog) -> dict[str, Any]:
     """Use the maintained public client and MPD builder within caller cancellation."""
     inner, builder = smarttube_modules(home)
     log.write(f"runtime smarttube={SMARTTUBE_VERSION}")
@@ -387,10 +431,11 @@ def prepare_smarttube(video_id, home, log):
                 f"width={prepared['width']} height={prepared['height']}"
             )
             return prepared
-    raise ResolveError("hd_audio_video_unavailable")
+    msg = "hd_audio_video_unavailable"
+    raise ResolveError(msg)
 
 
-def safe_headers(headers):
+def safe_headers(headers: Any) -> dict[str, str]:
     """Persist only ordinary playback headers; never cookies or authorization."""
     allowed = {"user-agent", "accept", "accept-language", "referer", "origin"}
     return {
@@ -402,10 +447,11 @@ def safe_headers(headers):
     }
 
 
-def resolve(video_id, request_id, home, log):
+def resolve(video_id: str, request_id: str, home: Path, log: SafeLog) -> dict[str, str]:
     """Publish one private HD result only for the controller's current attempt."""
     if not VIDEO_ID_PATTERN.fullmatch(video_id):
-        raise ResolveError("invalid_video_id")
+        msg = "invalid_video_id"
+        raise ResolveError(msg)
     canonical_request_id(request_id)
     state = home / ".config" / "ha-host-actions" / "youtube"
     require_current(state, request_id)
@@ -463,12 +509,13 @@ def resolve(video_id, request_id, home, log):
         raise
 
 
-def cancel(_signum, _frame):
+def cancel(_signum: int, _frame: FrameType | None) -> NoReturn:
     """Interrupt the helper while its caller reaps the entire process group."""
-    raise ResolveError("cancelled_or_deadline")
+    msg = "cancelled_or_deadline"
+    raise ResolveError(msg)
 
 
-def main():
+def main() -> int:
     """Run one bounded resolver with machine-readable stdout and safe logs."""
     log = SafeLog()
     code = 1
@@ -481,11 +528,11 @@ def main():
         signal.signal(signal.SIGALRM, cancel)
         signal.alarm(DEADLINE_SECONDS)
         result = resolve(args.video_id, args.request_id, Path.home(), log)
-        print(json.dumps(result, ensure_ascii=False), flush=True)
+        print(json.dumps(result, ensure_ascii=False), flush=True)  # noqa: T201 - required CLI or CI evidence output
         code = 0
     except ResolveError as exc:
         log.write(f"failed code={exc}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - sanitize failures at the entry point
         # Upstream exception text may embed a signed stream URL.
         log.write(f"failed code=upstream_or_io_error type={type(exc).__name__}")
     finally:

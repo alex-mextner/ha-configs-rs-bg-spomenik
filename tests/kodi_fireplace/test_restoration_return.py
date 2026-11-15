@@ -1,6 +1,9 @@
 """A returning owned video must retain later human repeat intent across restart."""
 
+from __future__ import annotations
+
 import time
+from typing import Any
 from unittest.mock import patch
 
 import test_rotation as fixtures
@@ -9,11 +12,13 @@ import test_rotation_stop_boundaries as stop_fixtures
 
 
 class RestorationReturnCases(fixtures.FixtureBase):
+    """Exercise restoration return cases behavior with deterministic native fixtures."""
+
     multi = fixtures.RotationCases.multi
     selection = recovery.RecoveryCases.selection
     looped_pending = stop_fixtures.StopBoundaryCases.looped_pending
 
-    def return_during_restoration(self, controller, boundary):
+    def return_during_restoration(self, controller, boundary) -> Any:
         expected = self.kodi.file
         self.kodi.file, self.kodi.speed = None, 0
         controller._owner._idle_since = time.monotonic() - 3
@@ -21,16 +26,16 @@ class RestorationReturnCases(fixtures.FixtureBase):
         native = controller._rpc
         returned = []
 
-        def resume():
+        def resume() -> None:
             returned.append(boundary)
             self.kodi.file, self.kodi.speed, self.kodi.repeat = expected, 1, "one"
 
-        def store(receipt):
+        def store(receipt) -> None:
             persist(receipt)
             if receipt["phase"] == "restoring" and boundary == "persist":
                 resume()
 
-        def callback(method, params, deadline):
+        def callback(method, params, deadline) -> Any:
             result = native(method, params, deadline)
             if (
                 boundary == "readback"
@@ -51,7 +56,7 @@ class RestorationReturnCases(fixtures.FixtureBase):
         self.assertEqual(self.kodi.repeat, "one")
         return expected
 
-    def assert_human_repeat_survives(self, controller, expected, operation):
+    def assert_human_repeat_survives(self, controller, expected, operation) -> None:
         self.kodi.calls.clear()
         self.kodi.repeat = "off"
         getattr(controller, operation)()
@@ -72,7 +77,7 @@ class RestorationReturnCases(fixtures.FixtureBase):
             ]
         )
 
-    def test_pending_return_during_durable_restore_survives_restart(self):
+    def test_pending_return_during_durable_restore_survives_restart(self) -> None:
         controller = self.looped_pending()
         expected = self.return_during_restoration(controller, "persist")
         self.assertIsNotNone(self.selection()["pending"])
@@ -80,14 +85,16 @@ class RestorationReturnCases(fixtures.FixtureBase):
         recovered = self.multi()
         self.assert_human_repeat_survives(recovered, expected, "observe")
 
-    def test_confirmed_return_during_durable_restore_survives_explicit_stop(self):
+    def test_confirmed_return_during_durable_restore_survives_explicit_stop(
+        self,
+    ) -> None:
         controller = self.multi()
         controller.start("confirmed-before-return")
         expected = self.return_during_restoration(controller, "persist")
         self.assertIsNotNone(self.selection()["active"])
         self.assert_human_repeat_survives(controller, expected, "stop")
 
-    def test_pending_return_during_restore_readback_survives_restart(self):
+    def test_pending_return_during_restore_readback_survives_restart(self) -> None:
         controller = self.looped_pending()
         expected = self.return_during_restoration(controller, "readback")
         self.assertIsNotNone(self.selection()["pending"])
@@ -95,23 +102,25 @@ class RestorationReturnCases(fixtures.FixtureBase):
         recovered = self.multi()
         self.assert_human_repeat_survives(recovered, expected, "observe")
 
-    def test_repeat_change_during_durable_stop_confirmation_is_preserved(self):
+    def test_repeat_change_during_durable_stop_confirmation_is_preserved(self) -> None:
         controller = self.looped_pending()
         expected = self.kodi.file
         self.kodi.file, self.kodi.speed = None, 0
         controller._owner._idle_since = time.monotonic() - 3
         persist = controller._owner._persist
 
-        def crash_during_restoration(receipt):
+        def crash_during_restoration(receipt) -> None:
             persist(receipt)
             if receipt["phase"] == "restoring":
                 raise recovery.SimulatedCrashError
 
-        with patch.object(
-            controller._owner, "_persist", side_effect=crash_during_restoration
+        with (
+            patch.object(
+                controller._owner, "_persist", side_effect=crash_during_restoration
+            ),
+            self.assertRaises(recovery.SimulatedCrashError),
         ):
-            with self.assertRaises(recovery.SimulatedCrashError):
-                controller.observe()
+            controller.observe()
         controller.close()
         recovered = self.multi()
         self.kodi.file, self.kodi.speed = expected, 1
@@ -119,7 +128,7 @@ class RestorationReturnCases(fixtures.FixtureBase):
         persist = recovered._owner._persist
         confirmations = []
 
-        def human_repeat_during_confirmation(receipt):
+        def human_repeat_during_confirmation(receipt) -> None:
             persist(receipt)
             if receipt["phase"] == "looping":
                 confirmations.append(receipt["phase"])

@@ -1,4 +1,5 @@
-"""CI contracts with real pinned OSS builders; only network transport is faked.
+"""
+CI contracts with real pinned OSS builders; only network transport is faked.
 
 The upstream sources stay in a temporary directory, outside this repository.
 Run through the existing native CI/Runpod suite, never on the home machines.
@@ -16,6 +17,7 @@ import unittest
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs
 from uuid import uuid4
@@ -33,7 +35,7 @@ UPSTREAM_FILES = {
 }
 
 
-def load_path(name, path):
+def load_path(name, path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -46,9 +48,9 @@ def fetch_pinned_source(
     expected,
     repository="firsttris/plugin.video.sendtokodi",
     commit=UPSTREAM_COMMIT,
-):
+) -> Any:
     url = "https://raw.githubusercontent.com/" + repository + "/" + commit + "/" + name
-    with urllib.request.urlopen(url, timeout=20) as response:
+    with urllib.request.urlopen(url, timeout=20) as response:  # noqa: S310 - pinned client owns HTTPS endpoints
         payload = response.read(128 * 1024 + 1)
     if hashlib.sha256(payload).hexdigest() != expected:
         raise AssertionError("Pinned upstream source digest mismatch: " + name)
@@ -58,8 +60,10 @@ def fetch_pinned_source(
 
 
 class UpstreamDashContractTests(unittest.TestCase):
+    """Exercise UpstreamDashContractTests contracts without a real Kodi process."""
+
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.source_temp = tempfile.TemporaryDirectory(prefix="sendtokodi-contract-")
         cls.addClassCleanup(cls.source_temp.cleanup)
         source = Path(cls.source_temp.name)
@@ -98,7 +102,7 @@ class UpstreamDashContractTests(unittest.TestCase):
             ROOT / "scripts/host/ha_kodi_youtube_manifest.py",
         )
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="youtube-contract-state-")
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
@@ -115,7 +119,7 @@ class UpstreamDashContractTests(unittest.TestCase):
         self.adapter.xbmcplugin.setResolvedUrl = Mock()
 
     @staticmethod
-    def public_metadata_fixture():
+    def public_metadata_fixture() -> Any:
         return {
             "id": "L_LUpnjgPso",
             "title": "Contract fireplace",
@@ -154,7 +158,7 @@ class UpstreamDashContractTests(unittest.TestCase):
             ],
         }
 
-    def prepare_sendtokodi(self, _video_id, _home, _log):
+    def prepare_sendtokodi(self, _video_id, _home, _log) -> Any:
         """Keep validating the enabled SendToKodi builder through publication."""
         metadata = self.public_metadata_fixture()
         have_video, have_audio, videos, audios = self.selection.analyze_formats(
@@ -168,7 +172,7 @@ class UpstreamDashContractTests(unittest.TestCase):
             "headers": self.resolver.safe_headers(video["http_headers"]),
         }
 
-        def capture(payload, **_ignored):
+        def capture(payload, **_ignored: Any) -> Any:
             prepared["payload"] = payload
             return str(self.state / "requests" / self.request_id / "manifest.mpd")
 
@@ -184,11 +188,11 @@ class UpstreamDashContractTests(unittest.TestCase):
         )
         return prepared
 
-    def assert_prepared_delivery(self, result, title):
+    def assert_prepared_delivery(self, result, title) -> bytes:
         payload = self.manifest.read_manifest(
             self.state, {"request_id": [self.request_id]}
         )
-        tree = ET.fromstring(payload)
+        tree = ET.fromstring(payload)  # noqa: S314 - bounded hash-verified upstream XML
         kinds = {
             node.get("contentType") for node in tree.findall(".//{*}AdaptationSet")
         }
@@ -211,7 +215,9 @@ class UpstreamDashContractTests(unittest.TestCase):
         item.info.setTitle.assert_called_once_with(title)
         return payload
 
-    def test_real_sendtokodi_output_crosses_publication_reader_and_adapter(self):
+    def test_real_sendtokodi_output_crosses_publication_reader_and_adapter(
+        self,
+    ) -> None:
         with (
             patch.object(
                 self.resolver, "prepare_smarttube", side_effect=self.prepare_sendtokodi
@@ -228,14 +234,14 @@ class UpstreamDashContractTests(unittest.TestCase):
         self.assertEqual(ranges.call_count, 2)
         self.requests.get.assert_not_called()
         payload = self.assert_prepared_delivery(result, "Contract fireplace")
-        print(
+        print(  # noqa: T201 - required CLI or CI evidence output
             "SendToKodi v0.10.3 contract commit="
             + UPSTREAM_COMMIT
             + " manifest_sha256="
             + hashlib.sha256(payload).hexdigest()
         )
 
-    def test_real_smarttube_source_crosses_resolver_reader_and_adapter(self):
+    def test_real_smarttube_source_crosses_resolver_reader_and_adapter(self) -> None:
         raw = json.dumps(public_player_response()).encode()
         with (
             patch.object(
@@ -250,7 +256,7 @@ class UpstreamDashContractTests(unittest.TestCase):
             result = self.resolver.resolve(VIDEO_ID, self.request_id, self.home, Mock())
         self.assertEqual(transport.call_count, 1)
         payload = self.assert_prepared_delivery(result, "Fast public fireplace")
-        print(
+        print(  # noqa: T201 - required CLI or CI evidence output
             "SmartTube v0.5.3 contract commit="
             + self.resolver.SMARTTUBE_COMMIT
             + " manifest_sha256="
@@ -259,7 +265,7 @@ class UpstreamDashContractTests(unittest.TestCase):
             + str(len(payload))
         )
 
-    def test_real_smarttube_live_flags_reject_publication(self):
+    def test_real_smarttube_live_flags_reject_publication(self) -> None:
         for flag in ("isLive", "isLiveNow"):
             with self.subTest(flag=flag):
                 response = public_player_response()
@@ -281,7 +287,9 @@ class UpstreamDashContractTests(unittest.TestCase):
                     patch.object(
                         self.resolver,
                         "urlopen",
-                        side_effect=lambda *_args, **_kwargs: io.BytesIO(raw),
+                        side_effect=lambda *_args, _raw=raw, **_kwargs: io.BytesIO(
+                            _raw
+                        ),
                     ),
                     self.assertRaisesRegex(
                         self.resolver.ResolveError, "hd_audio_video_unavailable"

@@ -1,26 +1,33 @@
 """Observable cancellation and repeat intent at the final native dispatch boundary."""
 
+from __future__ import annotations
+
+from typing import Any
 from unittest.mock import patch
 
 import test_rotation as fixtures
 import test_rotation_recovery as recovery
+import test_rotation_stop_boundaries as stop_fixtures
+from test_manifest_http import bridge
 
 
 class DispatchBoundaryCases(fixtures.FixtureBase):
+    """Exercise dispatch boundary cases behavior with deterministic native fixtures."""
+
     multi = fixtures.RotationCases.multi
     selection = recovery.RecoveryCases.selection
 
-    def stalled_controller(self, after_rpc=None):
+    def stalled_controller(self, after_rpc=None) -> tuple[Any, ...]:
         prepared = []
 
-        def prepare(source, _deadline):
+        def prepare(source, _deadline) -> dict[str, Any]:
             prepared.append(source["id"])
             return {"file": source["path"]}
 
         controller = self.multi(operation_timeout=8, resolver=prepare)
         native = controller._rpc
 
-        def callback(method, params, deadline):
+        def callback(method, params, deadline) -> Any:
             result = native(method, params, deadline)
             if method == "Player.GetProperties" and self.kodi.file == str(
                 self.root / "0.webm"
@@ -38,7 +45,7 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         controller._rpc = callback
         return controller, prepared
 
-    def assert_repeat_supersedes_fallback(self, controller, prepared):
+    def assert_repeat_supersedes_fallback(self, controller, prepared) -> None:
         with self.assertRaisesRegex(
             fixtures.fireplace.FireplaceError, "playback_changed"
         ):
@@ -53,11 +60,11 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         controller.observe()
         self.assertEqual(self.kodi.repeat, "all")
 
-    def test_repeat_change_before_cleanup_preserves_the_matching_video(self):
+    def test_repeat_change_before_cleanup_preserves_the_matching_video(self) -> None:
         controller, prepared = self.stalled_controller()
         stop = controller._owner.stop
 
-        def human_repeat(**options):
+        def human_repeat(**options: Any) -> Any:
             self.kodi.repeat = "all"
             return stop(**options)
 
@@ -66,10 +73,12 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         self.assertEqual(self.kodi.file, str(self.root / "0.webm"))
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])
 
-    def test_repeat_change_after_stop_cannot_be_adopted_even_if_it_matches_prior(self):
+    def test_repeat_change_after_stop_cannot_be_adopted_even_if_it_matches_prior(
+        self,
+    ) -> None:
         self.kodi.repeat = "all"
 
-        def human_repeat(_controller, method, _params):
+        def human_repeat(_controller, method, _params) -> None:
             if method == "Player.Stop":
                 self.kodi.repeat = "all"
 
@@ -77,8 +86,10 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         self.assert_repeat_supersedes_fallback(controller, prepared)
         self.assertIsNone(self.kodi.file)
 
-    def test_repeat_change_after_restoration_cannot_be_adopted_for_fallback(self):
-        def human_repeat(_controller, method, params):
+    def test_repeat_change_after_restoration_cannot_be_adopted_for_fallback(
+        self,
+    ) -> None:
+        def human_repeat(_controller, method, params) -> None:
             if method == "Player.SetRepeat" and params["repeat"] == "off":
                 self.kodi.repeat = "all"
 
@@ -86,14 +97,23 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         self.assert_repeat_supersedes_fallback(controller, prepared)
         self.assertIsNone(self.kodi.file)
 
-    def test_cancellation_during_each_final_fallback_read_prevents_dispatch(self):
+    def test_cancellation_during_each_final_fallback_read_prevents_dispatch(
+        self,
+    ) -> None:
         for intent in ("stop", "close"):
             for boundary in ("Player.GetActivePlayers", "Player.GetProperties"):
                 with self.subTest(intent=intent, boundary=boundary):
                     self.kodi.calls.clear()
                     injected = []
 
-                    def cancel(controller, method, _params):
+                    def cancel(
+                        controller,
+                        method,
+                        _params,
+                        *,
+                        case=(boundary, injected, intent),
+                    ) -> None:
+                        boundary, injected, intent = case
                         if (
                             method == boundary
                             and controller._fallback_repeat is not None
@@ -126,8 +146,9 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
                     self.assertIsNone(self.kodi.file)
                     controller.close()
 
-    def test_actual_bridge_rejection_before_open_leaves_no_uncertain_journal(self):
-        from test_manifest_http import bridge
+    def test_actual_bridge_rejection_before_open_leaves_no_uncertain_journal(
+        self,
+    ) -> None:
 
         controller = self.multi()
         now = [100.0]
@@ -135,14 +156,14 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         dispatched = []
         expired = []
 
-        def transport(method, params, *, timeout):
+        def transport(method, params, *, timeout) -> dict[str, Any]:
             dispatched.append(method)
             return {
                 "ok": True,
                 "body": {"result": self.kodi.rpc(method, params, timeout)},
             }
 
-        def callback(method, params, deadline):
+        def callback(method, params, deadline) -> Any:
             if method == "Player.Open":
                 expired.append(method)
                 now[0] = deadline
@@ -155,11 +176,11 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
             ),
             patch.object(bridge, "_fireplace_module", fixtures.fireplace),
             patch.object(bridge, "kodi_jsonrpc", side_effect=transport),
-        ):
-            with self.assertRaisesRegex(
+            self.assertRaisesRegex(
                 fixtures.fireplace.FireplaceError, "sources_unavailable"
-            ):
-                controller.start("undispatched-open")
+            ),
+        ):
+            controller.start("undispatched-open")
         self.assertEqual(expired, ["Player.Open"])
         self.assertNotIn("Player.Open", dispatched)
         self.assertIsNone(self.selection()["pending"])
@@ -169,10 +190,11 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         self.assertFalse(controller.stop()["owned"])
         self.assertIsNone(self.selection()["pending"])
 
-    def test_repeat_supersession_during_pending_monitor_never_stops_the_video(self):
-        from test_rotation_stop_boundaries import StopBoundaryCases
+    def test_repeat_supersession_during_pending_monitor_never_stops_the_video(
+        self,
+    ) -> None:
 
-        controller = StopBoundaryCases.looped_pending(self)
+        controller = stop_fixtures.StopBoundaryCases.looped_pending(self)
         expected = self.kodi.file
         self.kodi.repeat = "off"
         proof = controller.observe()
@@ -183,14 +205,14 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         controller.observe()
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])
 
-    def test_expiry_after_opening_journal_is_definitively_undispatched(self):
+    def test_expiry_after_opening_journal_is_definitively_undispatched(self) -> None:
         controller = self.multi()
         now = [100.0]
         self.kodi.started = now[0]
         store = controller._store
         expired = []
 
-        def journal_then_expire():
+        def journal_then_expire() -> None:
             store()
             if (
                 controller._pending is not None
@@ -204,18 +226,20 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
                 fixtures.fireplace.time, "monotonic", side_effect=lambda: now[0]
             ),
             patch.object(controller, "_store", side_effect=journal_then_expire),
-        ):
-            with self.assertRaisesRegex(
+            self.assertRaisesRegex(
                 fixtures.fireplace.FireplaceError, "sources_unavailable"
-            ):
-                controller.start("expired-before-validation")
+            ),
+        ):
+            controller.start("expired-before-validation")
         self.assertEqual(expired, [True])
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Open"])
         self.assertIsNone(self.selection()["pending"])
         self.assertEqual(controller.status()["state"], "error")
 
-    def test_initial_repeat_arm_preserves_positive_supersession_through_failure(self):
-        def human_repeat(_controller, method, params):
+    def test_initial_repeat_arm_preserves_positive_supersession_through_failure(
+        self,
+    ) -> None:
+        def human_repeat(_controller, method, params) -> None:
             if method == "Player.SetRepeat" and params["repeat"] == "one":
                 self.kodi.repeat = "all"
 
@@ -224,13 +248,13 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         self.assertEqual(self.kodi.file, str(self.root / "0.webm"))
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])
 
-    def test_owned_replacement_does_not_rearm_after_repeat_supersession(self):
+    def test_owned_replacement_does_not_rearm_after_repeat_supersession(self) -> None:
         controller = self.multi()
         first = controller.start("first")
         native = controller._rpc
         self.kodi.calls.clear()
 
-        def human_repeat(method, params, deadline):
+        def human_repeat(method, params, deadline) -> Any:
             result = native(method, params, deadline)
             if method == "Player.Open":
                 self.kodi.repeat = "all"
@@ -256,10 +280,10 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
             ]
         )
 
-    def test_stop_delivers_supersession_without_a_failing_followup_read(self):
+    def test_stop_delivers_supersession_without_a_failing_followup_read(self) -> None:
         stopped = []
 
-        def human_takeover(_controller, method, _params):
+        def human_takeover(_controller, method, _params) -> None:
             if method == "Player.Stop":
                 stopped.append(True)
                 self.kodi.file = str(self.root / "0.webm")
@@ -270,19 +294,22 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         read = controller._owner._read
         final_reads = []
 
-        def fail_after_supersession(deadline):
+        def fail_after_supersession(deadline) -> Any:
             if stopped and controller._owner._owner is None:
                 final_reads.append(True)
-                raise OSError("This final native read must not discard supersession")
+                error_message = "This final native read must not discard supersession"
+                raise OSError(error_message)
             return read(deadline)
 
-        with patch.object(
-            controller._owner, "_read", side_effect=fail_after_supersession
-        ):
-            with self.assertRaisesRegex(
+        with (
+            patch.object(
+                controller._owner, "_read", side_effect=fail_after_supersession
+            ),
+            self.assertRaisesRegex(
                 fixtures.fireplace.FireplaceError, "playback_changed"
-            ):
-                controller.start("superseded-stop")
+            ),
+        ):
+            controller.start("superseded-stop")
         self.assertEqual(stopped, [True])
         self.assertEqual(final_reads, [])
         self.assertEqual(prepared, ["local-0"])
@@ -296,11 +323,11 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
 
     def test_repeat_change_during_durable_arm_is_returned_before_any_repeat_mutation(
         self,
-    ):
+    ) -> None:
         controller, prepared = self.stalled_controller()
         persist = controller._owner._persist
 
-        def human_repeat(receipt):
+        def human_repeat(receipt) -> None:
             persist(receipt)
             if receipt["phase"] == "armed":
                 self.kodi.repeat = "all"
@@ -316,8 +343,8 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
             ]
         )
 
-    def test_close_cannot_discard_supersession_before_restart_cleanup(self):
-        def human_repeat(_controller, method, params):
+    def test_close_cannot_discard_supersession_before_restart_cleanup(self) -> None:
+        def human_repeat(_controller, method, params) -> None:
             if method == "Player.SetRepeat" and params["repeat"] == "one":
                 self.kodi.repeat = "all"
 
@@ -325,20 +352,22 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
         observe = controller._owner._observe
         superseded = []
 
-        def close_after_mode_observation(deadline, **options):
+        def close_after_mode_observation(deadline, **options: Any) -> Any:
             proof = observe(deadline, **options)
             if proof.get("repeat_superseded") is True:
                 superseded.append(True)
                 controller._closing.set()
             return proof
 
-        with patch.object(
-            controller._owner, "_observe", side_effect=close_after_mode_observation
-        ):
-            with self.assertRaisesRegex(
+        with (
+            patch.object(
+                controller._owner, "_observe", side_effect=close_after_mode_observation
+            ),
+            self.assertRaisesRegex(
                 fixtures.fireplace.FireplaceError, "playback_changed"
-            ):
-                controller.start("close-after-supersession")
+            ),
+        ):
+            controller.start("close-after-supersession")
         self.assertEqual(superseded, [True])
         self.assertEqual(prepared, ["local-0"])
         self.assertIsNone(self.selection()["pending"])

@@ -1,17 +1,21 @@
 """Run the actual fireplace YAML through HA Script at its power/playback boundaries."""
 
+from __future__ import annotations
+
 import asyncio
-from copy import deepcopy
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
 import yaml
 from homeassistant import loader
 from homeassistant.core import Context, HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv, frame
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import frame
 from homeassistant.helpers.script import Script, script_stack_cv
 from homeassistant.helpers.template import Template
 from homeassistant.helpers.trace import trace_clear, trace_get
@@ -24,17 +28,18 @@ READINESS = "sensor.living_room_fireplace"
 TITLE = "fireplace-fastily-1080p.webm"
 
 
-def load_package(path):
+def load_package(path) -> Any:
     class SecretLoader(yaml.SafeLoader):
-        pass
+        """Resolve fixture secret scalars with SafeLoader and no object constructors."""
 
     SecretLoader.add_constructor(
         "!secret", lambda loader, node: loader.construct_scalar(node)
     )
-    return yaml.load(path.read_text(), Loader=SecretLoader)
+    # SafeLoader is extended only with a scalar constructor for the fixture tag.
+    return yaml.load(path.read_text(), Loader=SecretLoader)  # noqa: S506
 
 
-def short_timeouts(value):
+def short_timeouts(value) -> Any:
     """Accelerate only wall-clock expiry; keep the real templates/actions."""
     if isinstance(value, dict):
         result = {key: short_timeouts(item) for key, item in value.items()}
@@ -46,7 +51,7 @@ def short_timeouts(value):
     return value
 
 
-def playback_attributes(request_id):
+def playback_attributes(request_id) -> dict[str, Any]:
     """Build a fresh observation; REST and sensor overrides never share a dict."""
     stamp = dt_util.utcnow().isoformat()
     return {
@@ -65,7 +70,9 @@ def playback_attributes(request_id):
 
 
 class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    """Exercise living room fireplace tests behavior with deterministic native fixtures."""
+
+    async def asyncSetUp(self) -> None:
         package_path = ROOT / "packages/living_room_fireplace.yaml"
         self.assertTrue(package_path.exists(), "Projector fireplace action is missing")
         self.package = load_package(package_path)
@@ -94,7 +101,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         for name, config in self.package["script"].items():
             self.register_script(name, config)
 
-    def set_initial_states(self):
+    def set_initial_states(self) -> None:
         self.hass.states.async_set(KODI, "unavailable")
         self.hass.states.async_set(READINESS, "unavailable")
         self.hass.states.async_set(
@@ -110,7 +117,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "off")
         self.hass.states.async_set("sensor.kodi_service_state", "off")
 
-    def register_boundaries(self):
+    def register_boundaries(self) -> None:
         for domain, service in (
             ("script", "source_to_pc"),
             ("media_player", "turn_on"),
@@ -125,7 +132,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             supports_response=SupportsResponse.OPTIONAL,
         )
 
-    async def boundary(self, call):
+    async def boundary(self, call) -> Any:
         action = f"{call.domain}.{call.service}"
         self.calls.append((action, deepcopy(dict(call.data))))
         handlers = {
@@ -136,17 +143,18 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         }
         return await handlers.get(action, self.ignore_call)(call)
 
-    async def ignore_call(self, _call):
+    async def ignore_call(self, _call) -> None:
         return None
 
-    async def record_completion(self, _call):
+    async def record_completion(self, _call) -> None:
         self.completed.append(True)
 
-    async def power_on(self, _call):
+    async def power_on(self, _call) -> None:
         self.power_entered.set()
         await self.power_release.wait()
         if self.power_failure:
-            raise HomeAssistantError("Physical pair did not confirm power")
+            error_message = "Physical pair did not confirm power"
+            raise HomeAssistantError(error_message)
         self.counter += 1
         self.hass.states.async_set(
             PROJECTOR,
@@ -164,7 +172,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(KODI, "idle")
         self.power_returned.set()
 
-    async def start_playback(self, call):
+    async def start_playback(self, call) -> dict[str, Any]:
         payload = self.package["rest_command"]["host_kodi_fireplace"]["payload"]
         rendered = Template(payload, self.hass).async_render(
             dict(call.data), parse_result=False
@@ -187,7 +195,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             )
         return {"status": self.rest_status, "content": response}
 
-    async def refresh_readiness(self, call):
+    async def refresh_readiness(self, call) -> None:
         if READINESS not in call.data.get("entity_id", []):
             return
         # A separate HA readback must not inherit the REST response's verdict.
@@ -197,7 +205,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         }
         self.hass.states.async_set(READINESS, self.sensor_state, attributes)
 
-    def register_script(self, name, config):
+    def register_script(self, name, config) -> None:
         # Keep the real YAML and Script engine; only physical services are faked.
         sequence = short_timeouts(config["sequence"])
         if name == "living_room_fireplace":
@@ -211,7 +219,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.scripts[name] = script
 
-        async def run(call):
+        async def run(call) -> Any:
             if stack := script_stack_cv.get():
                 script_stack_cv.set(stack.copy())
             result = await script.async_run(dict(call.data), context=call.context)
@@ -221,7 +229,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             "script", name, run, supports_response=SupportsResponse.OPTIONAL
         )
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         if not hasattr(self, "hass"):
             return
         self.power_release.set()
@@ -230,7 +238,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_stop()
         self.temp.cleanup()
 
-    async def launch(self, request_id="voice-request"):
+    async def launch(self, request_id="voice-request") -> None:
         trace_clear()
         self.completed.clear()
         # None models a direct UI/Yandex script call with no request variable.
@@ -252,14 +260,14 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
                 for item in group
             ]
 
-    def launches(self):
+    def launches(self) -> list[Any]:
         return [
             data
             for action, data in self.calls
             if action == "rest_command.host_kodi_fireplace"
         ]
 
-    def assert_aborted(self):
+    def assert_aborted(self) -> None:
         self.assertEqual(self.completed, [])
         self.assertTrue(
             any(
@@ -268,7 +276,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             "Actual HA error stop was not reached",
         )
 
-    async def assert_readback_rejected(self, request_id="voice-request"):
+    async def assert_readback_rejected(self, request_id="voice-request") -> None:
         self.calls.clear()
         await self.launch(request_id)
         self.assert_aborted()
@@ -279,7 +287,9 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             "A valid REST receipt must reach the independent HA readback",
         )
 
-    async def test_waits_for_pair_and_kodi_then_confirms_same_request_youtube(self):
+    async def test_waits_for_pair_and_kodi_then_confirms_same_request_youtube(
+        self,
+    ) -> None:
         self.ready = False
         self.power_release.clear()
         operation = asyncio.create_task(self.launch())
@@ -311,19 +321,23 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.completed, [True])
 
-    async def test_pair_failure_never_opens_media(self):
+    async def test_pair_failure_never_opens_media(self) -> None:
         self.power_failure = True
         with self.assertRaises(HomeAssistantError):
             await self.launch()
         self.assertFalse(self.launches())
 
-    async def test_kodi_not_ready_is_an_explicit_failure_without_player_open(self):
+    async def test_kodi_not_ready_is_an_explicit_failure_without_player_open(
+        self,
+    ) -> None:
         self.ready = False
         await self.launch()
         self.assert_aborted()
         self.assertFalse(self.launches())
 
-    async def test_later_off_intent_cancels_pending_fireplace_without_playback(self):
+    async def test_later_off_intent_cancels_pending_fireplace_without_playback(
+        self,
+    ) -> None:
         self.ready = False
         operation = asyncio.create_task(self.launch())
         try:
@@ -350,38 +364,40 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_http_success_without_the_observed_unique_title_is_failure_and_never_retried(
         self,
-    ):
+    ) -> None:
         for state, title in ((None, None), ("playing", "/some/other/movie.webm")):
             with self.subTest(state=state, title=title):
                 self.native_state, self.native_title = state, title
                 await self.assert_readback_rejected()
 
-    async def test_http_200_without_actual_repeat_confirmation_is_an_error_stop(self):
+    async def test_http_200_without_actual_repeat_confirmation_is_an_error_stop(
+        self,
+    ) -> None:
         self.rest_overrides = {"repeat": "off"}
         await self.launch()
         self.assert_aborted()
         self.assertEqual(len(self.launches()), 1)
 
-    async def test_yandex_name_is_projector_specific(self):
+    async def test_yandex_name_is_projector_specific(self) -> None:
         entity = self.package["yandex_smart_home"]["entity_config"][
             "script.living_room_fireplace"
         ]
         self.assertEqual(entity["name"], "Камин на проекторе")
         self.assertEqual(entity["room"], "Гостиная")
 
-    async def test_fresh_previous_request_rest_receipt_is_rejected(self):
+    async def test_fresh_previous_request_rest_receipt_is_rejected(self) -> None:
         self.rest_overrides = {"request_id": "previous-command"}
         await self.launch("current-command")
         self.assert_aborted()
         self.assertEqual(len(self.launches()), 1)
 
-    async def test_rest_receipt_without_advancing_time_is_rejected(self):
+    async def test_rest_receipt_without_advancing_time_is_rejected(self) -> None:
         self.rest_overrides = {"progressing": False}
         await self.launch()
         self.assert_aborted()
         self.assertEqual(len(self.launches()), 1)
 
-    async def test_native_title_must_match_dynamic_verified_source(self):
+    async def test_native_title_must_match_dynamic_verified_source(self) -> None:
         title = "A different verified YouTube fireplace"
         self.rest_overrides = {"title": title}
         self.sensor_overrides = {"title": title}
@@ -390,7 +406,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.completed, [True])
         self.assertEqual(self.launches()[0]["fireplace_request"]["id"], "dynamic-title")
 
-    async def test_valid_rest_receipt_cannot_hide_invalid_sensor_proof(self):
+    async def test_valid_rest_receipt_cannot_hide_invalid_sensor_proof(self) -> None:
         invalid = (
             ("request_id", "previous-command"),
             ("request_id", None),
@@ -412,13 +428,17 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
                 self.sensor_overrides = {field: value}
                 await self.assert_readback_rejected("current-command")
 
-    async def test_valid_rest_receipt_cannot_hide_unavailable_or_stopped_sensor(self):
+    async def test_valid_rest_receipt_cannot_hide_unavailable_or_stopped_sensor(
+        self,
+    ) -> None:
         for state in ("unavailable", "idle", "paused"):
             with self.subTest(state=state):
                 self.sensor_state = state
                 await self.assert_readback_rejected()
 
-    async def test_native_player_must_be_playing_even_with_the_current_title(self):
+    async def test_native_player_must_be_playing_even_with_the_current_title(
+        self,
+    ) -> None:
         for state in ("idle", "paused", "buffering", "off", "unavailable"):
             with self.subTest(state=state):
                 self.native_state = state
@@ -426,7 +446,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_ui_or_yandex_calls_generate_fresh_correlated_request_ids(
         self,
-    ):
+    ) -> None:
         for _ in range(2):
             await self.launch(None)
             self.assertEqual(self.completed, [True])
@@ -437,7 +457,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             self.assertRegex(request_id, r"^[A-Za-z0-9_.:+-]{1,96}$")
         self.assertNotEqual(request_ids[0], request_ids[1])
 
-    async def test_queued_commands_keep_distinct_request_ids(self):
+    async def test_queued_commands_keep_distinct_request_ids(self) -> None:
         self.assertEqual(
             self.package["script"]["living_room_fireplace"]["mode"], "queued"
         )
@@ -452,14 +472,18 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             ["first-command", "second-command"],
         )
 
-    async def test_numeric_looking_request_ids_preserve_the_exact_caller_string(self):
+    async def test_numeric_looking_request_ids_preserve_the_exact_caller_string(
+        self,
+    ) -> None:
         for request_id in ("12345", "1.5", "+12345", "1e6"):
             with self.subTest(request_id=request_id):
                 await self.launch(request_id)
                 self.assertEqual(self.completed, [True])
                 self.assertEqual(self.current_request, request_id)
 
-    async def test_missing_pair_contract_never_touches_legacy_tv_power_route(self):
+    async def test_missing_pair_contract_never_touches_legacy_tv_power_route(
+        self,
+    ) -> None:
         for missing in (
             PROJECTOR,
             "binary_sensor.projector_hdmi_connected",

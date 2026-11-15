@@ -93,7 +93,8 @@ def capture(arguments: list[str]) -> str:
     """Read metadata and report failures without exposing raw stderr."""
     operation = operation_name(arguments)
     try:
-        result = subprocess.run(
+        # Internal Git/gh metadata argv only, passed without a shell.
+        result = subprocess.run(  # noqa: S603
             arguments,
             cwd=ROOT,
             text=True,
@@ -187,7 +188,8 @@ def watch_run(
     expired = threading.Event()
     with (
         tempfile.TemporaryFile(mode="w+", encoding="utf-8") as diagnostics,
-        subprocess.Popen(
+        # Fixed gh watch command and validated metadata IDs; no shell.
+        subprocess.Popen(  # noqa: S603
             arguments,
             cwd=ROOT,
             text=True,

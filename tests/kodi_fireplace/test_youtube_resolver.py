@@ -12,6 +12,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -20,7 +21,7 @@ SOURCE = ROOT / "scripts/host/ha_kodi_youtube_resolve.py"
 VIDEO_ID = "L_LUpnjgPso"
 
 
-def load_resolver():
+def load_resolver() -> Any:
     spec = importlib.util.spec_from_file_location(
         "ha_youtube_resolver_under_test", SOURCE
     )
@@ -30,7 +31,9 @@ def load_resolver():
 
 
 class ResolverTests(unittest.TestCase):
-    def setUp(self):
+    """Exercise ResolverTests contracts without a real Kodi process."""
+
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
@@ -97,12 +100,12 @@ class ResolverTests(unittest.TestCase):
         self.transport_patch.start()
         self.addCleanup(self.transport_patch.stop)
 
-    def set_generation(self, request_id):
+    def set_generation(self, request_id) -> Any:
         (self.state / "current-request.json").write_text(
             json.dumps({"request_id": request_id})
         )
 
-    def set_selection(self, active=None, pending=None, phase="preparing"):
+    def set_selection(self, active=None, pending=None, phase="preparing") -> Any:
         records = {}
         for role, attempt_id in (("active", active), ("pending", pending)):
             identity = None
@@ -130,7 +133,7 @@ class ResolverTests(unittest.TestCase):
             )
         )
 
-    def transport(self, _request, **_kwargs):
+    def transport(self, _request, **_kwargs: Any) -> Any:
         return io.BytesIO(
             json.dumps(
                 {
@@ -140,7 +143,7 @@ class ResolverTests(unittest.TestCase):
             ).encode()
         )
 
-    def player_responses(self, _video_id, *, opener):
+    def player_responses(self, _video_id, *, opener) -> Any:
         result = self.player()
         opener(
             "https://www.youtube.com/youtubei/v1/player",
@@ -159,7 +162,7 @@ class ResolverTests(unittest.TestCase):
             "android_testsuite",
         )
 
-    def build_fixture(self, formats, *, hdr):
+    def build_fixture(self, formats, *, hdr) -> Any:
         self.assertEqual(formats, [self.video, self.audio])
         self.assertFalse(hdr)
         owner = json.loads(
@@ -169,10 +172,10 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(owner["request_id"], self.request_id)
         return self.payload.decode()
 
-    def resolve(self):
+    def resolve(self) -> Any:
         return self.module.resolve(VIDEO_ID, self.request_id, self.home, self.log)
 
-    def test_prepared_result_has_exact_http_identity_and_private_digest(self):
+    def test_prepared_result_has_exact_http_identity_and_private_digest(self) -> None:
         result = self.resolve()
         expected = self.module.MANIFEST_BASE_URL + "?request_id=" + self.request_id
         self.assertEqual(result["file"], expected)
@@ -195,7 +198,7 @@ class ResolverTests(unittest.TestCase):
             {"request_id": self.request_id},
         )
 
-    def test_hd_without_aac_is_rejected_before_builder(self):
+    def test_hd_without_aac_is_rejected_before_builder(self) -> None:
         self.result["formats"] = [self.video]
         with self.assertRaisesRegex(
             self.module.ResolveError, "hd_audio_video_unavailable"
@@ -203,7 +206,7 @@ class ResolverTests(unittest.TestCase):
             self.resolve()
         self.builder.manifest.assert_not_called()
 
-    def test_audio_without_hd_video_is_rejected(self):
+    def test_audio_without_hd_video_is_rejected(self) -> None:
         self.result["formats"] = [
             self.audio,
             {**self.video, "height": 360, "width": 640},
@@ -214,7 +217,7 @@ class ResolverTests(unittest.TestCase):
             self.resolve()
         self.builder.manifest.assert_not_called()
 
-    def test_unsupported_codec_and_resolution_are_filtered(self):
+    def test_unsupported_codec_and_resolution_are_filtered(self) -> None:
         self.result["formats"] = [
             self.audio,
             self.video,
@@ -227,14 +230,14 @@ class ResolverTests(unittest.TestCase):
         )
         self.assertEqual(selected, [self.audio, self.video])
 
-    def test_stale_request_does_not_start_extraction(self):
+    def test_stale_request_does_not_start_extraction(self) -> None:
         self.set_generation(str(uuid4()))
         with self.assertRaisesRegex(self.module.ResolveError, "request_cancelled"):
             self.resolve()
         self.runtime_lookup.assert_not_called()
 
-    def test_cancel_during_extraction_cannot_publish(self):
-        def extract(*_a, **_kw):
+    def test_cancel_during_extraction_cannot_publish(self) -> None:
+        def extract(*_a: Any, **_kw: Any) -> Any:
             self.set_generation(str(uuid4()))
             return self.result
 
@@ -243,8 +246,8 @@ class ResolverTests(unittest.TestCase):
             self.resolve()
         self.assertFalse((self.state / "requests" / self.request_id).exists())
 
-    def test_cancel_during_builder_removes_own_unpublished_files(self):
-        def build(*args, **kwargs):
+    def test_cancel_during_builder_removes_own_unpublished_files(self) -> None:
+        def build(*args: Any, **kwargs: Any) -> Any:
             candidate = self.build_fixture(*args, **kwargs)
             self.set_generation(str(uuid4()))
             return candidate
@@ -254,13 +257,13 @@ class ResolverTests(unittest.TestCase):
             self.resolve()
         self.assertFalse((self.state / "requests" / self.request_id).exists())
 
-    def test_wrong_upstream_video_identity_cannot_publish(self):
+    def test_wrong_upstream_video_identity_cannot_publish(self) -> None:
         self.result["id"] = "different01"
         with self.assertRaisesRegex(self.module.ResolveError, "unexpected_video"):
             self.resolve()
         self.builder.manifest.assert_not_called()
 
-    def make_owned_request(self, request_id, age):
+    def make_owned_request(self, request_id, age) -> Any:
         directory = self.state / "requests" / request_id
         directory.mkdir(parents=True)
         (directory / "owner.json").write_text(
@@ -280,12 +283,12 @@ class ResolverTests(unittest.TestCase):
         os.utime(directory, (modified, modified))
         return directory
 
-    def assert_manifest_retained(self, directory):
+    def assert_manifest_retained(self, directory) -> None:
         manifest = directory / "manifest.mpd"
         self.assertTrue(manifest.is_file())
         self.assertEqual(manifest.read_text(), "<MPD/>")
 
-    def test_cleanup_preserves_current_and_unknown_files(self):
+    def test_cleanup_preserves_current_and_unknown_files(self) -> None:
         active = self.make_owned_request(self.request_id, age=200000)
         old = self.make_owned_request(str(uuid4()), age=200000)
         unknown = self.make_owned_request(str(uuid4()), age=200000)
@@ -300,7 +303,7 @@ class ResolverTests(unittest.TestCase):
         self.assertTrue(other.exists())
         self.assertFalse(old.exists())
 
-    def test_cleanup_bounds_obsolete_owned_request_count(self):
+    def test_cleanup_bounds_obsolete_owned_request_count(self) -> None:
         directories = [
             self.make_owned_request(str(uuid4()), age=60 + index) for index in range(4)
         ]
@@ -310,7 +313,7 @@ class ResolverTests(unittest.TestCase):
             [path.exists() for path in directories], [True, True, False, False]
         )
 
-    def test_failed_replacement_keeps_aged_active_manifest(self):
+    def test_failed_replacement_keeps_aged_active_manifest(self) -> None:
         active = self.make_owned_request(str(uuid4()), age=200000)
         self.set_selection(active=active.name, pending=self.request_id)
         self.result["formats"] = [self.audio]
@@ -322,7 +325,7 @@ class ResolverTests(unittest.TestCase):
         self.assertTrue((active / "descriptor.json").is_file())
         self.assert_manifest_retained(active)
 
-    def test_failed_replacement_keeps_count_evicted_active_manifest(self):
+    def test_failed_replacement_keeps_count_evicted_active_manifest(self) -> None:
         active = self.make_owned_request(str(uuid4()), age=300)
         newer = [
             self.make_owned_request(str(uuid4()), age=60 + index) for index in range(3)
@@ -340,7 +343,7 @@ class ResolverTests(unittest.TestCase):
         self.assert_manifest_retained(active)
         self.assertEqual([path.exists() for path in newer], [True, True, False])
 
-    def test_cleanup_preserves_pending_attempt_in_each_durable_phase(self):
+    def test_cleanup_preserves_pending_attempt_in_each_durable_phase(self) -> None:
         for phase in ("preparing", "prepared", "opening"):
             with self.subTest(phase=phase):
                 pending = self.make_owned_request(str(uuid4()), age=200000)
@@ -350,7 +353,7 @@ class ResolverTests(unittest.TestCase):
                 self.assert_manifest_retained(pending)
                 self.assertFalse(obsolete.exists())
 
-    def test_cleanup_skips_malformed_selection(self):
+    def test_cleanup_skips_malformed_selection(self) -> None:
         invalid_states = [
             "{",
             "[]",
@@ -369,26 +372,27 @@ class ResolverTests(unittest.TestCase):
                 self.module.cleanup_obsolete(self.state, time.time())
                 self.assert_manifest_retained(old)
 
-    def test_cleanup_skips_missing_selection(self):
+    def test_cleanup_skips_missing_selection(self) -> None:
         old = self.make_owned_request(str(uuid4()), age=200000)
         self.selection_path.unlink()
         self.module.cleanup_obsolete(self.state, time.time())
         self.assert_manifest_retained(old)
 
-    def test_cleanup_skips_unreadable_selection(self):
+    def test_cleanup_skips_unreadable_selection(self) -> None:
         old = self.make_owned_request(str(uuid4()), age=200000)
         read_json = self.module.read_json
 
-        def unavailable_selection(path, limit):
+        def unavailable_selection(path, limit) -> Any:
             if path == self.selection_path:
-                raise PermissionError("selection unavailable")
+                msg = "selection unavailable"
+                raise PermissionError(msg)
             return read_json(path, limit)
 
         with patch.object(self.module, "read_json", side_effect=unavailable_selection):
             self.module.cleanup_obsolete(self.state, time.time())
         self.assert_manifest_retained(old)
 
-    def test_cleanup_skips_symlink_selection(self):
+    def test_cleanup_skips_symlink_selection(self) -> None:
         old = self.make_owned_request(str(uuid4()), age=200000)
         target = self.home / "other-selection.json"
         self.selection_path.rename(target)
@@ -396,11 +400,11 @@ class ResolverTests(unittest.TestCase):
         self.module.cleanup_obsolete(self.state, time.time())
         self.assert_manifest_retained(old)
 
-    def test_cleanup_rechecks_new_active_selection_before_removal(self):
+    def test_cleanup_rechecks_new_active_selection_before_removal(self) -> None:
         old = self.make_owned_request(str(uuid4()), age=200000)
         remove = self.module.remove_obsolete_request
 
-        def select_before_removal(state, directory):
+        def select_before_removal(state, directory) -> Any:
             self.set_selection(active=directory.name)
             remove(state, directory)
 
@@ -410,11 +414,11 @@ class ResolverTests(unittest.TestCase):
             self.module.cleanup_obsolete(self.state, time.time())
         self.assert_manifest_retained(old)
 
-    def test_cleanup_rechecks_malformed_selection_before_removal(self):
+    def test_cleanup_rechecks_malformed_selection_before_removal(self) -> None:
         old = self.make_owned_request(str(uuid4()), age=200000)
         remove = self.module.remove_obsolete_request
 
-        def corrupt_before_removal(state, directory):
+        def corrupt_before_removal(state, directory) -> Any:
             self.selection_path.write_text("{")
             remove(state, directory)
 
@@ -424,7 +428,7 @@ class ResolverTests(unittest.TestCase):
             self.module.cleanup_obsolete(self.state, time.time())
         self.assert_manifest_retained(old)
 
-    def test_headers_never_retain_auth_or_cookies(self):
+    def test_headers_never_retain_auth_or_cookies(self) -> None:
         self.assertEqual(
             self.module.safe_headers(
                 {
@@ -438,7 +442,7 @@ class ResolverTests(unittest.TestCase):
             {"User-Agent": "public"},
         )
 
-    def test_invalid_identifiers_never_reach_runtime(self):
+    def test_invalid_identifiers_never_reach_runtime(self) -> None:
         for video_id, request_id in (
             (VIDEO_ID, "../other"),
             ("../other", self.request_id),
@@ -450,7 +454,7 @@ class ResolverTests(unittest.TestCase):
                 self.module.resolve(video_id, request_id, self.home, self.log)
         self.runtime_lookup.assert_not_called()
 
-    def test_failure_logs_do_not_expose_provider_exception(self):
+    def test_failure_logs_do_not_expose_provider_exception(self) -> None:
         log = Mock()
         argv = ["resolver", "--video-id", VIDEO_ID, "--request-id", self.request_id]
         with (
@@ -466,7 +470,7 @@ class ResolverTests(unittest.TestCase):
         self.assertNotIn("private-signed-url", str(log.mock_calls))
         log.finish.assert_called_once_with(1)
 
-    def test_cleanup_reclaims_owned_preparations_killed_before_descriptor(self):
+    def test_cleanup_reclaims_owned_preparations_killed_before_descriptor(self) -> None:
         active = self.make_owned_request(self.request_id, age=200000)
         (active / "descriptor.json").unlink()
         building = self.make_owned_request(str(uuid4()), age=200000)
@@ -487,7 +491,7 @@ class ResolverTests(unittest.TestCase):
         self.assertFalse(building.exists())
         self.assertFalse(published_mpd.exists())
 
-    def test_log_retention_preserves_recent_unknown_and_other_logs(self):
+    def test_log_retention_preserves_recent_unknown_and_other_logs(self) -> None:
         logs = self.home / "logs"
         logs.mkdir()
         now = time.time()

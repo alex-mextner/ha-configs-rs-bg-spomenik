@@ -1,21 +1,24 @@
 """Authenticated manifest delivery and fireplace request boundary regressions."""
 
+from __future__ import annotations
+
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
 import urllib.error
 import urllib.request
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def load(name):
+def load(name) -> Any:
     spec = importlib.util.spec_from_file_location(
         name, ROOT / "scripts/host" / (name + ".py")
     )
@@ -29,7 +32,9 @@ bridge = load("ha-host-actions")
 
 
 class ManifestFixture(unittest.TestCase):
-    def setUp(self):
+    """Exercise manifest fixture behavior with deterministic native fixtures."""
+
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.state = self.root / "youtube"
@@ -51,15 +56,17 @@ class ManifestFixture(unittest.TestCase):
         )
         self.query = {"request_id": [self.ident]}
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temp.cleanup()
 
 
 class ManifestCases(ManifestFixture):
-    def test_returns_only_the_current_verified_bytes(self):
+    """Exercise manifest cases behavior with deterministic native fixtures."""
+
+    def test_returns_only_the_current_verified_bytes(self) -> None:
         self.assertEqual(manifest.read_manifest(self.state, self.query), self.payload)
 
-    def test_stale_generation_and_modified_manifest_fail_closed(self):
+    def test_stale_generation_and_modified_manifest_fail_closed(self) -> None:
         self.media.write_bytes(b"changed")
         with self.assertRaisesRegex(manifest.ManifestError, "manifest_unavailable"):
             manifest.read_manifest(self.state, self.query)
@@ -70,7 +77,7 @@ class ManifestCases(ManifestFixture):
         with self.assertRaisesRegex(manifest.ManifestError, "request_cancelled"):
             manifest.read_manifest(self.state, self.query)
 
-    def test_rejects_duplicate_unknown_and_noncanonical_parameters(self):
+    def test_rejects_duplicate_unknown_and_noncanonical_parameters(self) -> None:
         for query in (
             {},
             {"request_id": [self.ident, self.ident]},
@@ -81,7 +88,7 @@ class ManifestCases(ManifestFixture):
             with self.subTest(query=query), self.assertRaises(manifest.ManifestError):
                 manifest.read_manifest(self.state, query)
 
-    def test_symlink_cannot_serve_an_unrelated_file(self):
+    def test_symlink_cannot_serve_an_unrelated_file(self) -> None:
         other = self.root / "private-secret"
         other.write_bytes(self.payload)
         self.media.unlink()
@@ -91,7 +98,9 @@ class ManifestCases(ManifestFixture):
 
 
 class ManifestHttpCases(ManifestFixture):
-    def setUp(self):
+    """Exercise manifest http cases behavior with deterministic native fixtures."""
+
+    def setUp(self) -> None:
         super().setUp()
         self.config = patch.object(bridge, "CONFIG_DIR", self.root)
         self.config.start()
@@ -100,12 +109,13 @@ class ManifestHttpCases(ManifestFixture):
         self.server = bridge.ThreadingHTTPServer(("127.0.0.1", 0), bridge.Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self.url = "http://127.0.0.1:%s/kodi/youtube/manifest?request_id=%s" % (
-            self.server.server_address[1],
-            self.ident,
+        # Every request below targets this fixture-owned loopback HTTP server.
+        port = self.server.server_address[1]
+        self.url = (
+            f"http://127.0.0.1:{port}/kodi/youtube/manifest?request_id={self.ident}"
         )
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
@@ -113,30 +123,33 @@ class ManifestHttpCases(ManifestFixture):
         self.config.stop()
         super().tearDown()
 
-    def test_manifest_requires_existing_bridge_auth_and_has_no_cache(self):
+    def test_manifest_requires_existing_bridge_auth_and_has_no_cache(self) -> None:
         for headers in ({}, {"X-HA-Host-Token": "wrong-token"}):
             with self.assertRaises(urllib.error.HTTPError) as failure:
-                urllib.request.urlopen(
-                    urllib.request.Request(self.url, headers=headers), timeout=2
+                urllib.request.urlopen(  # noqa: S310
+                    urllib.request.Request(  # noqa: S310
+                        self.url, headers=headers
+                    ),
+                    timeout=2,
                 )
             self.assertEqual(failure.exception.code, 403)
-        request = urllib.request.Request(
+        request = urllib.request.Request(  # noqa: S310
             self.url, headers={"X-HA-Host-Token": "fixture-token"}
         )
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310
             self.assertEqual(response.headers["Content-Type"], "application/dash+xml")
             self.assertEqual(response.headers["Cache-Control"], "no-store")
             self.assertEqual(response.read(), self.payload)
 
-    def test_cancelled_manifest_never_serves_previous_bytes(self):
+    def test_cancelled_manifest_never_serves_previous_bytes(self) -> None:
         (self.state / "current-request.json").write_text(
             json.dumps({"request_id": str(uuid4())})
         )
-        request = urllib.request.Request(
+        request = urllib.request.Request(  # noqa: S310
             self.url, headers={"X-HA-Host-Token": "fixture-token"}
         )
         with self.assertRaises(urllib.error.HTTPError) as failure:
-            urllib.request.urlopen(request, timeout=2)
+            urllib.request.urlopen(request, timeout=2)  # noqa: S310
         self.assertEqual(failure.exception.code, 404)
         body = failure.exception.read().decode()
         self.assertNotIn(str(self.root), body)
@@ -144,7 +157,9 @@ class ManifestHttpCases(ManifestFixture):
 
 
 class FireplaceApiCases(unittest.TestCase):
-    def test_invalid_action_or_request_has_no_controller_side_effect(self):
+    """Exercise fireplace api cases behavior with deterministic native fixtures."""
+
+    def test_invalid_action_or_request_has_no_controller_side_effect(self) -> None:
         payloads = (
             {},
             {"action": "start", "request_id": ""},
@@ -163,7 +178,9 @@ class FireplaceApiCases(unittest.TestCase):
                     bridge.kodi_fireplace(payload)
             controller.assert_not_called()
 
-    def test_request_id_is_forwarded_without_rewrite_and_legacy_start_still_works(self):
+    def test_request_id_is_forwarded_without_rewrite_and_legacy_start_still_works(
+        self,
+    ) -> None:
         with patch.object(bridge, "_fireplace_controller") as factory:
             controller = factory.return_value
             controller.start.return_value = {

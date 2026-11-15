@@ -1,10 +1,13 @@
 """Crash recovery and intent ordering against the real rotation controller."""
 
+from __future__ import annotations
+
 import json
 import multiprocessing
 import threading
 import time
 import traceback
+from typing import Any, Self
 from unittest.mock import patch
 
 import test_rotation as fixtures
@@ -17,10 +20,12 @@ class SimulatedCrashError(BaseException):
 class CrashLock:
     """Model process exit after stop admission and before its owner transition."""
 
-    def __enter__(self):
+    def __enter__(self) -> None:
+        """Enter the controlled fixture context."""
         raise SimulatedCrashError
 
-    def __exit__(self, *_args):
+    def __exit__(self, *_args: object) -> bool:
+        """Exit the fixture context without suppressing failures."""
         return False
 
 
@@ -32,7 +37,8 @@ class DelayedStopLock:
         self.waiting = threading.Event()
         self.release_stop = threading.Event()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
+        """Enter the controlled fixture context."""
         if threading.current_thread().name == "older-stop":
             self.waiting.set()
             if not self.release_stop.wait(5):
@@ -40,10 +46,11 @@ class DelayedStopLock:
         self.lock.acquire()
         return self
 
-    def __exit__(self, *_args) -> None:
+    def __exit__(self, *_args: object) -> None:
+        """Exit the fixture context without suppressing failures."""
         self.lock.release()
 
-    def acquire(self, **kwargs):
+    def acquire(self, **kwargs: Any) -> Any:
         return self.lock.acquire(**kwargs)
 
     def release(self) -> None:
@@ -56,7 +63,8 @@ def worker(call, results, errors, *, name="request") -> threading.Thread:
     def invoke() -> None:
         try:
             results.append(call())
-        except Exception as error:
+        # Capture thread exceptions for assertions in the joining test.
+        except Exception as error:  # noqa: BLE001
             errors.append(error)
 
     thread = threading.Thread(target=invoke, name=name)
@@ -78,7 +86,8 @@ class RecoveryCases(fixtures.FixtureBase):
             receive.close()
             try:
                 operation()
-            except BaseException:
+            # The child must report synthetic crashes as well as normal errors.
+            except BaseException:  # noqa: BLE001
                 send.send(traceback.format_exc())
             else:
                 send.send(None)
@@ -132,7 +141,7 @@ class RecoveryCases(fixtures.FixtureBase):
         controller.start("previous")
         old_attempt = self.selection()["active"]["attempt_id"]
 
-        def extraction_crash(_source, _deadline):
+        def extraction_crash(_source, _deadline) -> None:
             raise SimulatedCrashError
 
         controller._resolver = extraction_crash
@@ -150,17 +159,21 @@ class RecoveryCases(fixtures.FixtureBase):
     ) -> None:
         controller = self.multi()
         controller.start("previous")
-        with patch.object(controller._owner, "start", side_effect=SimulatedCrashError):
-            with self.assertRaises(SimulatedCrashError):
-                controller.start("prepared")
+        with (
+            patch.object(controller._owner, "start", side_effect=SimulatedCrashError),
+            self.assertRaises(SimulatedCrashError),
+        ):
+            controller.start("prepared")
         state = self.selection()
         playable_attempts = {
             state["active"]["attempt_id"],
             state["pending"]["attempt_id"],
         }
-        with patch.object(controller, "_lock", CrashLock()):
-            with self.assertRaises(SimulatedCrashError):
-                controller.stop()
+        with (
+            patch.object(controller, "_lock", CrashLock()),
+            self.assertRaises(SimulatedCrashError),
+        ):
+            controller.stop()
         controller.close()
         self.kodi.calls.clear()
         recovered = self.multi()
@@ -174,9 +187,11 @@ class RecoveryCases(fixtures.FixtureBase):
         controller = self.multi()
         controller.start("previous")
         active_attempt = self.selection()["active"]["attempt_id"]
-        with patch.object(controller, "_lock", CrashLock()):
-            with self.assertRaises(SimulatedCrashError):
-                controller.stop()
+        with (
+            patch.object(controller, "_lock", CrashLock()),
+            self.assertRaises(SimulatedCrashError),
+        ):
+            controller.stop()
         controller.close()
         recovered = self.multi()
         proof = recovered.observe()
@@ -249,7 +264,7 @@ class RecoveryCases(fixtures.FixtureBase):
         controller = self.multi()
         original = controller._rpc
 
-        def crash_after_open(method, params, deadline):
+        def crash_after_open(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.Open":
                 raise SimulatedCrashError
@@ -278,7 +293,7 @@ class RecoveryCases(fixtures.FixtureBase):
         previous_file = self.kodi.file
         original = controller._rpc
 
-        def crash_after_open(method, params, deadline):
+        def crash_after_open(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.Open":
                 raise SimulatedCrashError
@@ -291,7 +306,7 @@ class RecoveryCases(fixtures.FixtureBase):
         controller.close()
         native_rpc = self.kodi.rpc
 
-        def fixed_position(method, params, deadline):
+        def fixed_position(method, params, deadline) -> Any:
             result = native_rpc(method, params, deadline)
             if method == "Player.GetProperties":
                 result["time"] = {
@@ -318,7 +333,7 @@ class RecoveryCases(fixtures.FixtureBase):
         original = controller._rpc
         foreign = True
 
-        def audio_player(method, params, deadline):
+        def audio_player(method, params, deadline) -> Any:
             if foreign and method == "Player.GetActivePlayers":
                 return [{"playerid": 0, "type": "audio", "playertype": "internal"}]
             return original(method, params, deadline)
@@ -335,15 +350,17 @@ class RecoveryCases(fixtures.FixtureBase):
     def test_preparation_past_the_launch_deadline_never_opens(self) -> None:
         now, prepared = [100.0], []
 
-        def delayed(source, _deadline):
+        def delayed(source, _deadline) -> dict[str, Any]:
             prepared.append(source["id"])
             now[0] = 102.0
             return {"file": source["path"]}
 
         controller = self.multi(operation_timeout=1.0, resolver=delayed)
-        with patch.object(time, "monotonic", side_effect=lambda: now[0]):
-            with self.assertRaises(fixtures.fireplace.FireplaceError):
-                controller.start("expired")
+        with (
+            patch.object(time, "monotonic", side_effect=lambda: now[0]),
+            self.assertRaises(fixtures.fireplace.FireplaceError),
+        ):
+            controller.start("expired")
         self.assertEqual(prepared, ["local-0"])
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Open"])
 
@@ -355,7 +372,7 @@ class RecoveryCases(fixtures.FixtureBase):
         original = controller._rpc
         self.kodi.calls.clear()
 
-        def incomplete_item(method, params, deadline):
+        def incomplete_item(method, params, deadline) -> Any:
             if method == "Player.GetItem":
                 return {"item": {"label": "transition"}}
             return original(method, params, deadline)
@@ -372,7 +389,7 @@ class RecoveryCases(fixtures.FixtureBase):
     def test_stalled_source_with_uncertain_stop_is_never_retried(self) -> None:
         original = self.kodi.rpc
 
-        def stalled_and_lost_stop(method, params, deadline):
+        def stalled_and_lost_stop(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.GetProperties":
                 result["time"] = {
@@ -382,7 +399,8 @@ class RecoveryCases(fixtures.FixtureBase):
                     "milliseconds": 0,
                 }
             if method == "Player.Stop":
-                raise fixtures.fireplace.FireplaceError("rpc_unavailable")
+                error_message = "rpc_unavailable"
+                raise fixtures.fireplace.FireplaceError(error_message)
             return result
 
         self.kodi.rpc = stalled_and_lost_stop
@@ -396,11 +414,11 @@ class RecoveryCases(fixtures.FixtureBase):
             len([call for call in self.kodi.calls if call[0] == "Player.Open"]), 1
         )
 
-    def interrupted_first_open(self):
+    def interrupted_first_open(self) -> Any:
         controller = self.multi()
         original = controller._rpc
 
-        def crash_after_open(method, params, deadline):
+        def crash_after_open(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.Open":
                 raise SimulatedCrashError
@@ -419,7 +437,7 @@ class RecoveryCases(fixtures.FixtureBase):
         native = self.kodi.rpc
         readable = False
 
-        def transition(method, params, deadline):
+        def transition(method, params, deadline) -> Any:
             if method == "Player.GetItem" and not readable:
                 return {"item": {"label": "native transition"}}
             return native(method, params, deadline)
@@ -448,15 +466,17 @@ class RecoveryCases(fixtures.FixtureBase):
         controller = self.multi()
         persist = controller._owner._persist
 
-        def durable_arm_then_crash(receipt):
+        def durable_arm_then_crash(receipt) -> None:
             persist(receipt)
             raise SimulatedCrashError
 
-        with patch.object(
-            controller._owner, "_persist", side_effect=durable_arm_then_crash
+        with (
+            patch.object(
+                controller._owner, "_persist", side_effect=durable_arm_then_crash
+            ),
+            self.assertRaises(SimulatedCrashError),
         ):
-            with self.assertRaises(SimulatedCrashError):
-                controller.start("armed-crash")
+            controller.start("armed-crash")
         self.assertEqual(
             json.loads((self.root / "owner.json").read_text())["phase"], "armed"
         )
@@ -477,7 +497,7 @@ class RecoveryCases(fixtures.FixtureBase):
         observe = controller._owner.observe
         changed = False
 
-        def human_replacement(**options):
+        def human_replacement(**options: Any) -> Any:
             nonlocal changed
             if not changed:
                 changed = True
@@ -485,11 +505,13 @@ class RecoveryCases(fixtures.FixtureBase):
                 self.kodi.repeat = "off"
             return observe(**options)
 
-        with patch.object(controller._owner, "observe", side_effect=human_replacement):
-            with self.assertRaisesRegex(
+        with (
+            patch.object(controller._owner, "observe", side_effect=human_replacement),
+            self.assertRaisesRegex(
                 fixtures.fireplace.FireplaceError, "playback_changed"
-            ):
-                controller.start("interrupted-by-human")
+            ),
+        ):
+            controller.start("interrupted-by-human")
         self.assertEqual(self.kodi.file, "/human/movie.mkv")
         self.assertEqual(controller.status()["state"], "unknown")
         self.assertEqual(
@@ -504,7 +526,7 @@ class RecoveryCases(fixtures.FixtureBase):
         native = controller._rpc
         stop = controller._owner.stop
 
-        def stalled(method, params, deadline):
+        def stalled(method, params, deadline) -> Any:
             result = native(method, params, deadline)
             if method == "Player.GetProperties":
                 result["time"] = {
@@ -515,16 +537,18 @@ class RecoveryCases(fixtures.FixtureBase):
                 }
             return result
 
-        def human_replacement(**options):
+        def human_replacement(**options: Any) -> Any:
             self.kodi.file = "/human/movie.mkv"
             return stop(**options)
 
         controller._rpc = stalled
-        with patch.object(controller._owner, "stop", side_effect=human_replacement):
-            with self.assertRaisesRegex(
+        with (
+            patch.object(controller._owner, "stop", side_effect=human_replacement),
+            self.assertRaisesRegex(
                 fixtures.fireplace.FireplaceError, "stop_unconfirmed"
-            ):
-                controller.start("stalled")
+            ),
+        ):
+            controller.start("stalled")
         self.assertEqual(self.kodi.file, "/human/movie.mkv")
         self.assertEqual(
             sum(method == "Player.Open" for method, _ in self.kodi.calls), 1

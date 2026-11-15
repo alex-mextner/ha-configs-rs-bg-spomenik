@@ -1,11 +1,18 @@
 """Durable fireplace selection and playback evidence regressions."""
 
+from __future__ import annotations
+
 import hashlib
 import importlib.util
-from pathlib import Path
+import json
 import tempfile
+import threading
 import time
 import unittest
+from pathlib import Path
+from typing import Any, Self
+from unittest.mock import Mock, patch
+from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
@@ -16,14 +23,16 @@ spec.loader.exec_module(fireplace)
 
 
 class Kodi:
-    def __init__(self):
+    """Model kodi state and controlled responses for regression checks."""
+
+    def __init__(self) -> None:
         self.file = None
         self.repeat = "off"
         self.speed = 0
         self.started = time.monotonic()
         self.calls = []
 
-    def rpc(self, method, params, deadline):
+    def rpc(self, method, params, deadline) -> Any:
         self.calls.append((method, dict(params)))
         if method == "Player.GetActivePlayers":
             return (
@@ -73,7 +82,9 @@ class Kodi:
 
 
 class FixtureBase(unittest.TestCase):
-    def setUp(self):
+    """Exercise fixture base behavior with deterministic native fixtures."""
+
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.media = self.root / "one.webm"
@@ -82,12 +93,12 @@ class FixtureBase(unittest.TestCase):
         self.kodi = Kodi()
         self.controllers = []
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         for controller in self.controllers:
             controller.close()
         self.temp.cleanup()
 
-    def controller(self):
+    def controller(self) -> Any:
         controller = fireplace.FireplaceController(
             self.kodi.rpc,
             self.root / "owner.json",
@@ -102,7 +113,9 @@ class FixtureBase(unittest.TestCase):
 
 
 class RotationRegression(FixtureBase):
-    def test_a_second_success_cannot_reuse_the_only_source(self):
+    """Exercise rotation regression behavior with deterministic native fixtures."""
+
+    def test_a_second_success_cannot_reuse_the_only_source(self) -> None:
         controller = self.controller()
         self.assertEqual(controller.start()["state"], "playing")
         with self.assertRaises(
@@ -111,7 +124,7 @@ class RotationRegression(FixtureBase):
         ):
             controller.start()
 
-    def test_restart_cannot_forget_the_last_successful_source(self):
+    def test_restart_cannot_forget_the_last_successful_source(self) -> None:
         controller = self.controller()
         self.assertEqual(controller.start()["state"], "playing")
         controller.close()
@@ -124,7 +137,9 @@ class RotationRegression(FixtureBase):
 
 
 class RotationCases(FixtureBase):
-    def multi(self, **options):
+    """Exercise rotation cases behavior with deterministic native fixtures."""
+
+    def multi(self, **options: Any) -> Any:
         sources = []
         for index in range(3):
             path = self.root / (str(index) + ".webm")
@@ -144,7 +159,7 @@ class RotationCases(FixtureBase):
             "operation_timeout": 2,
             "poll_interval": 0.01,
             "progress_interval": 0.02,
-            "chooser": lambda items: None,
+            "chooser": lambda _items: None,
         }
         defaults.update(options)
         controller = fireplace.FireplaceController(
@@ -153,7 +168,7 @@ class RotationCases(FixtureBase):
         self.controllers.append(controller)
         return controller
 
-    def test_three_commands_advance_and_match_their_own_request(self):
+    def test_three_commands_advance_and_match_their_own_request(self) -> None:
         controller = self.multi()
         proofs = [controller.start("request-" + str(index)) for index in range(3)]
         self.assertEqual(
@@ -166,7 +181,7 @@ class RotationCases(FixtureBase):
             self.assertEqual(value["repeat"], "one")
             self.assertGreaterEqual(value["observed_at"], value["launch_started_at"])
 
-    def test_stop_and_restart_preserve_selection_history_and_prior_repeat(self):
+    def test_stop_and_restart_preserve_selection_history_and_prior_repeat(self) -> None:
         self.kodi.repeat = "all"
         controller = self.multi()
         first = controller.start("first")
@@ -176,30 +191,33 @@ class RotationCases(FixtureBase):
         second = self.multi().start("second")
         self.assertNotEqual(first["source_id"], second["source_id"])
 
-    def test_failed_resolution_skips_source_and_records_only_success(self):
+    def test_failed_resolution_skips_source_and_records_only_success(self) -> None:
         attempted = []
 
-        def resolve(source, deadline):
+        def resolve(source, _deadline) -> dict[str, Any]:
             attempted.append(source["id"])
             if source["id"] == "local-0":
-                raise fireplace.SourceUnavailable("missing_video")
+                error_message = "missing_video"
+                raise fireplace.SourceUnavailable(error_message)
             return {"file": source["path"]}
 
         controller = self.multi(resolver=resolve)
         proof = controller.start("fallback")
         self.assertEqual(attempted, ["local-0", "local-1"])
         self.assertEqual(proof["source_id"], "local-1")
-        import json
 
         state = json.loads((self.root / "fireplace-selection.json").read_text())
         self.assertEqual(state["last_successful_source_id"], "local-1")
 
-    def test_failed_new_command_does_not_relabel_previous_playback_as_success(self):
+    def test_failed_new_command_does_not_relabel_previous_playback_as_success(
+        self,
+    ) -> None:
         controller = self.multi()
         controller.start("old")
 
-        def unavailable(source, deadline):
-            raise fireplace.SourceUnavailable("unavailable")
+        def unavailable(_source, _deadline) -> None:
+            error_message = "unavailable"
+            raise fireplace.SourceUnavailable(error_message)
 
         controller._resolver = unavailable
         with self.assertRaises(fireplace.FireplaceError):
@@ -209,24 +227,25 @@ class RotationCases(FixtureBase):
         self.assertEqual(controller.status()["request_id"], "new")
         self.assertFalse(controller.status()["progressing"])
 
-    def test_status_is_responsive_and_concurrent_start_is_explicitly_busy(self):
-        import threading
+    def test_status_is_responsive_and_concurrent_start_is_explicitly_busy(self) -> None:
 
         entered, release = threading.Event(), threading.Event()
         errors = []
 
-        def resolve(source, deadline):
+        def resolve(source, _deadline) -> dict[str, Any]:
             entered.set()
             if not release.wait(1):
-                raise fireplace.SourceUnavailable("test_timeout")
+                error_message = "test_timeout"
+                raise fireplace.SourceUnavailable(error_message)
             return {"file": source["path"]}
 
         controller = self.multi(resolver=resolve)
 
-        def launch():
+        def launch() -> None:
             try:
                 controller.start("running")
-            except Exception as error:
+            # Return worker failures to the joining test for assertions.
+            except Exception as error:  # noqa: BLE001
                 errors.append(error)
 
         worker = threading.Thread(target=launch)
@@ -247,13 +266,16 @@ class RotationCases(FixtureBase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
 
-    def test_ambiguous_open_is_not_retried_or_reported_as_a_definitive_failure(self):
+    def test_ambiguous_open_is_not_retried_or_reported_as_a_definitive_failure(
+        self,
+    ) -> None:
         original = self.kodi.rpc
 
-        def uncertain(method, params, deadline):
+        def uncertain(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.Open":
-                raise OSError("ack lost")
+                error_message = "ack lost"
+                raise OSError(error_message)
             return result
 
         self.kodi.rpc = uncertain
@@ -267,21 +289,23 @@ class RotationCases(FixtureBase):
         self.assertEqual(controller.status()["request_id"], "uncertain")
         self.assertFalse(controller.status()["progressing"])
 
-    def test_invalid_request_never_opens_media(self):
+    def test_invalid_request_never_opens_media(self) -> None:
         controller = self.multi()
         for ident in ("", "x" * 97, "has space", "../path", 17, False):
             with self.assertRaisesRegex(fireplace.FireplaceError, "invalid_request_id"):
                 controller.start(ident)
         self.assertFalse(self.kodi.calls)
 
-    def test_corrupt_history_fails_closed(self):
+    def test_corrupt_history_fails_closed(self) -> None:
         (self.root / "fireplace-selection.json").write_text("{bad")
         controller = self.multi()
         with self.assertRaisesRegex(fireplace.FireplaceError, "selection_unreadable"):
             controller.start("request")
         self.assertFalse(self.kodi.calls)
 
-    def test_foreign_video_restores_prior_repeat_and_never_leaks_its_title(self):
+    def test_foreign_video_restores_prior_repeat_and_never_leaks_its_title(
+        self,
+    ) -> None:
         controller = self.multi()
         controller.start("own")
         self.kodi.file = "/private/secret-movie.mkv"
@@ -290,10 +314,10 @@ class RotationCases(FixtureBase):
         self.assertFalse(value["owned"])
         self.assertNotIn("secret-movie", str(value))
 
-    def test_stalled_identified_source_is_stopped_before_failover(self):
+    def test_stalled_identified_source_is_stopped_before_failover(self) -> None:
         original = self.kodi.rpc
 
-        def stalled_first(method, params, deadline):
+        def stalled_first(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if (
                 method == "Player.GetProperties"
@@ -318,25 +342,25 @@ class RotationCases(FixtureBase):
             if method in {"Player.Open", "Player.Stop"}
         ]
         self.assertEqual(mutations, ["Player.Open", "Player.Stop", "Player.Open"])
-        import json
 
         state = json.loads((self.root / "fireplace-selection.json").read_text())
         self.assertEqual(state["last_successful_source_id"], "local-1")
 
-    def test_attempt_generation_is_canonical_and_invalidated_after_failed_source(self):
-        import json
-        from uuid import UUID
+    def test_attempt_generation_is_canonical_and_invalidated_after_failed_source(
+        self,
+    ) -> None:
 
         generations = []
 
-        def resolve(source, deadline):
+        def resolve(source, _deadline) -> dict[str, Any]:
             generation = json.loads(
                 (self.root / "youtube/current-request.json").read_text()
             )["request_id"]
             self.assertEqual(str(UUID(generation)), generation)
             generations.append(generation)
             if len(generations) == 1:
-                raise fireplace.SourceUnavailable("not_found")
+                error_message = "not_found"
+                raise fireplace.SourceUnavailable(error_message)
             return {"file": source["path"]}
 
         controller = self.multi(resolver=resolve)
@@ -348,7 +372,7 @@ class RotationCases(FixtureBase):
         ]
         self.assertNotIn(final, generations)
 
-    def test_corrupt_history_remains_unchanged_after_stop_and_observation(self):
+    def test_corrupt_history_remains_unchanged_after_stop_and_observation(self) -> None:
         history = self.root / "fireplace-selection.json"
         history.write_text("{unreadable-state")
         controller = self.multi()
@@ -358,19 +382,19 @@ class RotationCases(FixtureBase):
         self.assertEqual(history.read_text(), "{unreadable-state")
         self.assertEqual(self.kodi.calls, [])
 
-    def test_crash_after_preparation_preserves_previous_owned_source(self):
-        import json
-        from unittest.mock import patch
+    def test_crash_after_preparation_preserves_previous_owned_source(self) -> None:
 
         class Crash(BaseException):
-            pass
+            """Exercise crash behavior with deterministic native fixtures."""
 
         controller = self.multi()
         previous = controller.start("previous")
         old_file = self.kodi.file
-        with patch.object(controller._owner, "start", side_effect=Crash):
-            with self.assertRaises(Crash):
-                controller.start("prepared")
+        with (
+            patch.object(controller._owner, "start", side_effect=Crash),
+            self.assertRaises(Crash),
+        ):
+            controller.start("prepared")
         state = json.loads((self.root / "fireplace-selection.json").read_text())
         self.assertEqual(state["active"]["source_id"], previous["source_id"])
         self.assertEqual(state["pending"]["phase"], "prepared")
@@ -392,18 +416,18 @@ class RotationCases(FixtureBase):
             ]
         )
 
-    def test_crash_after_open_recovers_actual_candidate_identity(self):
+    def test_crash_after_open_recovers_actual_candidate_identity(self) -> None:
         class Crash(BaseException):
-            pass
+            """Exercise crash behavior with deterministic native fixtures."""
 
         controller = self.multi()
         controller.start("previous")
         original = controller._rpc
 
-        def crash_after_open(method, params, deadline):
+        def crash_after_open(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.Open":
-                raise Crash()
+                raise Crash
             return result
 
         controller._rpc = crash_after_open
@@ -418,15 +442,16 @@ class RotationCases(FixtureBase):
         self.assertEqual(proof["request_id"], "new-command")
         self.assertTrue(proof["progressing"])
 
-    def test_lost_stop_ack_immediately_clears_success_evidence(self):
+    def test_lost_stop_ack_immediately_clears_success_evidence(self) -> None:
         controller = self.multi()
         controller.start("own")
         original = controller._rpc
 
-        def lost_stop(method, params, deadline):
+        def lost_stop(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.Stop":
-                raise OSError("lost acknowledgement")
+                error_message = "lost acknowledgement"
+                raise OSError(error_message)
             return result
 
         controller._rpc = lost_stop
@@ -437,8 +462,8 @@ class RotationCases(FixtureBase):
         self.assertFalse(proof["progressing"])
         self.assertFalse(proof["file_matches"])
 
-    def test_launch_budget_does_not_reduce_later_cleanup_budget(self):
-        def delayed(source, deadline):
+    def test_launch_budget_does_not_reduce_later_cleanup_budget(self) -> None:
+        def delayed(source, _deadline) -> dict[str, Any]:
             time.sleep(0.12)
             return {"file": source["path"]}
 
@@ -449,10 +474,10 @@ class RotationCases(FixtureBase):
         controller.stop()
         self.assertEqual(self.kodi.repeat, "off")
 
-    def test_native_title_takes_precedence_over_kodi_label(self):
+    def test_native_title_takes_precedence_over_kodi_label(self) -> None:
         original = self.kodi.rpc
 
-        def native_title(method, params, deadline):
+        def native_title(method, params, deadline) -> Any:
             result = original(method, params, deadline)
             if method == "Player.GetItem":
                 self.assertIn("title", params["properties"])
@@ -465,8 +490,7 @@ class RotationCases(FixtureBase):
         proof = self.multi().start("title-proof")
         self.assertEqual(proof["title"], "Actual native title")
 
-    def test_failed_preparation_restores_current_manifest_generation(self):
-        import json
+    def test_failed_preparation_restores_current_manifest_generation(self) -> None:
 
         controller = self.multi()
         original = controller.start("original")
@@ -474,8 +498,9 @@ class RotationCases(FixtureBase):
         original_attempt = json.loads(generation.read_text())["request_id"]
         original_file = self.kodi.file
 
-        def unavailable(source, deadline):
-            raise fireplace.SourceUnavailable("provider_unavailable")
+        def unavailable(_source, _deadline) -> None:
+            error_message = "provider_unavailable"
+            raise fireplace.SourceUnavailable(error_message)
 
         controller._resolver = unavailable
         with self.assertRaisesRegex(fireplace.FireplaceError, "sources_unavailable"):
@@ -489,8 +514,9 @@ class RotationCases(FixtureBase):
         self.assertEqual(controller.status()["request_id"], "replacement")
         self.assertEqual(controller.status()["state"], "error")
 
-    def test_uncertain_replacement_never_revives_previous_manifest_generation(self):
-        import json
+    def test_uncertain_replacement_never_revives_previous_manifest_generation(
+        self,
+    ) -> None:
 
         controller = self.multi()
         controller.start("original")
@@ -498,10 +524,11 @@ class RotationCases(FixtureBase):
         original_attempt = json.loads(generation.read_text())["request_id"]
         original_rpc = controller._rpc
 
-        def lost_open(method, params, deadline):
+        def lost_open(method, params, deadline) -> Any:
             result = original_rpc(method, params, deadline)
             if method == "Player.Open":
-                raise OSError("lost acknowledgement")
+                error_message = "lost acknowledgement"
+                raise OSError(error_message)
             return result
 
         controller._rpc = lost_open
@@ -512,21 +539,21 @@ class RotationCases(FixtureBase):
         )
         self.assertEqual(controller.status()["state"], "unknown")
 
-    def test_stop_during_preparation_prevents_any_late_open(self):
-        import threading
+    def test_stop_during_preparation_prevents_any_late_open(self) -> None:
 
         entered, release = threading.Event(), threading.Event()
         errors, stopped = [], []
 
-        def resolve(source, deadline):
+        def resolve(source, _deadline) -> dict[str, Any]:
             entered.set()
             if not release.wait(1):
-                raise fireplace.SourceUnavailable("test_timeout")
+                error_message = "test_timeout"
+                raise fireplace.SourceUnavailable(error_message)
             return {"file": source["path"]}
 
         controller = self.multi(resolver=resolve)
 
-        def launch():
+        def launch() -> None:
             try:
                 controller.start("cancel-me")
             except fireplace.FireplaceError as error:
@@ -551,8 +578,7 @@ class RotationCases(FixtureBase):
         self.assertFalse(stopped[0]["owned"])
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Open"])
 
-    def test_stop_at_launch_admission_is_never_cleared_by_launch(self):
-        import threading
+    def test_stop_at_launch_admission_is_never_cleared_by_launch(self) -> None:
 
         admitted, release, stop_entered = (threading.Event() for _ in range(3))
         errors, stopped = [], []
@@ -560,27 +586,32 @@ class RotationCases(FixtureBase):
         original_lock = controller._lock
 
         class AdmissionLock:
-            def acquire(self, blocking=True):
+            """Exercise admission lock behavior with deterministic native fixtures."""
+
+            # Match threading.Lock.acquire for the injected lock fixture.
+            def acquire(self, blocking=True) -> Any:  # noqa: FBT002
                 acquired = original_lock.acquire(blocking=blocking)
                 if acquired and not admitted.is_set():
                     admitted.set()
                     release.wait(1)
                 return acquired
 
-            def release(self):
+            def release(self) -> None:
                 original_lock.release()
 
-            def __enter__(self):
+            def __enter__(self) -> Self:
+                """Enter the controlled fixture context."""
                 self.acquire()
                 return self
 
-            def __exit__(self, *args):
+            def __exit__(self, *args: object) -> None:
+                """Exit the fixture context without suppressing failures."""
                 original_lock.release()
 
         controller._lock = AdmissionLock()
         original_candidates = controller._candidates
 
-        def candidates_after_stop():
+        def candidates_after_stop() -> Any:
             self.assertTrue(
                 controller._cancelled.wait(1), "Admitted launch erased the newer stop"
             )
@@ -588,13 +619,13 @@ class RotationCases(FixtureBase):
 
         controller._candidates = candidates_after_stop
 
-        def launch():
+        def launch() -> None:
             try:
                 controller.start("admission-race")
             except fireplace.FireplaceError as error:
                 errors.append(str(error))
 
-        def stop():
+        def stop() -> None:
             stop_entered.set()
             stopped.append(controller.stop())
 
@@ -617,20 +648,19 @@ class RotationCases(FixtureBase):
         self.assertFalse(stopped[0]["owned"])
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Open"])
 
-    def test_replacement_waits_for_monitor_instead_of_reporting_busy(self):
-        import threading
+    def test_replacement_waits_for_monitor_instead_of_reporting_busy(self) -> None:
 
         controller = self.multi()
         controller.start("first")
         entered, release, finished = (threading.Event() for _ in range(3))
         proofs, errors = [], []
 
-        def observe():
+        def observe() -> None:
             with controller._lock:
                 entered.set()
                 release.wait(1)
 
-        def launch():
+        def launch() -> None:
             try:
                 proofs.append(controller.start("after-observation"))
             except fireplace.FireplaceError as error:
@@ -654,7 +684,7 @@ class RotationCases(FixtureBase):
         self.assertEqual(errors, [])
         self.assertEqual(proofs[0]["source_id"], "local-1")
 
-    def test_unleased_candidate_stop_accepts_real_kodi_player_metadata(self):
+    def test_unleased_candidate_stop_accepts_real_kodi_player_metadata(self) -> None:
         controller = self.multi()
         target = str(self.media)
         self.kodi.file, self.kodi.speed = target, 1
@@ -670,8 +700,7 @@ class RotationCases(FixtureBase):
             sum(method == "Player.Stop" for method, _ in self.kodi.calls), 1
         )
 
-    def test_prepared_recovery_never_reverses_a_newer_cancellation(self):
-        import json
+    def test_prepared_recovery_never_reverses_a_newer_cancellation(self) -> None:
 
         controller = self.multi()
         controller.start("active")
@@ -685,24 +714,24 @@ class RotationCases(FixtureBase):
         self.assertEqual(json.loads(generation.read_text()), cancellation)
         self.assertIsNone(controller._pending)
 
-    def test_pre_open_failure_is_definitive_and_restores_active_generation(self):
-        import json
-        from unittest.mock import patch
+    def test_pre_open_failure_is_definitive_and_restores_active_generation(
+        self,
+    ) -> None:
 
         controller = self.multi()
         controller.start("active")
         generation = self.root / "youtube/current-request.json"
         active_generation = json.loads(generation.read_text())
         previous_file = self.kodi.file
-        with patch.object(
-            controller._owner,
-            "start",
-            side_effect=fireplace.FireplaceError("previous_owner_pending"),
+        with (
+            patch.object(
+                controller._owner,
+                "start",
+                side_effect=fireplace.FireplaceError("previous_owner_pending"),
+            ),
+            self.assertRaisesRegex(fireplace.FireplaceError, "sources_unavailable"),
         ):
-            with self.assertRaisesRegex(
-                fireplace.FireplaceError, "sources_unavailable"
-            ):
-                controller.start("pre-open-failed")
+            controller.start("pre-open-failed")
         self.assertEqual(controller.status()["state"], "error")
         observed_generation = json.loads(generation.read_text())
         self.assertEqual(
@@ -717,8 +746,7 @@ class RotationCases(FixtureBase):
             sum(method == "Player.Open" for method, _ in self.kodi.calls), 1
         )
 
-    def test_corrupt_owner_fails_before_source_preparation(self):
-        from unittest.mock import Mock
+    def test_corrupt_owner_fails_before_source_preparation(self) -> None:
 
         (self.root / "owner.json").write_text("unreadable owner")
         resolver = Mock()
@@ -729,7 +757,7 @@ class RotationCases(FixtureBase):
         resolver.assert_not_called()
         self.assertEqual(self.kodi.calls, [])
 
-    def test_observation_cannot_republish_playing_after_stop_intent(self):
+    def test_observation_cannot_republish_playing_after_stop_intent(self) -> None:
         controller = self.multi()
         controller.start("active")
         controller._cancelled.set()

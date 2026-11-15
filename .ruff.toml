@@ -51,6 +51,14 @@ ignore = [
 # This standalone entry point is launched by its path in a hyphenated directory.
 "scripts/chatgpt-native/bridge.py" = ["INP001"]
 
+# The installed system service executes this stable hyphenated script path.
+# Renaming it as an importable module would change the deployment interface.
+"scripts/host/ha-host-actions.py" = ["N999"]
+
+# Kodi loads this entry point by path inside its addon-ID directory,
+# rather than importing that dotted directory as a Python package.
+"scripts/host/kodi/plugin.video.hayoutube/default.py" = ["INP001"]
+
 [lint.flake8-pytest-style]
 fixture-parentheses = false
 

@@ -1,9 +1,13 @@
 """Repeat ownership during native transitions and expired durable writes."""
 
+from __future__ import annotations
+
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import test_owned_playback as fixtures
+from test_manifest_http import bridge
 
 
 class OwnerRecoveryCases(unittest.TestCase):
@@ -48,12 +52,12 @@ class OwnerRecoveryCases(unittest.TestCase):
             persist(receipt)
             now[0] = 102.0
 
-        with patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]):
-            with patch.object(
-                self.controller, "_persist", side_effect=store_then_expire
-            ):
-                with self.assertRaises(self.module.FireplaceError):
-                    self.controller.start()
+        with (
+            patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(self.controller, "_persist", side_effect=store_then_expire),
+            self.assertRaises(self.module.FireplaceError),
+        ):
+            self.controller.start()
         self.assertFalse(self.receipt.exists())
         self.assertNotIn("Player.SetRepeat", [method for method, _ in self.kodi.calls])
         self.assertEqual(self.kodi.repeat, "off")
@@ -62,16 +66,18 @@ class OwnerRecoveryCases(unittest.TestCase):
         now = [100.0]
         read = self.controller._read
 
-        def read_then_expire(deadline):
+        def read_then_expire(deadline) -> Any:
             current = read(deadline)
             if self.controller._owner is not None:
                 now[0] = 102.0
             return current
 
-        with patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]):
-            with patch.object(self.controller, "_read", side_effect=read_then_expire):
-                with self.assertRaises(self.module.FireplaceError):
-                    self.controller.start()
+        with (
+            patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(self.controller, "_read", side_effect=read_then_expire),
+            self.assertRaises(self.module.FireplaceError),
+        ):
+            self.controller.start()
         self.assertFalse(self.receipt.exists())
         self.assertNotIn("Player.SetRepeat", [method for method, _ in self.kodi.calls])
         self.assertEqual(self.kodi.repeat, "off")
@@ -87,17 +93,16 @@ class OwnerRecoveryCases(unittest.TestCase):
     def test_actual_bridge_expiry_before_setrepeat_drops_the_unmutated_arm(
         self,
     ) -> None:
-        from test_manifest_http import bridge
 
         now = [100.0]
         dispatched = []
 
-        def transport(method, params, *, timeout):
+        def transport(method, params, *, timeout) -> dict[str, Any]:
             dispatched.append(method)
             result = self.kodi.rpc(method, params, timeout)
             return {"ok": True, "body": {"result": result}}
 
-        def callback(method, params, deadline):
+        def callback(method, params, deadline) -> Any:
             if method == "Player.SetRepeat":
                 now[0] = deadline
             return bridge._fireplace_rpc(method, params, deadline)
@@ -107,18 +112,20 @@ class OwnerRecoveryCases(unittest.TestCase):
             patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]),
             patch.object(bridge, "_fireplace_module", self.module),
             patch.object(bridge, "kodi_jsonrpc", side_effect=transport),
+            self.assertRaises(self.module.FireplaceError),
         ):
-            with self.assertRaises(self.module.FireplaceError):
-                self.controller.start()
+            self.controller.start()
         self.assertNotIn("Player.SetRepeat", dispatched)
         self.assertFalse(self.receipt.exists())
         self.assertEqual(self.kodi.repeat, "off")
 
-    def test_foreign_repeat_unknown_does_not_supersede_an_unchanged_video_mode(self):
+    def test_foreign_repeat_unknown_does_not_supersede_an_unchanged_video_mode(
+        self,
+    ) -> None:
         self.controller.start()
         reads = []
 
-        def transition(method, _params):
+        def transition(method, _params) -> None:
             if method != "Player.GetActivePlayers":
                 return
             reads.append(True)
@@ -136,7 +143,7 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.kodi.before_call = None
         self.assertEqual(len(reads), 3)
         self.assertTrue(proof["owned"])
-        self.assertIsNot(proof.get("repeat_superseded"), True)
+        self.assertFalse(proof.get("repeat_superseded") is True)
         self.assertFalse(proof["stopped"])
         self.assertTrue(self.receipt.exists())
         self.assertEqual(self.kodi.repeat, "one")
@@ -144,13 +151,13 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.assertEqual(self.kodi.repeat, "off")
         self.assertFalse(self.receipt.exists())
 
-    def test_final_stop_read_reconfirms_a_returning_restoration_candidate(self):
+    def test_final_stop_read_reconfirms_a_returning_restoration_candidate(self) -> None:
         self.controller.start()
         self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
         self.controller._idle_since = self.module.time.monotonic() - 3
         persist = self.controller._persist
 
-        def defer_restoration(receipt):
+        def defer_restoration(receipt) -> None:
             persist(receipt)
             if receipt["phase"] == "restoring":
                 self.kodi.active, self.kodi.file, self.kodi.speed = 0, "/human/audio", 1
@@ -162,7 +169,7 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.kodi.calls.clear()
         reads = []
 
-        def return_after_foreign_observation(method, _params):
+        def return_after_foreign_observation(method, _params) -> None:
             if method != "Player.GetActivePlayers":
                 return
             reads.append(True)
@@ -183,6 +190,6 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.assertFalse(proof["stopped"])
         self.kodi.repeat = "off"
         released = self.controller.stop()
-        self.assertIs(released.get("repeat_superseded"), True)
+        self.assertTrue(released.get("repeat_superseded") is True)
         self.assertEqual(self.kodi.file, str(self.media))
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])

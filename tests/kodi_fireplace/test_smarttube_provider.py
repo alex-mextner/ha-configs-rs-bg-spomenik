@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -16,7 +17,7 @@ from test_youtube_resolver import load_resolver
 VIDEO_ID = "2rkB6CNfqJ4"
 
 
-def public_player_response():
+def public_player_response() -> Any:
     """Minimal raw InnerTube response with real adaptive-format field names."""
     ranges = {
         "initRange": {"start": "0", "end": "735"},
@@ -57,7 +58,7 @@ def public_player_response():
     }
 
 
-def parsed_player_response(raw):
+def parsed_player_response(raw) -> Any:
     """Model the public parser boundary, which intentionally drops videoId."""
     details = raw["videoDetails"]
     return {
@@ -75,7 +76,9 @@ def parsed_player_response(raw):
 
 
 class SmartTubeProviderTests(unittest.TestCase):
-    def setUp(self):
+    """Exercise SmartTubeProviderTests contracts without a real Kodi process."""
+
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="smarttube-provider-")
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
@@ -125,10 +128,10 @@ class SmartTubeProviderTests(unittest.TestCase):
         self.http = self.transport_patch.start()
         self.addCleanup(self.transport_patch.stop)
 
-    def transport(self, _request, **_kwargs):
+    def transport(self, _request, **_kwargs: Any) -> Any:
         return io.BytesIO(json.dumps(self.raw).encode())
 
-    def responses(self, video_id, *, opener):
+    def responses(self, video_id, *, opener) -> Any:
         self.assertEqual(video_id, VIDEO_ID)
         raw = opener(
             "https://www.youtube.com/youtubei/v1/player",
@@ -138,13 +141,13 @@ class SmartTubeProviderTests(unittest.TestCase):
         )
         yield parsed_player_response(json.loads(raw)), "android_testsuite"
 
-    def resolve(self):
+    def resolve(self) -> Any:
         try:
             return self.module.resolve(VIDEO_ID, self.request_id, self.home, self.log)
         except AssertionError as exc:
             self.fail(str(exc))
 
-    def test_primary_uses_smarttube_and_preserves_private_protocol(self):
+    def test_primary_uses_smarttube_and_preserves_private_protocol(self) -> None:
         result = self.resolve()
         self.assertEqual(result["title"], "Fast public fireplace")
         self.assertEqual(
@@ -161,7 +164,7 @@ class SmartTubeProviderTests(unittest.TestCase):
         self.assertNotIn("signed=private", json.dumps(result))
         self.assertLessEqual(self.http.call_args.kwargs["timeout"], 8)
 
-    def test_actual_raw_source_identity_is_required(self):
+    def test_actual_raw_source_identity_is_required(self) -> None:
         for identity in ("different01", None):
             with self.subTest(identity=identity):
                 self.raw["videoDetails"]["videoId"] = identity
@@ -171,7 +174,7 @@ class SmartTubeProviderTests(unittest.TestCase):
                     self.resolve()
                 self.assertFalse((self.state / "requests" / self.request_id).exists())
 
-    def test_live_source_is_rejected(self):
+    def test_live_source_is_rejected(self) -> None:
         for flag in ("isLive", "isLiveNow"):
             with self.subTest(flag=flag):
                 self.raw = public_player_response()
@@ -189,7 +192,7 @@ class SmartTubeProviderTests(unittest.TestCase):
                     self.resolve()
                 self.dash.manifest.assert_not_called()
 
-    def test_hd_requires_aac_and_safe_media_origin(self):
+    def test_hd_requires_aac_and_safe_media_origin(self) -> None:
         formats = self.raw["streamingData"]["adaptiveFormats"]
         for invalid in (
             [formats[0]],
@@ -211,7 +214,7 @@ class SmartTubeProviderTests(unittest.TestCase):
                     self.resolve()
                 self.assertFalse((self.state / "requests" / self.request_id).exists())
 
-    def test_builder_receives_only_supported_video_and_non_drc_aac(self):
+    def test_builder_receives_only_supported_video_and_non_drc_aac(self) -> None:
         video, audio = self.raw["streamingData"]["adaptiveFormats"]
         self.raw["streamingData"]["adaptiveFormats"] += [
             {**video, "mimeType": 'video/webm; codecs="vp09.00.51.08"'},
@@ -221,8 +224,8 @@ class SmartTubeProviderTests(unittest.TestCase):
         self.resolve()
         self.dash.manifest.assert_called_once_with([video, audio], hdr=False)
 
-    def test_cancel_during_transport_cannot_publish(self):
-        def cancelled(request, **kwargs):
+    def test_cancel_during_transport_cannot_publish(self) -> None:
+        def cancelled(request, **kwargs: Any) -> Any:
             (self.state / "current-request.json").write_text(
                 json.dumps({"request_id": str(uuid4())})
             )
@@ -233,14 +236,14 @@ class SmartTubeProviderTests(unittest.TestCase):
             self.resolve()
         self.assertFalse((self.state / "requests" / self.request_id).exists())
 
-    def test_loader_executes_verified_bytes_after_source_replacement(self):
+    def test_loader_executes_verified_bytes_after_source_replacement(self) -> None:
         path = self.home / "upstream.py"
         payload = b'VALUE = "verified"\n'
         path.write_bytes(payload)
         digest = self.module.hashlib.sha256(payload).hexdigest()
         create_module = self.module.importlib.util.module_from_spec
 
-        def replace_source(spec):
+        def replace_source(spec) -> Any:
             path.write_text('VALUE = "changed-after-verification"\n')
             return create_module(spec)
 
@@ -252,7 +255,7 @@ class SmartTubeProviderTests(unittest.TestCase):
         self.assertEqual(imported.__file__, str(path))
         self.assertEqual(imported.__spec__.origin, str(path))
 
-    def test_modified_upstream_source_is_not_executed(self):
+    def test_modified_upstream_source_is_not_executed(self) -> None:
         self.runtime_patch.stop()
         directory = self.home / ".kodi/addons/plugin.video.smarttube/resources/lib"
         directory.mkdir(parents=True)
