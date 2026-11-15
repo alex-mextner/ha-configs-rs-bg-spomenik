@@ -38,6 +38,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.calls = []
         self.manual_volume = None
         self.fail_speech = False
+        self.fail_pause_ack = False
         self.replace_content = False
         self.change_during_restore = False
         self.volume_sequence = []
@@ -100,6 +101,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             attrs["is_volume_muted"] = call.data["is_volume_muted"]
         elif call.service == "media_pause":
             value = "paused"
+            if self.fail_pause_ack:
+                self.hass.states.async_set(entity, value, attrs)
+                raise asyncio.TimeoutError("simulated lost pause acknowledgement")
         elif call.service == "media_play":
             value = "playing"
         elif call.service == "play_media":
@@ -185,6 +189,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.manager.announce("tv"), 0.5)
         self.assertEqual(self.calls[-1][0], "media_play")
         self.assertEqual(self.manager.status, "sent_unconfirmed")
+
+    async def test_pause_ack_timeout_still_recovers_original_music(self):
+        self.manager.config["music_mode"] = "pause"
+        self.fail_pause_ack = True
+        with self.assertRaises(asyncio.TimeoutError):
+            await self.manager.announce("tv")
+        self.assertEqual([name for name, _ in self.calls], ["media_pause", "media_play"])
+        self.assertEqual(self.hass.states.get(self.entity).state, "playing")
 
     async def test_missing_credentials_never_changes_speaker(self):
         self.manager.settings = {}

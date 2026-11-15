@@ -261,8 +261,10 @@ class Manager:
 
     async def prepare_playback(self, playback):
         if playback.pause:
-            await self.call("media_pause", playback.entity)
+            # The device may pause before its service acknowledgement times out.
+            # Recovery still checks the actual state and original content.
             playback.paused = True
+            await self.call("media_pause", playback.entity)
         if playback.applied > playback.old_volume or playback.muted_before:
             # Yandex volume_set lifts volume-zero mute and keeps the remembered
             # music level; restore both that level and mute after speech.
