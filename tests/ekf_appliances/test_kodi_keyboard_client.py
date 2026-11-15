@@ -1,10 +1,14 @@
 """Kodi provider hooks the existing native connection without text-bearing HA services."""
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+
+from aiohttp import StreamReader
+from aiohttp.base_protocol import BaseProtocol
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -52,6 +56,42 @@ class KodiProviderClientTests(unittest.IsolatedAsyncioTestCase):
         self.server._server_request_handlers[name]("kodi", data)
         await asyncio.sleep(0)
         await asyncio.gather(*[t for t in self.tasks if not t.done()])
+
+    async def test_fragmented_http_snapshot_is_read_through_eof(self):
+        protocol = BaseProtocol(asyncio.get_running_loop())
+        protocol.transport = Mock(spec=asyncio.Transport)
+        stream = StreamReader(protocol, limit=131072)
+        body = json.dumps({"ok": True, "snapshot": safe_snapshot("fragmented")}).encode()
+        stream.feed_data(body[:15])
+        loop = asyncio.get_running_loop()
+        loop.call_soon(stream.feed_data, body[15:])
+        loop.call_soon(stream.feed_eof)
+        response = SimpleNamespace(content=stream, status=200)
+        request = AsyncMock()
+        request.__aenter__.return_value = response
+        session = SimpleNamespace(post=Mock(return_value=request))
+        with patch.object(self.module, "async_get_clientsession", return_value=session):
+            reply = await type(self.provider)._post(self.provider, {"action": "snapshot"})
+        self.assertEqual(reply["snapshot"]["text"], "fragmented")
+        self.assertTrue(stream.at_eof())
+
+    async def test_fragmented_http_body_still_has_cumulative_size_limit(self):
+        protocol = BaseProtocol(asyncio.get_running_loop())
+        protocol.transport = Mock(spec=asyncio.Transport)
+        stream = StreamReader(protocol, limit=262144)
+        stream.feed_data(b'{"ok": true, "padding": "')
+        loop = asyncio.get_running_loop()
+        loop.call_soon(stream.feed_data, b"x" * 131072)
+        loop.call_soon(stream.feed_data, b'"}')
+        loop.call_soon(stream.feed_eof)
+        response = SimpleNamespace(content=stream, status=200)
+        request = AsyncMock()
+        request.__aenter__.return_value = response
+        session = SimpleNamespace(post=Mock(return_value=request))
+        with patch.object(self.module, "async_get_clientsession", return_value=session):
+            with self.assertRaises(self.module.KodiKeyboardError) as caught:
+                await type(self.provider)._post(self.provider, {"action": "snapshot"})
+        self.assertEqual(caught.exception.code, "unavailable")
 
     async def test_actual_input_event_sends_only_type_and_returns_observed_field(self):
         await self.event("Input.OnInputRequested", {"type":"keyboard","title":"Private title","value":"private raw value"})

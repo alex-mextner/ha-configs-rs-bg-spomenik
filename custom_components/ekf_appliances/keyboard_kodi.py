@@ -21,6 +21,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
 _LOGGER = logging.getLogger(__name__)
+_MAX_RESPONSE_BYTES = 131072
 _SAFE_ERRORS = {"stale_revision", "session_changed", "not_focused", "sensitive",
                 "unsupported", "unconfirmed", "conflict", "unavailable", "invalid_input", "busy"}
 
@@ -44,6 +45,16 @@ def _blank(status: str = "idle") -> dict:
             "sensitive": status == "sensitive", "selection": None,
             "capabilities": {"edit": False, "commit": False, "close": False, "selection": False},
             "status": status, "fresh_at": None}
+
+
+async def _read_response(stream: aiohttp.StreamReader) -> bytes:
+    """Read fragmented JSON through EOF without accepting an oversized body."""
+    raw = bytearray()
+    while chunk := await stream.read(_MAX_RESPONSE_BYTES + 1 - len(raw)):
+        raw.extend(chunk)
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise KodiKeyboardError("unavailable")
+    return bytes(raw)
 
 class KodiKeyboardProvider:
     def __init__(self, hass, native_entity_id: str, host_origin: str, host_token: str,
@@ -233,9 +244,7 @@ class KodiKeyboardProvider:
             async with session.post(self._url, json=payload,
                     headers={"X-HA-Host-Token": self._token},
                     timeout=aiohttp.ClientTimeout(total=5)) as response:
-                raw = await response.content.read(131073)
-                if len(raw) > 131072:
-                    raise KodiKeyboardError("unavailable")
+                raw = await _read_response(response.content)
                 reply = json.loads(raw)
                 if not isinstance(reply, dict):
                     raise KodiKeyboardError("unavailable")
