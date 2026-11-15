@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import resource
 import shutil
 import signal
 import subprocess
@@ -35,6 +36,8 @@ MAX_SOURCE_BYTES = 1200 * 1024**2
 MAX_LOG_BYTES = 8 * 1024**2
 BUILD_SECONDS = 2400
 COMMAND_SECONDS = 1200
+# RLIMIT_CPU counts all threads; the wall deadline is enforced separately.
+COMMAND_CPU_SECONDS = THREADS * COMMAND_SECONDS
 DOWNLOAD_SECONDS = 600
 HEARTBEAT_SECONDS = 20
 FPS = 30
@@ -135,7 +138,7 @@ def limited_command(arguments: list[str]) -> list[str]:
     return [
         "prlimit",
         f"--as={MEMORY_BYTES}",
-        f"--cpu={COMMAND_SECONDS}",
+        f"--cpu={COMMAND_CPU_SECONDS}",
         f"--fsize={2 * 1024**3}",
         "--",
         "taskset",
@@ -143,6 +146,12 @@ def limited_command(arguments: list[str]) -> list[str]:
         cpus,
         *arguments,
     ]
+
+
+def child_cpu_seconds() -> float:
+    """Return CPU time for reaped children; this builder runs commands sequentially."""
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
 
 
 def stop_child(process: subprocess.Popen[bytes]) -> None:
@@ -216,6 +225,7 @@ class Builder:
             fail(f"{label}: build wall deadline expired")
         LOG.info("stage=%s started command_log=%s", label, log_path)
         with log_path.open("xb") as command_log:
+            cpu_started = child_cpu_seconds()
             process = subprocess.Popen(  # noqa: S603 - fixed tool argv; never a shell
                 limited_command(arguments),
                 stdin=subprocess.DEVNULL,
@@ -238,10 +248,11 @@ class Builder:
             finally:
                 stop_child(process)
                 LOG.info(
-                    "stage=%s completed rc=%s elapsed=%.1fs",
+                    "stage=%s completed rc=%s elapsed=%.1fs cpu_seconds=%.3f",
                     label,
                     process.returncode,
                     time.monotonic() - started,
+                    child_cpu_seconds() - cpu_started,
                 )
         result = command_result(log_path, process.returncode, label)
         CANCELLATION.check()
@@ -811,6 +822,7 @@ def initial_receipt() -> dict[str, Any]:
             "child_memory_bytes": MEMORY_BYTES,
             "total_seconds": BUILD_SECONDS,
             "command_seconds": COMMAND_SECONDS,
+            "command_cpu_seconds": COMMAND_CPU_SECONDS,
             "download_seconds": DOWNLOAD_SECONDS,
             "diagnostic_bytes": MAX_LOG_BYTES,
         },
