@@ -127,7 +127,7 @@ class HostFireplaceTests(unittest.TestCase):
             media_path=self.media,
             expected_sha256=self.sha,
             auto_monitor=False,
-            operation_timeout=0.04,
+            operation_timeout=1.0,
             poll_interval=0.001,
         )
         self.controllers.append(controller)

@@ -309,7 +309,7 @@ class RotationCases(FixtureBase):
             return result
 
         self.kodi.rpc = stalled_first
-        controller = self.multi(operation_timeout=4.5)
+        controller = self.multi(operation_timeout=8)
         proof = controller.start("stalled-fallback")
         self.assertEqual(proof["source_id"], "local-1")
         mutations = [

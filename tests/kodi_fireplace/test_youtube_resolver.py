@@ -35,6 +35,8 @@ class ResolverTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.state = self.home / ".config/ha-host-actions/youtube"
         self.state.mkdir(parents=True)
+        self.selection_path = self.state.parent / "fireplace-selection.json"
+        self.set_selection()
         self.request_id = str(uuid4())
         self.set_generation(self.request_id)
         self.module = load_resolver()
@@ -91,6 +93,34 @@ class ResolverTests(unittest.TestCase):
     def set_generation(self, request_id):
         (self.state / "current-request.json").write_text(
             json.dumps({"request_id": request_id})
+        )
+
+    def set_selection(self, active=None, pending=None, phase="preparing"):
+        records = {}
+        for role, attempt_id in (("active", active), ("pending", pending)):
+            identity = None
+            if attempt_id is not None:
+                identity = {
+                    "attempt_id": attempt_id,
+                    "source_id": "youtube-" + role,
+                    "source_kind": "youtube",
+                    "request_id": "voice-" + role,
+                    "launch_started_at": "2026-11-15T00:00:00+00:00",
+                    "title": "Public fireplace",
+                }
+                if role == "pending":
+                    identity["phase"] = phase
+                if role == "active" or phase != "preparing":
+                    identity.update(file_hash="a" * 64, open_hash="b" * 64)
+            records[role] = identity
+        self.selection_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "last_successful_source_id": "youtube-active" if active else None,
+                    **records,
+                }
+            )
         )
 
     @staticmethod
@@ -231,6 +261,11 @@ class ResolverTests(unittest.TestCase):
         os.utime(directory, (modified, modified))
         return directory
 
+    def assert_manifest_retained(self, directory):
+        manifest = directory / "manifest.mpd"
+        self.assertTrue(manifest.is_file())
+        self.assertEqual(manifest.read_text(), "<MPD/>")
+
     def test_cleanup_preserves_current_and_unknown_files(self):
         active = self.make_owned_request(self.request_id, age=200000)
         old = self.make_owned_request(str(uuid4()), age=200000)
@@ -255,6 +290,120 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(
             [path.exists() for path in directories], [True, True, False, False]
         )
+
+    def test_failed_replacement_keeps_aged_active_manifest(self):
+        active = self.make_owned_request(str(uuid4()), age=200000)
+        self.set_selection(active=active.name, pending=self.request_id)
+        self.result["formats"] = [self.audio]
+        with self.assertRaisesRegex(
+            self.module.ResolveError, "hd_audio_video_unavailable"
+        ):
+            self.resolve()
+        self.set_generation(active.name)
+        self.assertTrue((active / "descriptor.json").is_file())
+        self.assert_manifest_retained(active)
+
+    def test_failed_replacement_keeps_count_evicted_active_manifest(self):
+        active = self.make_owned_request(str(uuid4()), age=300)
+        newer = [
+            self.make_owned_request(str(uuid4()), age=60 + index) for index in range(3)
+        ]
+        self.set_selection(active=active.name, pending=self.request_id)
+        self.result["formats"] = [self.audio]
+        with (
+            patch.object(self.module, "RETAIN_REQUESTS", 2),
+            self.assertRaisesRegex(
+                self.module.ResolveError, "hd_audio_video_unavailable"
+            ),
+        ):
+            self.resolve()
+        self.set_generation(active.name)
+        self.assert_manifest_retained(active)
+        self.assertEqual([path.exists() for path in newer], [True, True, False])
+
+    def test_cleanup_preserves_pending_attempt_in_each_durable_phase(self):
+        for phase in ("preparing", "prepared", "opening"):
+            with self.subTest(phase=phase):
+                pending = self.make_owned_request(str(uuid4()), age=200000)
+                obsolete = self.make_owned_request(str(uuid4()), age=200000)
+                self.set_selection(pending=pending.name, phase=phase)
+                self.module.cleanup_obsolete(self.state, time.time())
+                self.assert_manifest_retained(pending)
+                self.assertFalse(obsolete.exists())
+
+    def test_cleanup_skips_malformed_selection(self):
+        invalid_states = [
+            "{",
+            "[]",
+            '{"version": 2, "active": null, "pending": null}',
+            '{"version": true, "active": null, "pending": null}',
+            '{"version": 1}',
+            '{"version": 1, "active": [], "pending": null}',
+            '{"version": 1, "active": {"attempt_id": null}, "pending": null}',
+            '{"version": 1, "active": {"source_kind": "youtube"}, "pending": null}',
+            '{"version": 1, "active": null, "pending": {"attempt_id": "../other"}}',
+        ]
+        for raw in invalid_states:
+            with self.subTest(selection=raw):
+                old = self.make_owned_request(str(uuid4()), age=200000)
+                self.selection_path.write_text(raw)
+                self.module.cleanup_obsolete(self.state, time.time())
+                self.assert_manifest_retained(old)
+
+    def test_cleanup_skips_missing_selection(self):
+        old = self.make_owned_request(str(uuid4()), age=200000)
+        self.selection_path.unlink()
+        self.module.cleanup_obsolete(self.state, time.time())
+        self.assert_manifest_retained(old)
+
+    def test_cleanup_skips_unreadable_selection(self):
+        old = self.make_owned_request(str(uuid4()), age=200000)
+        read_json = self.module.read_json
+
+        def unavailable_selection(path, limit):
+            if path == self.selection_path:
+                raise PermissionError("selection unavailable")
+            return read_json(path, limit)
+
+        with patch.object(self.module, "read_json", side_effect=unavailable_selection):
+            self.module.cleanup_obsolete(self.state, time.time())
+        self.assert_manifest_retained(old)
+
+    def test_cleanup_skips_symlink_selection(self):
+        old = self.make_owned_request(str(uuid4()), age=200000)
+        target = self.home / "other-selection.json"
+        self.selection_path.rename(target)
+        self.selection_path.symlink_to(target)
+        self.module.cleanup_obsolete(self.state, time.time())
+        self.assert_manifest_retained(old)
+
+    def test_cleanup_rechecks_new_active_selection_before_removal(self):
+        old = self.make_owned_request(str(uuid4()), age=200000)
+        remove = self.module.remove_obsolete_request
+
+        def select_before_removal(state, directory):
+            self.set_selection(active=directory.name)
+            remove(state, directory)
+
+        with patch.object(
+            self.module, "remove_obsolete_request", side_effect=select_before_removal
+        ):
+            self.module.cleanup_obsolete(self.state, time.time())
+        self.assert_manifest_retained(old)
+
+    def test_cleanup_rechecks_malformed_selection_before_removal(self):
+        old = self.make_owned_request(str(uuid4()), age=200000)
+        remove = self.module.remove_obsolete_request
+
+        def corrupt_before_removal(state, directory):
+            self.selection_path.write_text("{")
+            remove(state, directory)
+
+        with patch.object(
+            self.module, "remove_obsolete_request", side_effect=corrupt_before_removal
+        ):
+            self.module.cleanup_obsolete(self.state, time.time())
+        self.assert_manifest_retained(old)
 
     def test_headers_never_retain_auth_or_cookies(self):
         self.assertEqual(
