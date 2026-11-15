@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import hmac
+import importlib.util
 import ipaddress
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import shutil
@@ -22,6 +25,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+
+def _load_host_module(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_fireplace_module = _load_host_module("ha_kodi_fireplace")
+_manifest_module = _load_host_module("ha_kodi_youtube_manifest")
+FireplaceError = _fireplace_module.FireplaceError
+ManifestError = _manifest_module.ManifestError
+_FIREPLACE = None
+_FIREPLACE_LOCK = threading.Lock()
 
 CONFIG_DIR = Path.home() / ".config" / "ha-host-actions"
 TOKEN_FILE = CONFIG_DIR / "token"
@@ -1429,7 +1446,67 @@ def network_summary(query: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fireplace_rpc(method: str, params: dict[str, Any], deadline: float) -> Any:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise FireplaceError("deadline")
+    call_timeout = 8.0 if method in {"Player.Open", "Player.Stop"} else 1.0
+    response = kodi_jsonrpc(method, params, timeout=min(call_timeout, remaining))
+    body = response.get("body")
+    if (
+        not response.get("ok")
+        or not isinstance(body, dict)
+        or "error" in body
+        or "result" not in body
+    ):
+        raise FireplaceError("rpc_unavailable")
+    return body["result"]
+
+
+def _fireplace_controller():
+    global _FIREPLACE
+    with _FIREPLACE_LOCK:
+        if _FIREPLACE is None:
+            _FIREPLACE = _fireplace_module.FireplaceController(
+                _fireplace_rpc, CONFIG_DIR / "fireplace-owner.json"
+            )
+            _FIREPLACE.start_monitor()
+        return _FIREPLACE
+
+
+def kodi_fireplace(payload: dict[str, Any]) -> dict[str, Any]:
+    if (
+        set(payload) not in ({"action"}, {"action", "request_id"})
+        or not isinstance(payload.get("action"), str)
+        or payload["action"] not in {"start", "stop"}
+        or "request_id" in payload
+        and (
+            payload["action"] != "start"
+            or not isinstance(payload["request_id"], str)
+            or re.fullmatch(r"[A-Za-z0-9_.:+-]{1,96}", payload["request_id"]) is None
+        )
+    ):
+        raise InvalidInput("invalid_fireplace_action")
+    controller = _fireplace_controller()
+    return (
+        controller.start(payload.get("request_id"))
+        if payload["action"] == "start"
+        else controller.stop()
+    )
+
+
+def kodi_fireplace_status() -> dict[str, Any]:
+    return _fireplace_controller().status()
+
+
+def kodi_youtube_manifest(query: dict[str, list[str]]) -> bytes:
+    return _manifest_module.read_manifest(CONFIG_DIR / "youtube", query)
+
+
 ROUTES = {
+    ("GET", "/kodi/youtube/manifest"): kodi_youtube_manifest,
+    ("GET", "/kodi/fireplace"): kodi_fireplace_status,
+    ("POST", "/kodi/fireplace"): kodi_fireplace,
     ("POST", "/projector/on"): projector_on,
     ("POST", "/projector/off"): projector_off,
     ("POST", "/kodi/start"): start_kodi,
@@ -1456,6 +1533,7 @@ ROUTES = {
 }
 
 BODY_ROUTES = {
+    ("POST", "/kodi/fireplace"),
     ("POST", "/network/update"),
     ("POST", "/kodi/play-path"),
     ("POST", "/kodi/sync-library"),
@@ -1470,6 +1548,7 @@ BODY_ROUTES = {
     ("POST", "/network/stats"),
 }
 QUERY_ROUTES = {
+    ("GET", "/kodi/youtube/manifest"),
     ("GET", "/network/inventory"),
     ("GET", "/network/summary"),
     ("GET", "/network/history"),
@@ -1481,7 +1560,20 @@ class Handler(BaseHTTPRequestHandler):
     token = read_secret(TOKEN_FILE)
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"{self.address_string()} - {fmt % args}", flush=True)
+        # No query string, request headers, body, stream URL, or credential in logs.
+        status = args[1] if len(args) > 1 and fmt.startswith('"%s"') else "event"
+        try:
+            path = urllib.parse.urlsplit(getattr(self, "path", "")).path
+        except ValueError:
+            path = "<invalid>"
+        client = getattr(self, "client_address", ("unknown",))[0]
+        logging.getLogger("ha-host-actions").info(
+            "%s %s %s status=%s",
+            client,
+            getattr(self, "command", "invalid"),
+            path,
+            status,
+        )
 
     def authorized(self) -> bool:
         supplied = self.headers.get("X-HA-Host-Token", "")
@@ -1526,7 +1618,20 @@ class Handler(BaseHTTPRequestHandler):
                 result = route(urllib.parse.parse_qs(url.query))
             else:
                 result = route()
-            self.send_json(200, {"ok": True, **result})
+            if route_key == ("GET", "/kodi/youtube/manifest"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/dash+xml")
+                self.send_header("Content-Length", str(len(result)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(result)
+            else:
+                self.send_json(200, {"ok": True, **result})
+        except ManifestError as exc:
+            self.send_json(404, {"ok": False, "error": str(exc)})
+        except FireplaceError as exc:
+            proof = _FIREPLACE.status() if _FIREPLACE is not None else {"state": "error"}
+            self.send_json(503, {**proof, "ok": False, "error": str(exc)})
         except InvalidInput as exc:
             # Validation errors (bad MAC/IP/filter/...) are the caller's fault.
             self.send_json(400, {"ok": False, "error": str(exc)})
@@ -1540,12 +1645,57 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_route()
 
 
+def runtime_log_path() -> Path:
+    directory = Path("/tmp") / f"ha-host-actions-{os.getuid()}"
+    if directory.is_symlink():
+        raise RuntimeError("invalid_log_directory")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if not directory.is_dir() or directory.stat().st_uid != os.getuid():
+        raise RuntimeError("invalid_log_directory")
+    directory.chmod(0o700)
+    path = directory / "bridge.log"
+    for candidate in (path, *(directory / f"bridge.log.{index}" for index in range(1, 4))):
+        if candidate.is_symlink():
+            raise RuntimeError("invalid_log_file")
+    return path
+
+
 def main() -> None:
-    bind = os.environ.get("HA_HOST_ACTIONS_BIND", "172.20.0.1")
-    port = int(os.environ.get("HA_HOST_ACTIONS_PORT", "8787"))
-    server = ThreadingHTTPServer((bind, port), Handler)
-    print(f"ha-host-actions listening on {bind}:{port}", flush=True)
-    server.serve_forever()
+    log_path = runtime_log_path()
+    logger = logging.getLogger("ha-host-actions")
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(message)s")
+    rotating = RotatingFileHandler(log_path, maxBytes=1024 * 1024, backupCount=3)
+    log_path.chmod(0o600)
+    for handler in (rotating, logging.StreamHandler()):
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    started = time.monotonic()
+    logger.info("starting log=%s", log_path)
+    server = None
+    outcome = 0
+    try:
+        bind = os.environ.get("HA_HOST_ACTIONS_BIND", "172.20.0.1")
+        port = int(os.environ.get("HA_HOST_ACTIONS_PORT", "8787"))
+        server = ThreadingHTTPServer((bind, port), Handler)
+        try:
+            _fireplace_controller().start_monitor()
+        except Exception as error:
+            # A corrupt fireplace receipt must not take down unrelated host actions.
+            logger.error("fireplace recovery unavailable code=%s", type(error).__name__)
+        logger.info("listening on %s:%s log=%s", bind, port, log_path)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        outcome = 1
+        raise
+    finally:
+        if _FIREPLACE is not None:
+            _FIREPLACE.close()
+        if server is not None:
+            server.server_close()
+        logger.info("completed rc=%s elapsed=%.1fs log=%s", outcome, time.monotonic() - started, log_path)
 
 
 if __name__ == "__main__":

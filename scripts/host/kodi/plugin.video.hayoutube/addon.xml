@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.hayoutube" name="Home YouTube Playback" version="1.0.0" provider-name="Home Assistant">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0"/>
+    <import addon="inputstream.adaptive" version="21.0.0"/>
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="default.py">
+    <provides>video</provides>
+  </extension>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en_GB">Opens the current prepared home playback request</summary>
+    <description lang="en_GB">Resolves a private manifest prepared by the home controller using maintained yt-dlp and SendToKodi. Public browsing is provided by the installed YouTube browser addon.</description>
+    <platform>linux</platform>
+    <license>MIT</license>
+  </extension>
+</addon>

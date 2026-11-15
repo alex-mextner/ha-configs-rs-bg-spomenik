@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "youtube-2rkB6CNfqJ4",
+      "kind": "youtube",
+      "youtube_id": "2rkB6CNfqJ4",
+      "title": "Fireplace 4K — crackling logs",
+      "source": "https://www.youtube.com/watch?v=2rkB6CNfqJ4"
+    },
+    {
+      "id": "youtube-W1NI3lfdMug",
+      "kind": "youtube",
+      "youtube_id": "W1NI3lfdMug",
+      "title": "Evenfall Studio — natural crackling fire",
+      "source": "https://www.youtube.com/watch?v=W1NI3lfdMug"
+    },
+    {
+      "id": "youtube-kBlOvm_kiCk",
+      "kind": "youtube",
+      "youtube_id": "kBlOvm_kiCk",
+      "title": "Fire of Life — real fireplace",
+      "source": "https://www.youtube.com/watch?v=kBlOvm_kiCk"
+    },
+    {
+      "id": "local-fastily",
+      "kind": "local",
+      "filename": "fireplace-fastily-1080p.webm",
+      "sha256": "248cc597abdf1e53e3d55ab998e1aadfff3c96f7c48ca2ce30362b74d5959267",
+      "title": "Fireplace 1 2021-02-14",
+      "author": "FASTILY",
+      "source": "https://commons.wikimedia.org/wiki/File:Fireplace_1_2021-02-14.webm",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/0/04/Fireplace_1_2021-02-14.webm/Fireplace_1_2021-02-14.webm.1080p.vp9.webm"
+    },
+    {
+      "id": "local-fantastic",
+      "kind": "local",
+      "filename": "fireplace-fantastic-1080p.webm",
+      "sha256": "0d8094ccd902b986c16d453d7167664536b51978607a2c737e76f0220ce6bea5",
+      "title": "Fantastic fireplace",
+      "author": "free video library",
+      "source": "https://commons.wikimedia.org/wiki/File:Fantastic-fireplace-fire-chimney-hearth-_background_-_texture_-_motion_graphics_-_free_video_library.webm",
+      "license": "CC BY 3.0",
+      "license_url": "https://creativecommons.org/licenses/by/3.0/",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/Fantastic-fireplace-fire-chimney-hearth-_background_-_texture_-_motion_graphics_-_free_video_library.webm"
+    },
+    {
+      "id": "local-hotel",
+      "kind": "local",
+      "filename": "fireplace-hotel-1080p.webm",
+      "sha256": "484a6e8e11de5aa71fcd343a26602a833db330e57039366013d29d96bbe76466",
+      "title": "Grand Summit Hotel fireplace",
+      "author": "BrillLyle",
+      "source": "https://commons.wikimedia.org/wiki/File:ABOedit2015-Video.webm",
+      "license": "CC0 1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/5b/ABOedit2015-Video.webm"
+    }
+  ]
+}

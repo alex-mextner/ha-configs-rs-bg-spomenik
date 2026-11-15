@@ -47,10 +47,17 @@ def test_local_runner_uses_explicit_isolated_suites() -> None:
     assert "tail -n 40 $(CURDIR)/$(TEST_LOG_DIR)/hga-source.log" in makefile
 
 
-def test_ship_uses_the_local_test_entrypoint() -> None:
+def test_ship_verifies_native_maintained_and_fireplace_suites() -> None:
     ship_config = (ROOT / ".ship-config").read_text()
+    maintained = (ROOT / ".github/workflows/ha-regressions.yml").read_text()
+    fireplace = (ROOT / ".github/workflows/kodi-fireplace.yml").read_text()
 
-    assert "SHIP_LOCAL_TEST_CMD=make test-regressions" in ship_config
+    assert (
+        "SHIP_LOCAL_TEST_CMD=python3 scripts/ci/wait_ha_regressions.py" in ship_config
+    )
+    assert "make test-regressions PYTHON_BIN=python3.14" in maintained
+    assert "python3 -m unittest discover -s tests/kodi_fireplace -v" in fireplace
+    assert "python3 -m unittest discover -s tests/kodi_fireplace_ha -v" in fireplace
     makefile = (ROOT / "Makefile").read_text()
     assert (
         "test: test-standalone test-entity-note test-home-generative-agent test-copied-home-generative-agent"
