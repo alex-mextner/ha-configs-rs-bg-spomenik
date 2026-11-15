@@ -50,6 +50,88 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ffmpeg curl util-linux
           ffmpeg -version
+      - name: Verify cancellation boundaries without media
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import sys
+          import tempfile
+          import time
+          from unittest import mock
+
+          spec = importlib.util.spec_from_file_location(
+              "fireplace_assets", "scripts/ci/prepare_fireplace_assets.py"
+          )
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          log_dir, main_log = module.start_logging()
+          started, outcome = time.monotonic(), 1
+          children = []
+          previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+          def reset_cancellation():
+              module.CANCELLATION = module.Cancellation()
+              for sig in previous:
+                  signal.signal(sig, module.CANCELLATION.request)
+
+          try:
+              with tempfile.TemporaryDirectory(prefix="fireplace-cancellation-", dir="/tmp") as temporary:
+                  reset_cancellation()
+                  builder = module.Builder(Path(temporary) / "spawn", log_dir)
+                  real_popen = module.subprocess.Popen
+
+                  def interrupt_spawn(*args, **kwargs):
+                      child = real_popen(*args, **kwargs)
+                      children.append(child)
+                      os.kill(os.getpid(), signal.SIGTERM)
+                      return child
+
+                  with mock.patch.object(module.subprocess, "Popen", side_effect=interrupt_spawn):
+                      try:
+                          builder.command("cancel-at-spawn", [sys.executable, "-c", "import time; time.sleep(30)"])
+                      except module.BuildError as error:
+                          assert error.exit_code == 143, error.exit_code
+                      else:
+                          raise AssertionError("Cancellation during spawn was not reported")
+                  assert children[0].poll() is not None, "Owned child survived cancellation"
+                  assert module.finalize_build(builder, module.initial_receipt(), 143, started) == 143
+                  module.LOG.info("stage=cancel-at-spawn passed child_reaped=true rc=143")
+
+                  for prior_status, expected_status in ((0, 130), (17, 17)):
+                      reset_cancellation()
+                      builder = module.Builder(Path(temporary) / f"finalize-{prior_status}", log_dir)
+                      receipt = module.initial_receipt()
+                      real_write = module.write_json
+
+                      def interrupt_write(path, value):
+                          os.kill(os.getpid(), signal.SIGINT)
+                          real_write(path, value)
+
+                      with mock.patch.object(module, "write_json", side_effect=interrupt_write):
+                          actual = module.finalize_build(builder, receipt, prior_status, started)
+                      saved = json.loads((builder.output / "receipt.json").read_text())
+                      assert actual == expected_status, (actual, expected_status)
+                      assert saved["exit_code"] == expected_status, saved
+                      assert saved["status"] == "failed", saved
+                      assert saved["cancellation_signal"] == signal.SIGINT, saved
+                      module.LOG.info("stage=cancel-during-receipt passed prior_rc=%s rc=%s", prior_status, actual)
+                  outcome = 0
+          except Exception:
+              module.LOG.exception("CI cancellation boundary check failed")
+          finally:
+              for child in children:
+                  module.stop_child(child)
+              for sig, handler in previous.items():
+                  signal.signal(sig, handler)
+              module.LOG.info("completed rc=%s elapsed=%.1fs log=%s", outcome, time.monotonic() - started, main_log)
+          sys.exit(outcome)
+          PY
       - name: Prepare and measure the actual candidate files
         id: build
         env:

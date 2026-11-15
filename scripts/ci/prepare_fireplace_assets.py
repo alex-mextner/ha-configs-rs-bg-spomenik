@@ -66,6 +66,37 @@ def fail(message: str, *, exit_code: int = 1) -> NoReturn:
     raise BuildError(message, exit_code)
 
 
+class Cancellation:
+    """Record signals without raising through process creation or finalization."""
+
+    def __init__(self) -> None:
+        """Retain the first cancellation request for this single-process run."""
+        self.signum: int | None = None
+
+    def request(self, signum: int, _frame: FrameType | None) -> None:
+        """Defer handling until the caller owns cleanup for any spawned child."""
+        if self.signum is None:
+            self.signum = signum
+
+    def check(self) -> None:
+        """Raise only at explicit safe points protected by normal cleanup."""
+        if self.signum is not None:
+            fail(
+                f"Build cancelled by signal {self.signum}", exit_code=128 + self.signum
+            )
+
+    def apply(self, receipt: dict[str, Any], outcome: int) -> int:
+        """Mark a cancellation while preserving an already-observed failure."""
+        if self.signum is not None:
+            receipt["cancellation_signal"] = self.signum
+            receipt["status"] = "failed"
+            return outcome or 128 + self.signum
+        return outcome
+
+
+CANCELLATION = Cancellation()
+
+
 def valid_url(url: str) -> None:
     """Permit only the two fixed public HTTPS source origins."""
     parsed = urllib.parse.urlsplit(url)
@@ -81,8 +112,12 @@ def valid_url(url: str) -> None:
 
 def sha256_file(path: Path) -> str:
     """Hash every byte of a complete file without loading it into memory."""
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        while block := stream.read(1024**2):
+            CANCELLATION.check()
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -170,6 +205,7 @@ class Builder:
         self, label: str, arguments: list[str], *, seconds: int = COMMAND_SECONDS
     ) -> str:
         """Run fixed tools with a supervised wall deadline and bounded diagnostics."""
+        CANCELLATION.check()
         self.sequence += 1
         log_path = self.log_dir / f"{self.sequence:02d}-{label}.log"
         started = time.monotonic()
@@ -187,7 +223,9 @@ class Builder:
             )
             heartbeat = started
             try:
+                CANCELLATION.check()
                 while process.poll() is None:
+                    CANCELLATION.check()
                     now = time.monotonic()
                     if now > deadline or log_path.stat().st_size > MAX_LOG_BYTES:
                         fail(f"{label}: runtime or diagnostic-size limit exceeded")
@@ -203,7 +241,9 @@ class Builder:
                     process.returncode,
                     time.monotonic() - started,
                 )
-        return command_result(log_path, process.returncode, label)
+        result = command_result(log_path, process.returncode, label)
+        CANCELLATION.check()
+        return result
 
     def download(self, source: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
         """Supervise a bounded curl transfer and hash every complete source byte."""
@@ -433,14 +473,19 @@ def validate_media(
     return result
 
 
-def validate_loudness(metrics: dict[str, float]) -> None:
+def validate_loudness(source_id: str, metrics: dict[str, float]) -> None:
     """Accept actual decoded AAC levels, never the encoder's predicted output."""
     if (
         abs(metrics["input_i"] - TARGET_I) > LOUDNESS_TOLERANCE
         or metrics["input_tp"] > FINAL_TP_MAX
         or metrics["input_lra"] > FINAL_LRA_MAX
     ):
-        fail("Finished AAC failed integrated loudness, true-peak or range limits")
+        fail(
+            f"{source_id}: decoded AAC failed loudness limits: "
+            f"I={metrics['input_i']} LUFS (target {TARGET_I}±{LOUDNESS_TOLERANCE}), "
+            f"TP={metrics['input_tp']} dBTP (maximum {FINAL_TP_MAX}), "
+            f"LRA={metrics['input_lra']} LU (maximum {FINAL_LRA_MAX})"
+        )
 
 
 def prepare_asset(
@@ -519,7 +564,7 @@ def prepare_asset(
     final_metrics = builder.audio_metrics(
         ["-i", str(temporary)], "[0:a:0]anull[cycle]", source["id"] + "-final-aac"
     )
-    validate_loudness(final_metrics)
+    validate_loudness(source["id"], final_metrics)
     final = builder.output / "assets" / (source["id"] + ".mp4")
     temporary.replace(final)
     for label, position in (
@@ -646,11 +691,6 @@ def load_sources(path: Path) -> list[dict[str, Any]]:
     return sources
 
 
-def cancel(signum: int, _frame: FrameType | None) -> NoReturn:
-    """Let normal finally blocks reap children and persist a failure receipt."""
-    fail(f"Build cancelled by signal {signum}", exit_code=128 + signum)
-
-
 def start_logging() -> tuple[Path, Path]:
     """Initialize private automatic logs before operational work."""
     os.umask(0o077)
@@ -764,7 +804,9 @@ def finalization_error(
     receipt: dict[str, Any], outcome: int, stage: str, error: Exception
 ) -> int:
     """Record a best-effort finalization failure without replacing a prior status."""
-    status = outcome or (error.exit_code if isinstance(error, BuildError) else 1)
+    status = CANCELLATION.apply(receipt, outcome) or (
+        error.exit_code if isinstance(error, BuildError) else 1
+    )
     receipt["status"] = "failed"
     receipt["exit_code"] = status
     receipt.setdefault("finalization_errors", []).append(
@@ -774,24 +816,40 @@ def finalization_error(
     return status
 
 
+def persist_final_receipt(
+    builder: Builder, receipt: dict[str, Any], outcome: int
+) -> int:
+    """Write a final status, recording errors without replacing an earlier failure."""
+    outcome = CANCELLATION.apply(receipt, outcome)
+    receipt["exit_code"] = outcome
+    try:
+        write_json(builder.output / "receipt.json", receipt)
+    except (BuildError, OSError, TypeError, ValueError) as error:
+        outcome = finalization_error(receipt, outcome, "receipt", error)
+    else:
+        LOG.info("receipt=%s", builder.output / "receipt.json")
+    return outcome
+
+
 def finalize_build(
     builder: Builder | None, receipt: dict[str, Any], outcome: int, started: float
 ) -> int:
-    """Attempt owned cleanup and a final receipt independently, preserving failures."""
+    """Reap owned work and persist cancellation without asynchronous exceptions."""
+    outcome = CANCELLATION.apply(receipt, outcome)
     if builder is not None:
         try:
             shutil.rmtree(builder.work)
         except (BuildError, OSError) as error:
             outcome = finalization_error(receipt, outcome, "cleanup", error)
     receipt["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    outcome = CANCELLATION.apply(receipt, outcome)
     receipt["exit_code"] = outcome
     if builder is not None:
-        try:
-            write_json(builder.output / "receipt.json", receipt)
-        except (BuildError, OSError, TypeError, ValueError) as error:
-            outcome = finalization_error(receipt, outcome, "receipt", error)
-        else:
-            LOG.info("receipt=%s", builder.output / "receipt.json")
+        observed_signal = CANCELLATION.signum
+        outcome = persist_final_receipt(builder, receipt, outcome)
+        if CANCELLATION.signum != observed_signal:
+            # The first signal arrived during the write. At most one rewrite is needed.
+            outcome = persist_final_receipt(builder, receipt, outcome)
     # Workflow uploads the original private /tmp logs even when receipt writes fail.
     return outcome
 
@@ -809,14 +867,15 @@ def main() -> int:
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
         ):
             fail("Run media builds only in the genuine hosted GitHub Actions workflow")
-        signal.signal(signal.SIGTERM, cancel)
-        signal.signal(signal.SIGINT, cancel)
+        signal.signal(signal.SIGTERM, CANCELLATION.request)
+        signal.signal(signal.SIGINT, CANCELLATION.request)
         if shutil.disk_usage(args.output_dir.parent).free < MIN_FREE_BYTES:
             fail(
                 "CI runner needs at least 6 GiB free for owned source and output files"
             )
         builder = Builder(args.output_dir, log_dir)
         run_build(builder, receipt, source_only=args.source_only)
+        CANCELLATION.check()
         outcome = 0
     except (
         BuildError,
