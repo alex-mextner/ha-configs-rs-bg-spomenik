@@ -33,6 +33,8 @@ ignore = [
 "tests/test_*.py" = ["INP001"]
 "tests/ekf_appliances/test_*.py" = ["INP001", "S101"]
 "tests/test_remote_announcements*.py" = ["S101"]
+# This existing pytest module deliberately imports its sibling bridge directly.
+"docker/chatgpt-web/test_bridge.py" = ["S101", "INP001"]
 
 [lint.isort]
 # The HACS-managed namespace may be absent in a source-only checkout.

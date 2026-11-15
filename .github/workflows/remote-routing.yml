@@ -74,9 +74,8 @@ jobs:
           printf '%s starting commit=%s log=%s\n' "$(date -Is)" "$(git rev-parse HEAD)" "$task_log"
           python3 -m pip install -r requirements/remote-routing-ci.txt
           mkdir -p .cache/test-results
-          # PairBindingsTests covers the changed integration; the separate host
-          # bridge contract class is outside this routing delivery.
-          PYTHONPATH="$PWD:$PWD/scripts" python3 -m pytest -q --import-mode=importlib \
+          # Exercise the published host interfaces alongside the routing adapters.
+          PYTHONPATH="$PWD:$PWD/scripts:$PWD/scripts/host:$PWD/tests/ekf_appliances" python3 -m pytest -q --import-mode=importlib \
             --junitxml=.cache/test-results/remote-routing.xml \
             tests/ekf_appliances/test_config_flow.py \
             tests/ekf_appliances/test_feedback_freshness.py \
@@ -87,10 +86,16 @@ jobs:
             tests/ekf_appliances/test_keyboard_ws.py \
             tests/ekf_appliances/test_kodi_keyboard_client.py \
             tests/ekf_appliances/test_kodi_t9_contract.py \
+            tests/ekf_appliances/test_host_kodi_power_status.py \
+            tests/ekf_appliances/test_kodi_text_bridge.py \
+            tests/ekf_appliances/test_kodi_keyboard_provider.py \
+            tests/ekf_appliances/test_host_publication_contract.py \
+            tests/ekf_appliances/test_remote_prerequisite_contract.py \
+            tests/ekf_appliances/test_projector_package.py \
             tests/ekf_appliances/test_mode_press_boundaries.py \
             tests/ekf_appliances/test_native_ir.py \
             tests/ekf_appliances/test_native_mode_observation.py \
-            tests/ekf_appliances/test_paired_media.py::PairBindingsTests \
+            tests/ekf_appliances/test_paired_media.py \
             tests/ekf_appliances/test_power_pair.py \
             tests/ekf_appliances/test_projector_shutdown_state.py \
             tests/ekf_appliances/test_protocol.py \
