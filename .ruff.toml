@@ -26,13 +26,17 @@ ignore = [
     "PLR2004", # Magic values in assertions are acceptable in tests
     "PT009", # The maintained suites intentionally use unittest assertions
     "PT027", # Keep unittest exception assertions alongside pytest-style tests
-    "S101",   # Assertions are the purpose of tests, not production validation
     "SLF001", # Tests can access private members for white-box behavior checks
 ]
 
 # These files run standalone; packaging them changes their sibling imports.
 "tests/test_*.py" = ["INP001"]
-"tests/ekf_appliances/test_*.py" = ["INP001"]
+"tests/ekf_appliances/test_*.py" = ["INP001", "S101"]
+"tests/test_remote_announcements*.py" = ["S101"]
+
+[lint.isort]
+# The HACS-managed namespace may be absent in a source-only checkout.
+known-first-party = ["custom_components"]
 
 [lint.flake8-pytest-style]
 fixture-parentheses = false
