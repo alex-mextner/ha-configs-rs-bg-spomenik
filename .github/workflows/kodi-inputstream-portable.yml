@@ -1,0 +1,299 @@
+name: Build portable Kodi InputStream Adaptive
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/kodi-inputstream-portable.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/kodi-inputstream-portable.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kodi-inputstream-portable-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - name: Check out Kodi 21.2 SDK sources
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: xbmc/xbmc
+          ref: d1a1d48c3cb3722d39264ffdd8132f755ffecd27 # 21.2-Omega
+          path: sources/xbmc
+          persist-credentials: false
+
+      - name: Check out InputStream Adaptive 21.5.25
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: xbmc/inputstream.adaptive
+          ref: ddc857b58094ea8542416b792a9abe6176320065 # 21.5.25-Omega
+          path: sources/inputstream.adaptive
+          persist-credentials: false
+
+      - name: Build, test, and package with upstream static dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 022
+          task_log="/tmp/kodi-inputstream-portable-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          (umask 077; : > "$task_log")
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          trap 'rc=$?; printf "%s completed rc=%s elapsed=%ss log=%s\n" "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting log=%s\n' "$(date -Is)" "$task_log"
+          test "$(uname -m)" = aarch64
+          printf '%s installing CI build tools\n' "$(date -Is)"
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y cmake make g++ pkg-config patch zip unzip
+
+          task_build="$RUNNER_TEMP/kodi-inputstream-build"
+          task_definitions="$RUNNER_TEMP/kodi-inputstream-definitions"
+          task_install="$RUNNER_TEMP/kodi-inputstream-install"
+          mkdir -p "$task_definitions/inputstream.adaptive" "$GITHUB_WORKSPACE/dist"
+          printf '%s\n' 'inputstream.adaptive https://github.com/xbmc/inputstream.adaptive ddc857b58094ea8542416b792a9abe6176320065' > "$task_definitions/inputstream.adaptive/inputstream.adaptive.txt"
+          printf '%s\n' 'all' > "$task_definitions/inputstream.adaptive/platforms.txt"
+
+          # Upstream builds its dependencies with ENABLE_STATIC=1 and BUILD_SHARED_LIBS=0.
+          printf '%s configuring upstream Kodi addon builder\n' "$(date -Is)"
+          cmake -S "$GITHUB_WORKSPACE/sources/xbmc/cmake/addons" -B "$task_build" \
+            -DADDONS_TO_BUILD=inputstream.adaptive \
+            -DADDON_SRC_PREFIX="$GITHUB_WORKSPACE/sources" \
+            -DADDONS_DEFINITION_DIR="$task_definitions" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$task_install" \
+            -DPACKAGE_ZIP=ON \
+            -DPACKAGE_DIR="$GITHUB_WORKSPACE/dist" \
+            -DKODI_MIRROR=https://mirrors.kodi.tv
+          printf '%s building and packaging ARM64 addon\n' "$(date -Is)"
+          cmake --build "$task_build" --target package-addons --parallel 2
+          printf '%s running upstream InputStream Adaptive tests\n' "$(date -Is)"
+          ctest --test-dir "$task_build/inputstream.adaptive-prefix/src/inputstream.adaptive-build" --no-tests=error --output-on-failure
+
+          printf '%s verifying package ABI against observed Odroid runtime\n' "$(date -Is)"
+          python3 - "$GITHUB_WORKSPACE/dist" "$RUNNER_TEMP/kodi-inputstream-verify" "$task_build" <<'CHECK_ABI'
+          import hashlib
+          import json
+          from pathlib import Path, PurePosixPath
+          import re
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          import zipfile
+
+          dist, extracted, build = map(Path, sys.argv[1:])
+          for filename in ('flags.make', 'CMakeCache.txt'):
+              for flags in build.rglob(filename):
+                  if re.search(r'-m(?:arch|cpu|tune)=native\b', flags.read_text(errors='replace')):
+                      raise SystemExit(f'Runner-specific CPU flags: {flags.relative_to(build)}')
+          packages = list(dist.rglob('*.zip'))
+          if len(packages) != 1:
+              raise SystemExit(f'Expected exactly one addon ZIP, found {len(packages)}')
+          package = packages[0]
+          with zipfile.ZipFile(package) as archive:
+              for entry in archive.infolist():
+                  name = PurePosixPath(entry.filename)
+                  if name.is_absolute() or '..' in name.parts:
+                      raise SystemExit('Unexpected archive path')
+              archive.extractall(extracted)
+          root = extracted / 'inputstream.adaptive'
+          addon = ET.parse(root / 'addon.xml').getroot()
+          if addon.get('id') != 'inputstream.adaptive' or addon.get('version') != '21.5.25':
+              raise SystemExit('Unexpected addon identity/version')
+          imports = {item.get('addon'): item.attrib for item in addon.findall('./requires/import')}
+          # All installed kodi.binary.* addon.xml declarations, observed on
+          # Odroid's Debian Kodi 2:21.2+dfsg-4, 2026-11-15.
+          kodi_abis = {
+              'kodi.binary.global.audioengine': ('1.1.0', '1.1.1'),
+              'kodi.binary.global.filesystem': ('1.1.7', '1.1.8'),
+              'kodi.binary.global.general': ('1.0.4', '1.0.5'),
+              'kodi.binary.global.gui': ('5.15.0', '5.15.0'),
+              'kodi.binary.global.main': ('2.0.0', '2.0.2'),
+              'kodi.binary.global.network': ('1.0.0', '1.0.4'),
+              'kodi.binary.global.tools': ('1.0.0', '1.0.4'),
+              'kodi.binary.instance.audiodecoder': ('4.0.0', '4.0.0'),
+              'kodi.binary.instance.audioencoder': ('3.0.0', '3.0.0'),
+              'kodi.binary.instance.game': ('3.0.0', '3.0.2'),
+              'kodi.binary.instance.imagedecoder': ('3.0.0', '3.0.1'),
+              'kodi.binary.instance.inputstream': ('3.3.0', '3.3.0'),
+              'kodi.binary.instance.peripheral': ('3.0.0', '3.0.2'),
+              'kodi.binary.instance.pvr': ('8.2.0', '8.3.0'),
+              'kodi.binary.instance.screensaver': ('2.2.0', '2.2.0'),
+              'kodi.binary.instance.vfs': ('3.0.1', '3.0.1'),
+              'kodi.binary.instance.videocodec': ('2.1.0', '2.1.0'),
+              'kodi.binary.instance.visualization': ('4.0.0', '4.0.0'),
+          }
+          def numeric_version(value):
+              if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){2}', value):
+                  raise SystemExit(f'Unexpected ABI version: {value}')
+              return tuple(map(int, value.split('.')))
+          if 'kodi.binary.instance.inputstream' not in imports:
+              raise SystemExit('InputStream ABI import missing')
+          for name, metadata in imports.items():
+              if not name.startswith('kodi.binary.'):
+                  continue
+              if name not in kodi_abis:
+                  raise SystemExit(f'Kodi does not provide binary API: {name}')
+              abi, provided = map(numeric_version, kodi_abis[name])
+              required = numeric_version(metadata.get('version', ''))
+              if not abi <= required <= provided:
+                  raise SystemExit(f'Unsupported target Kodi binary API: {name}')
+
+          extension = addon.find("./extension[@point='kodi.inputstream']")
+          library_name = extension.get('library_linux', '')
+          if not library_name or Path(library_name).name != library_name:
+              raise SystemExit('Invalid Linux library entry in addon.xml')
+          main_library = root / library_name
+
+          # Observed on the actual Odroid N2, 2026-11-15, from installed ARM64
+          # version-definition sections. Check every required version exactly,
+          # including gaps. GLIBC_PRIVATE is intentionally not an allowed ABI.
+          baseline = {
+              'ld-linux-aarch64.so.1': 'GLIBC_2.17 GLIBC_2.34 GLIBC_2.35'.split(),
+              'libatomic.so.1': 'LIBATOMIC_1.0 LIBATOMIC_1.1 LIBATOMIC_1.2'.split(),
+              'libc.so.6': (
+                  'GLIBC_2.17 GLIBC_2.18 GLIBC_2.22 GLIBC_2.23 GLIBC_2.24 '
+                  'GLIBC_2.25 GLIBC_2.26 GLIBC_2.27 GLIBC_2.28 GLIBC_2.29 '
+                  'GLIBC_2.30 GLIBC_2.31 GLIBC_2.32 GLIBC_2.33 GLIBC_2.34 '
+                  'GLIBC_2.35 GLIBC_2.36 GLIBC_2.38 GLIBC_2.39 GLIBC_2.41 '
+                  'GLIBC_ABI_DT_RELR'
+              ).split(),
+              'libm.so.6': (
+                  'GLIBC_2.17 GLIBC_2.18 GLIBC_2.23 GLIBC_2.24 GLIBC_2.25 '
+                  'GLIBC_2.27 GLIBC_2.28 GLIBC_2.29 GLIBC_2.31 GLIBC_2.32 '
+                  'GLIBC_2.35 GLIBC_2.38 GLIBC_2.39 GLIBC_2.40 GLIBC_2.41'
+              ).split(),
+              'libgcc_s.so.1': (
+                  'GCC_3.0 GCC_3.3 GCC_3.3.1 GCC_3.4 GCC_3.4.2 GCC_3.4.4 '
+                  'GCC_4.0.0 GCC_4.2.0 GCC_4.3.0 GCC_4.5.0 GCC_4.7.0 '
+                  'GCC_7.0.0 GCC_11.0 GCC_13.0.0 GCC_14.0 GCC_14.0.0 GLIBC_2.0'
+              ).split(),
+              'libstdc++.so.6': [
+                  'GLIBCXX_3.4', *(f'GLIBCXX_3.4.{n}' for n in range(1, 34)),
+                  'CXXABI_1.3', *(f'CXXABI_1.3.{n}' for n in range(1, 16)),
+                  'CXXABI_TM_1',
+              ],
+          }
+          target = {
+              'observed_on': '2026-11-15',
+              'host': 'Odroid N2, Debian 13 trixie, ARM64',
+              'packages': {
+                  'kodi': '2:21.2+dfsg-4',
+                  'libc6': '2.41-12+deb13u3',
+                  'libstdc++6': '14.2.0-19',
+                  'libgcc-s1': '14.2.0-19',
+                  'libatomic1': '14.2.0-19',
+              },
+              'floors': {'GLIBC': '2.41', 'GLIBCXX': '3.4.33', 'CXXABI': '1.3.15'},
+              'library_sha256': {
+                  'ld-linux-aarch64.so.1': '1d8b77f28b7cec0329dca107a28fb0a850193b1dcce59be68fa0b06b514548cc',
+                  'libatomic.so.1': '6465c95aef505776652e9caf582d54c67b8e6314ae5a26973bd188b8f5d56c8e',
+                  'libc.so.6': '9a325944115b36e74077786b29531963d96cd55cd6c82f11750a352cdb58fab0',
+                  'libgcc_s.so.1': '9a146967dc38c3820c5dc21c3209812655f66b6551264072b187bd0e787947e0',
+                  'libm.so.6': 'a8afb2d1f4a0c5e14c0fc82f794ec839eafe29738907aa92895410f57630bbe2',
+                  'libstdc++.so.6': 'fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19',
+              },
+              'exported_versions': baseline,
+              'kodi_binary_apis': {name: {'abi': versions[0], 'version': versions[1]}
+                                  for name, versions in kodi_abis.items()},
+          }
+          checks = []
+          elf_paths = []
+          for path in sorted(extracted.rglob('*')):
+              if not path.is_file():
+                  continue
+              with path.open('rb') as stream:
+                  is_elf = stream.read(4) == b'\x7fELF'
+              if not is_elf:
+                  continue
+              elf_paths.append(path)
+              header = subprocess.check_output(['readelf', '-W', '-h', str(path)], text=True)
+              if 'AArch64' not in header or 'ELF64' not in header:
+                  raise SystemExit(f'Wrong ELF architecture: {path.name}')
+              dynamic = subprocess.check_output(['readelf', '-W', '-d', str(path)], text=True)
+              needed = re.findall(r'\(NEEDED\).*Shared library: \[([^\]]+)\]', dynamic)
+              unknown = set(needed) - set(baseline)
+              if unknown:
+                  raise SystemExit(f'Unpackaged runtime dependencies in {path.name}: {sorted(unknown)}')
+              symbols = subprocess.check_output(['readelf', '-W', '--dyn-syms', str(path)], text=True)
+              weak_unversioned = []
+              versioned_undefined_count = 0
+              for line in symbols.splitlines():
+                  columns = line.split()
+                  if len(columns) < 8 or columns[6] != 'UND':
+                      continue
+                  symbol = columns[7]
+                  if '@' in symbol:
+                      versioned_undefined_count += 1
+                  elif columns[4] == 'WEAK':
+                      weak_unversioned.append(symbol)
+                  else:
+                      raise SystemExit(f'Unversioned unresolved symbol in {path.name}: {symbol}')
+              versions = subprocess.check_output(['readelf', '-W', '--version-info', str(path)], text=True)
+              needs = versions.partition('Version needs section')[2]
+              required = {}
+              library = None
+              for line in needs.splitlines():
+                  match = re.search(r'\bFile: (\S+)', line)
+                  if match:
+                      library = match.group(1)
+                      if library not in baseline:
+                          raise SystemExit(f'Unknown version provider: {library}')
+                  match = re.search(r'\bName: (\S+)', line)
+                  if match:
+                      version = match.group(1)
+                      if library is None or version not in baseline[library]:
+                          raise SystemExit(f'Unsupported required version in {path.name}: {library}:{version}')
+                      required.setdefault(library, []).append(version)
+              checks.append({
+                  'file': path.relative_to(extracted).as_posix(),
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                  'needed': needed,
+                  'required_versions': required,
+                  'versioned_undefined_count': versioned_undefined_count,
+                  'weak_unversioned_undefined': weak_unversioned,
+              })
+          if main_library not in elf_paths:
+              raise SystemExit('addon.xml library_linux is not a checked ELF file')
+          digest = hashlib.sha256(package.read_bytes()).hexdigest()
+          (dist / 'package.sha256').write_text(f'{digest}  {package.relative_to(dist).as_posix()}\n')
+          (dist / 'target-runtime-baseline.json').write_text(json.dumps(target, indent=2) + '\n')
+          (dist / 'elf-verification.json').write_text(json.dumps(checks, indent=2) + '\n')
+          print(f'Checked addon.xml library_linux={library_name}, every target Kodi binary API, and all {len(checks)} ELF files')
+          print('Target runtime: glibc 2.41; GLIBCXX 3.4.33; CXXABI 1.3.15; all required versions supported')
+          CHECK_ABI
+          (cd "$GITHUB_WORKSPACE/dist" && sha256sum -c package.sha256)
+          cp -a "$GITHUB_WORKSPACE/sources/inputstream.adaptive/LICENSES" "$GITHUB_WORKSPACE/dist/LICENSES"
+          {
+            printf '%s\n' 'Kodi SDK: https://github.com/xbmc/xbmc/commit/d1a1d48c3cb3722d39264ffdd8132f755ffecd27'
+            printf '%s\n' 'InputStream Adaptive: https://github.com/xbmc/inputstream.adaptive/commit/ddc857b58094ea8542416b792a9abe6176320065'
+            printf '%s\n' 'Platform: ubuntu-24.04-arm; native ARM64; upstream static dependency builder'
+            printf '%s\n' 'Target: Odroid N2 Debian 13; Kodi 2:21.2+dfsg-4; libc6 2.41-12+deb13u3; GCC runtimes 14.2.0-19; observed 2026-11-15'
+            printf '%s\n' 'Verified target symbol versions: GLIBC through 2.41, GLIBCXX through 3.4.33, CXXABI through 1.3.15; see target-runtime-baseline.json'
+            printf 'CI run: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            date -Is
+          } > "$GITHUB_WORKSPACE/dist/provenance.txt"
+
+      - name: Upload portable addon and verification evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kodi-inputstream-adaptive-21.5.25-linux-arm64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kodi-inputstream-portable-build-log
+          path: /tmp/kodi-inputstream-portable-*.log
+          if-no-files-found: ignore
+          retention-days: 14
