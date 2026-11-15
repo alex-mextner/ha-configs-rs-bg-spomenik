@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import time
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -41,21 +42,29 @@ class ResolverTests(unittest.TestCase):
         self.set_generation(self.request_id)
         self.module = load_resolver()
         self.log = Mock()
+        ranges = {
+            "initRange": {"start": "0", "end": "735"},
+            "indexRange": {"start": "736", "end": "1067"},
+            "approxDurationMs": "36000000",
+        }
         self.video = {
+            **ranges,
+            "itag": 137,
             "url": "https://rr1.example.googlevideo.com/video?signed=private",
-            "vcodec": "avc1.640028",
-            "acodec": "none",
-            "container": "mp4_dash",
+            "mimeType": 'video/mp4; codecs="avc1.640028"',
             "width": 1920,
             "height": 1080,
             "fps": 30,
-            "http_headers": {"User-Agent": "public-player"},
+            "bitrate": 3500000,
         }
         self.audio = {
+            **ranges,
+            "itag": 140,
             "url": "https://rr1.example.googlevideo.com/audio?signed=private",
-            "vcodec": "none",
-            "acodec": "mp4a.40.2",
-            "container": "m4a_dash",
+            "mimeType": 'audio/mp4; codecs="mp4a.40.2"',
+            "audioChannels": 2,
+            "audioSampleRate": "44100",
+            "bitrate": 128000,
         }
         self.result = {
             "id": VIDEO_ID,
@@ -63,32 +72,30 @@ class ResolverTests(unittest.TestCase):
             "duration": 36000,
             "formats": [self.audio, self.video],
         }
-        self.extractor = Mock()
-        self.extractor.__enter__ = Mock(return_value=self.extractor)
-        self.extractor.__exit__ = Mock(return_value=False)
-        self.extractor.extract_info = Mock(side_effect=lambda *_a, **_kw: self.result)
-        self.ytdlp = types.SimpleNamespace(YoutubeDL=Mock(return_value=self.extractor))
-        self.selection = types.SimpleNamespace(
-            analyze_formats=Mock(side_effect=self.analyze_fixture),
-            pick_best_dash_video_format=Mock(return_value=self.video),
-            build_dash_manifest_candidate=Mock(side_effect=self.build_fixture),
+        self.player = Mock(side_effect=lambda: self.result)
+        self.inner = types.SimpleNamespace(
+            CLIENTS={"android_testsuite": {"headers": {"User-Agent": "public-player"}}},
+            player_responses=Mock(side_effect=self.player_responses),
         )
-        self.builder = types.SimpleNamespace(Manifest=object())
+        self.builder = types.SimpleNamespace(
+            manifest=Mock(side_effect=self.build_fixture),
+            _usable=lambda item: isinstance(item, dict) and not item.get("isDrc"),
+            _mime=lambda item: (
+                item["mimeType"].partition(";")[0],
+                item["mimeType"].partition('codecs="')[2].rstrip('"'),
+            ),
+        )
         self.payload = b"<MPD><Period>fixture from upstream builder</Period></MPD>"
         self.runtimes = patch.object(
-            self.module,
-            "runtime_modules",
-            return_value=(
-                self.ytdlp,
-                self.builder,
-                self.selection,
-                Path("/runtime/deno"),
-                "2026.10.26",
-                "v2.9.8",
-            ),
+            self.module, "smarttube_modules", return_value=(self.inner, self.builder)
         )
         self.runtime_lookup = self.runtimes.start()
         self.addCleanup(self.runtimes.stop)
+        self.transport_patch = patch.object(
+            self.module, "urlopen", side_effect=self.transport
+        )
+        self.transport_patch.start()
+        self.addCleanup(self.transport_patch.stop)
 
     def set_generation(self, request_id):
         (self.state / "current-request.json").write_text(
@@ -123,34 +130,44 @@ class ResolverTests(unittest.TestCase):
             )
         )
 
-    @staticmethod
-    def analyze_fixture(formats):
-        video = [item for item in formats if item.get("vcodec") != "none"]
-        audio = [item for item in formats if item.get("acodec") != "none"]
-        return bool(video), bool(audio), video, audio
+    def transport(self, _request, **_kwargs):
+        return io.BytesIO(
+            json.dumps(
+                {
+                    "playabilityStatus": {"status": "OK"},
+                    "videoDetails": {"videoId": self.result["id"]},
+                }
+            ).encode()
+        )
 
-    def build_fixture(
-        self,
-        duration,
-        videos,
-        audios,
-        have_video,
-        have_audio,
-        factory,
-        capture,
-        **kwargs,
-    ):
-        self.assertEqual(duration, 36000)
-        self.assertEqual(videos, [self.video])
-        self.assertEqual(audios, [self.audio])
-        self.assertTrue(have_video and have_audio)
-        self.assertIs(factory, self.builder.Manifest)
+    def player_responses(self, _video_id, *, opener):
+        result = self.player()
+        opener(
+            "https://www.youtube.com/youtubei/v1/player",
+            b"{}",
+            {"User-Agent": "public-player"},
+            15,
+        )
+        yield (
+            {
+                "playable": True,
+                "is_live": False,
+                "title": result["title"],
+                "length_seconds": result["duration"],
+                "adaptive": result["formats"],
+            },
+            "android_testsuite",
+        )
+
+    def build_fixture(self, formats, *, hdr):
+        self.assertEqual(formats, [self.video, self.audio])
+        self.assertFalse(hdr)
         owner = json.loads(
             (self.state / "requests" / self.request_id / "owner.json").read_text()
         )
         self.assertEqual(owner["owner"], self.module.OWNER_NAME)
         self.assertEqual(owner["request_id"], self.request_id)
-        return {"url": capture(self.payload), "events": []}
+        return self.payload.decode()
 
     def resolve(self):
         return self.module.resolve(VIDEO_ID, self.request_id, self.home, self.log)
@@ -184,7 +201,7 @@ class ResolverTests(unittest.TestCase):
             self.module.ResolveError, "hd_audio_video_unavailable"
         ):
             self.resolve()
-        self.selection.build_dash_manifest_candidate.assert_not_called()
+        self.builder.manifest.assert_not_called()
 
     def test_audio_without_hd_video_is_rejected(self):
         self.result["formats"] = [
@@ -195,17 +212,19 @@ class ResolverTests(unittest.TestCase):
             self.module.ResolveError, "hd_audio_video_unavailable"
         ):
             self.resolve()
-        self.selection.build_dash_manifest_candidate.assert_not_called()
+        self.builder.manifest.assert_not_called()
 
     def test_unsupported_codec_and_resolution_are_filtered(self):
         self.result["formats"] = [
             self.audio,
             self.video,
-            {**self.video, "vcodec": "vp09.00.51.08"},
+            {**self.video, "mimeType": 'video/webm; codecs="vp09.00.51.08"'},
             {**self.video, "height": 2160, "width": 3840},
             {**self.video, "height": 360, "width": 640},
         ]
-        selected = self.module.select_hd_formats(self.result)
+        selected = self.module.select_smarttube_formats(
+            self.result["formats"], self.builder
+        )
         self.assertEqual(selected, [self.audio, self.video])
 
     def test_stale_request_does_not_start_extraction(self):
@@ -219,7 +238,7 @@ class ResolverTests(unittest.TestCase):
             self.set_generation(str(uuid4()))
             return self.result
 
-        self.extractor.extract_info.side_effect = extract
+        self.player.side_effect = extract
         with self.assertRaisesRegex(self.module.ResolveError, "request_cancelled"):
             self.resolve()
         self.assertFalse((self.state / "requests" / self.request_id).exists())
@@ -230,7 +249,7 @@ class ResolverTests(unittest.TestCase):
             self.set_generation(str(uuid4()))
             return candidate
 
-        self.selection.build_dash_manifest_candidate.side_effect = build
+        self.builder.manifest.side_effect = build
         with self.assertRaisesRegex(self.module.ResolveError, "request_cancelled"):
             self.resolve()
         self.assertFalse((self.state / "requests" / self.request_id).exists())
@@ -239,7 +258,7 @@ class ResolverTests(unittest.TestCase):
         self.result["id"] = "different01"
         with self.assertRaisesRegex(self.module.ResolveError, "unexpected_video"):
             self.resolve()
-        self.selection.build_dash_manifest_candidate.assert_not_called()
+        self.builder.manifest.assert_not_called()
 
     def make_owned_request(self, request_id, age):
         directory = self.state / "requests" / request_id

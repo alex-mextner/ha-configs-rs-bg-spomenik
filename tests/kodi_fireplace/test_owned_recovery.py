@@ -57,3 +57,21 @@ class OwnerRecoveryCases(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
         self.assertNotIn("Player.SetRepeat", [method for method, _ in self.kodi.calls])
         self.assertEqual(self.kodi.repeat, "off")
+
+    def test_expiry_after_the_final_read_drops_an_undispatched_arm(self) -> None:
+        now = [100.0]
+        read = self.controller._read
+
+        def read_then_expire(deadline):
+            current = read(deadline)
+            if self.controller._owner is not None:
+                now[0] = 102.0
+            return current
+
+        with patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]):
+            with patch.object(self.controller, "_read", side_effect=read_then_expire):
+                with self.assertRaises(self.module.FireplaceError):
+                    self.controller.start()
+        self.assertFalse(self.receipt.exists())
+        self.assertNotIn("Player.SetRepeat", [method for method, _ in self.kodi.calls])
+        self.assertEqual(self.kodi.repeat, "off")

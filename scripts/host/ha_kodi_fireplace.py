@@ -26,6 +26,10 @@ class FireplaceError(Exception):
     """A safe error code; never include Kodi response bodies or other filenames."""
 
 
+class RpcNotDispatchedError(FireplaceError):
+    """The local deadline/closing guard rejected a call before dispatch."""
+
+
 def atomic_json(path, value):
     """Durably replace a private JSON record, including its directory entry."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -108,9 +112,9 @@ class OwnedPlayback:
 
     def _rpc(self, method, params, deadline):
         if self._closing.is_set():
-            raise FireplaceError("stopped")
+            raise RpcNotDispatchedError("stopped")
         if time.monotonic() >= deadline:
-            raise FireplaceError("deadline")
+            raise RpcNotDispatchedError("deadline")
         return self._rpc_callback(method, params, deadline)
 
     def _persist(self, receipt):
@@ -405,7 +409,11 @@ class OwnedPlayback:
             # must not leave a receipt that can later reclaim unrelated repeat.
             self._forget()
             raise
-        self._rpc("Player.SetRepeat", {"playerid": 1, "repeat": "one"}, deadline)
+        try:
+            self._rpc("Player.SetRepeat", {"playerid": 1, "repeat": "one"}, deadline)
+        except RpcNotDispatchedError:
+            self._forget()
+            raise
         proof = self._observe(deadline)
         self.start_monitor()
         if proof["state"] != "playing":
@@ -447,7 +455,7 @@ class OwnedPlayback:
                 raise FireplaceError("stopped")
             self._stop_requested = True
             if not self._owner:
-                return self.status()
+                return {**self.status(), "stopped": False}
             deadline = self._bounded_deadline(deadline)
             try:
                 current = self._read(deadline)
@@ -455,7 +463,12 @@ class OwnedPlayback:
                     return self._publish(current, error="foreign_player_active")
                 if current["file_matches"]:
                     self._rpc("Player.Stop", {"playerid": 1}, deadline)
-                return self._observe(deadline)
+                proof = self._observe(deadline)
+                latest = self._read(deadline)
+                return {
+                    **proof,
+                    "stopped": not latest["foreign_player"] and not latest["active"],
+                }
             except FireplaceError:
                 raise
             except Exception as exc:

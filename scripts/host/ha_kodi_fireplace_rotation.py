@@ -604,10 +604,19 @@ class RotatingFireplaceController:
         self._pending = None
         self._store()
 
+    def _require_progress_ownership(self, proof):
+        if not proof["owned"]:
+            # External playback or repeat intent supersedes this failed launch.
+            self._cancel_attempt()
+            self._active = self._pending = None
+            self._store()
+            raise self.Error("playback_changed")
+
     def _await_progress(self, proof, deadline):
         progress_deadline = min(deadline, time.monotonic() + 3)
         while time.monotonic() < progress_deadline:
             self._check_cancelled()
+            self._require_progress_ownership(proof)
             value = self._proof(proof)
             if (
                 value["state"] == "playing"
@@ -623,10 +632,11 @@ class RotatingFireplaceController:
             if self._closing.wait(self._poll):
                 raise self.Error("cancelled")
             proof = self._owner.observe(deadline=progress_deadline)
+        self._require_progress_ownership(proof)
         self._cancel_attempt()
         try:
             stopped = self._owner.stop(deadline=deadline + 8.0)
-            if stopped["owned"]:
+            if stopped["owned"] or stopped.get("stopped") is not True:
                 raise self.Error("stop_unconfirmed")
         except Exception as error:
             raise self.Error("stop_unconfirmed") from error
@@ -699,7 +709,7 @@ class RotatingFireplaceController:
                     "stop_unconfirmed",
                     "deadline",
                     "cancelled",
-                    "owner_not_ready",
+                    "playback_changed",
                 },
             )
             raise
@@ -746,17 +756,60 @@ class RotatingFireplaceController:
                 return self._publish(previous)
             return self._publish(value)
 
+    def _fence_pending(self):
+        with self._cancel_lock:
+            current = json.loads(self._generation.read_text())
+            if current.get("request_id") == self._pending.get("attempt_id"):
+                self._write_generation(str(uuid4()))
+
+    def _settle_unleased(self, proof):
+        if (
+            self._pending is None
+            or self._pending.get("phase") != "opening"
+            or proof["owned"]
+        ):
+            return True
+        self._fence_pending()
+        if proof.get("stopped") is True and self._matched is self._pending:
+            return True
+        return self._stop_unleased_candidate()
+
+    def _unresolved_opening(self):
+        value = self.status()
+        identity = self._pending or {}
+        value.update(
+            {
+                key: identity.get(key)
+                for key in (
+                    "request_id",
+                    "launch_started_at",
+                    "source_id",
+                    "source_kind",
+                )
+            }
+        )
+        value.update(
+            state="unknown",
+            owned=False,
+            file_matches=False,
+            progressing=False,
+            observed_at=None,
+            error="stop_unconfirmed",
+        )
+        return self._publish(value)
+
     def observe(self):
         if self._load_error or not self._lock.acquire(blocking=False):
             return self.status()
         try:
             self._recover_prepared()
-            if self._pending is not None and not self._owner.status()["owned"]:
-                self._cancel_attempt()
-                self._stop_unleased_candidate()
             proof = (
                 self._owner.stop() if self._stop_requested else self._owner.observe()
             )
+            if not self._settle_unleased(proof):
+                return self._unresolved_opening()
+            if self._pending is not None and not proof["owned"]:
+                proof = self._owner.observe()
             return self._finish_observation(proof)
         except Exception:
             value = self.status()
@@ -770,15 +823,20 @@ class RotatingFireplaceController:
         finally:
             self._lock.release()
 
+    def _recovery_rpc(self, method, params, deadline):
+        if self._closing.is_set():
+            raise self.Error("stopped")
+        return self._rpc(method, params, deadline)
+
     def _stop_unleased_candidate(self):
         if (
             self._pending is None
             or self._pending.get("phase") != "opening"
             or self._owner.status()["owned"]
         ):
-            return
+            return False
         deadline = time.monotonic() + 3
-        players = self._rpc("Player.GetActivePlayers", {}, deadline)
+        players = self._recovery_rpc("Player.GetActivePlayers", {}, deadline)
         if (
             not isinstance(players, list)
             or len(players) != 1
@@ -786,17 +844,19 @@ class RotatingFireplaceController:
             or players[0].get("playerid") != 1
             or players[0].get("type") != "video"
         ):
-            return
-        item = self._rpc(
+            return False
+        item = self._recovery_rpc(
             "Player.GetItem", {"playerid": 1, "properties": ["file"]}, deadline
         )
         raw = item.get("item", {}).get("file")
         expected = {self._pending.get("file_hash"), self._pending.get("open_hash")}
         if not isinstance(raw, str) or file_hash(raw) not in expected:
-            return
-        self._rpc("Player.Stop", {"playerid": 1}, deadline)
-        if self._rpc("Player.GetActivePlayers", {}, deadline):
+            return False
+        self._recovery_rpc("Player.Stop", {"playerid": 1}, deadline)
+        if self._recovery_rpc("Player.GetActivePlayers", {}, deadline):
             raise self.Error("stop_unconfirmed")
+
+        return True
 
     def stop(self):
         if self._load_error:
@@ -820,8 +880,11 @@ class RotatingFireplaceController:
                 if sequence != self._intent_seq:
                     return self.status()
             try:
-                self._stop_unleased_candidate()
                 proof = self._owner.stop()
+                if not self._settle_unleased(proof):
+                    raise self.Error("stop_unconfirmed")
+                if self._pending is not None and not proof["owned"]:
+                    proof = self._owner.observe()
                 self._failed_request = False
                 if not proof["owned"]:
                     self._active = self._pending = None

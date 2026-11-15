@@ -2,9 +2,9 @@
 
 import json
 import multiprocessing
-import traceback
 import threading
 import time
+import traceback
 from unittest.mock import patch
 
 import test_rotation as fixtures
@@ -395,3 +395,138 @@ class RecoveryCases(fixtures.FixtureBase):
         self.assertEqual(
             len([call for call in self.kodi.calls if call[0] == "Player.Open"]), 1
         )
+
+    def interrupted_first_open(self):
+        controller = self.multi()
+        original = controller._rpc
+
+        def crash_after_open(method, params, deadline):
+            result = original(method, params, deadline)
+            if method == "Player.Open":
+                raise SimulatedCrashError
+            return result
+
+        controller._rpc = crash_after_open
+        with self.assertRaises(SimulatedCrashError):
+            controller.start("interrupted")
+        controller.close()
+        self.assertFalse((self.root / "owner.json").exists())
+        self.kodi.calls.clear()
+        return self.multi()
+
+    def test_unleased_unknown_item_keeps_journal_until_identified_stop(self) -> None:
+        recovered = self.interrupted_first_open()
+        native = self.kodi.rpc
+        readable = False
+
+        def transition(method, params, deadline):
+            if method == "Player.GetItem" and not readable:
+                return {"item": {"label": "native transition"}}
+            return native(method, params, deadline)
+
+        recovered._rpc = transition
+        self.assertEqual(recovered.observe()["state"], "unknown")
+        self.assertEqual(self.selection()["pending"]["phase"], "opening")
+        readable = True
+        recovered.observe()
+        self.assertIsNone(self.kodi.file)
+        self.assertIsNone(self.selection()["pending"])
+        self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Open"])
+
+    def test_unleased_empty_player_keeps_journal_for_delayed_activation(self) -> None:
+        recovered = self.interrupted_first_open()
+        expected = self.kodi.file
+        self.kodi.file, self.kodi.speed = None, 0
+        self.assertEqual(recovered.observe()["state"], "unknown")
+        self.assertEqual(self.selection()["pending"]["phase"], "opening")
+        self.kodi.file, self.kodi.speed = expected, 1
+        recovered.observe()
+        self.assertIsNone(self.kodi.file)
+        self.assertIsNone(self.selection()["pending"])
+
+    def test_crash_after_arming_stops_exact_candidate_after_lease_release(self) -> None:
+        controller = self.multi()
+        persist = controller._owner._persist
+
+        def durable_arm_then_crash(receipt):
+            persist(receipt)
+            raise SimulatedCrashError
+
+        with patch.object(
+            controller._owner, "_persist", side_effect=durable_arm_then_crash
+        ):
+            with self.assertRaises(SimulatedCrashError):
+                controller.start("armed-crash")
+        self.assertEqual(
+            json.loads((self.root / "owner.json").read_text())["phase"], "armed"
+        )
+        controller.close()
+        self.kodi.calls.clear()
+        recovered = self.multi()
+        recovered.observe()
+        self.assertIsNone(self.kodi.file)
+        self.assertIsNone(self.selection()["pending"])
+        self.assertIsNone(self.selection()["last_successful_source_id"])
+        self.assertEqual(
+            [method for method, _ in self.kodi.calls if method == "Player.Stop"],
+            ["Player.Stop"],
+        )
+
+    def test_external_playback_during_progress_aborts_without_failover(self) -> None:
+        controller = self.multi(operation_timeout=8)
+        observe = controller._owner.observe
+        changed = False
+
+        def human_replacement(**options):
+            nonlocal changed
+            if not changed:
+                changed = True
+                self.kodi.file = "/human/movie.mkv"
+                self.kodi.repeat = "off"
+            return observe(**options)
+
+        with patch.object(controller._owner, "observe", side_effect=human_replacement):
+            with self.assertRaisesRegex(
+                fixtures.fireplace.FireplaceError, "playback_changed"
+            ):
+                controller.start("interrupted-by-human")
+        self.assertEqual(self.kodi.file, "/human/movie.mkv")
+        self.assertEqual(controller.status()["state"], "unknown")
+        self.assertEqual(
+            sum(method == "Player.Open" for method, _ in self.kodi.calls), 1
+        )
+        self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])
+
+    def test_foreign_playback_at_stop_is_not_confirmed_shutdown_or_failover(
+        self,
+    ) -> None:
+        controller = self.multi(operation_timeout=8)
+        native = controller._rpc
+        stop = controller._owner.stop
+
+        def stalled(method, params, deadline):
+            result = native(method, params, deadline)
+            if method == "Player.GetProperties":
+                result["time"] = {
+                    "hours": 0,
+                    "minutes": 0,
+                    "seconds": 0,
+                    "milliseconds": 0,
+                }
+            return result
+
+        def human_replacement(**options):
+            self.kodi.file = "/human/movie.mkv"
+            return stop(**options)
+
+        controller._rpc = stalled
+        with patch.object(controller._owner, "stop", side_effect=human_replacement):
+            with self.assertRaisesRegex(
+                fixtures.fireplace.FireplaceError, "stop_unconfirmed"
+            ):
+                controller.start("stalled")
+        self.assertEqual(self.kodi.file, "/human/movie.mkv")
+        self.assertEqual(
+            sum(method == "Player.Open" for method, _ in self.kodi.calls), 1
+        )
+        self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Stop"])

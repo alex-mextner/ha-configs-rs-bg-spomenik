@@ -217,15 +217,8 @@ def watch_run(
             raise command_failure(operation, returncode, diagnostics.read(ERROR_LIMIT))
 
 
-def verify_workflow(
-    repo: str,
-    commit: str,
-    workflow: str,
-    required_jobs: tuple[str, ...],
-    record: Callable[[str], None],
-    _log: TextIO,
-) -> None:
-    """Verify the newest exact-commit push run for one required workflow."""
+def latest_push_run(repo: str, commit: str, workflow: str) -> dict[str, Any]:
+    """Relist and select the newest push run for this workflow and commit."""
     runs = json.loads(
         capture(
             [
@@ -259,14 +252,12 @@ def verify_workflow(
             + "; push the reviewed commit first"
         )
         raise GateError(message)
-    run = max(matching, key=lambda item: item["databaseId"])
-    run_id = str(run["databaseId"])
-    record(
-        f"native CI workflow={workflow} commit={commit} run={run_id} url={run['url']}"
-    )
-    if run.get("status") != "completed":
-        watch_run(repo, run_id, record)
-    receipt = json.loads(
+    return max(matching, key=lambda item: item["databaseId"])
+
+
+def current_run_receipt(repo: str, run_id: str) -> dict[str, Any]:
+    """Reread the selected run's current event, result, and native job statuses."""
+    return json.loads(
         capture(
             [
                 "gh",
@@ -280,18 +271,45 @@ def verify_workflow(
             ]
         )
     )
-    url = verify_receipt(receipt, commit, required_jobs)
+
+
+def verify_workflow(
+    repo: str,
+    commit: str,
+    workflow: str,
+    required_jobs: tuple[str, ...],
+    record: Callable[[str], None],
+    _log: TextIO,
+) -> None:
+    """Wait for and verify the newest exact-commit push run for one workflow."""
+    run = latest_push_run(repo, commit, workflow)
+    run_id = str(run["databaseId"])
+    record(
+        f"native CI workflow={workflow} commit={commit} run={run_id} url={run['url']}"
+    )
+    if run.get("status") != "completed":
+        watch_run(repo, run_id, record)
+    url = verify_receipt(current_run_receipt(repo, run_id), commit, required_jobs)
     record(f"verified native regression receipt workflow={workflow} url={url}")
 
 
 def verify_all(record: Callable[[str], None], log: TextIO) -> None:
-    """Check every required workflow and recheck source identity after waiting."""
+    """Wait for required workflows, then revalidate current receipts and source."""
     commit = local_commit()
     repo = json.loads(capture(["gh", "repo", "view", "--json", "nameWithOwner"]))[
         "nameWithOwner"
     ]
     for workflow, required_jobs in WORKFLOWS.items():
         verify_workflow(repo, commit, workflow, required_jobs, record, log)
+    if local_commit() != commit:
+        message = "The local commit changed while native CI was being verified"
+        raise GateError(message)
+    record("revalidating latest push receipts without waiting")
+    for workflow, required_jobs in WORKFLOWS.items():
+        run = latest_push_run(repo, commit, workflow)
+        receipt = current_run_receipt(repo, str(run["databaseId"]))
+        url = verify_receipt(receipt, commit, required_jobs)
+        record(f"revalidated latest native push receipt workflow={workflow} url={url}")
     if local_commit() != commit:
         message = "The local commit changed while native CI was being verified"
         raise GateError(message)

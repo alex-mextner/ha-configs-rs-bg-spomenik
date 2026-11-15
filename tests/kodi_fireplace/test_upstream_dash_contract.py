@@ -1,4 +1,4 @@
-"""CI contract with real pinned SendToKodi code; only network transport is faked.
+"""CI contracts with real pinned OSS builders; only network transport is faked.
 
 The upstream sources stay in a temporary directory, outside this repository.
 Run through the existing native CI/Runpod suite, never on the home machines.
@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
-from pathlib import Path
 import tempfile
 import types
 import unittest
-from unittest.mock import MagicMock, Mock, patch
 import urllib.request
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs
 from uuid import uuid4
-import xml.etree.ElementTree as ET
 
+from test_smarttube_provider import VIDEO_ID, public_player_response
 from test_youtube_adapter import FakeItem, load_adapter
 from test_youtube_resolver import load_resolver
 
@@ -38,13 +40,14 @@ def load_path(name, path):
     return module
 
 
-def fetch_pinned_source(directory, name, expected):
-    url = (
-        "https://raw.githubusercontent.com/firsttris/plugin.video.sendtokodi/"
-        + UPSTREAM_COMMIT
-        + "/"
-        + name
-    )
+def fetch_pinned_source(
+    directory,
+    name,
+    expected,
+    repository="firsttris/plugin.video.sendtokodi",
+    commit=UPSTREAM_COMMIT,
+):
+    url = "https://raw.githubusercontent.com/" + repository + "/" + commit + "/" + name
     with urllib.request.urlopen(url, timeout=20) as response:
         payload = response.read(128 * 1024 + 1)
     if hashlib.sha256(payload).hexdigest() != expected:
@@ -74,6 +77,21 @@ class UpstreamDashContractTests(unittest.TestCase):
             )
         cls.selection = load_path(
             "sendtokodi_contract_selection", source / "core/playback_selection.py"
+        )
+        resolver = load_resolver()
+        for filename, digest in resolver.SMARTTUBE_FILES.items():
+            fetch_pinned_source(
+                source,
+                "resources/lib/" + filename,
+                digest,
+                repository="primez-x/plugin.video.smarttube",
+                commit=resolver.SMARTTUBE_COMMIT,
+            )
+        cls.inner = load_path(
+            "smarttube_contract_innertube", source / "resources/lib/innertube.py"
+        )
+        cls.smart_dash = load_path(
+            "smarttube_contract_dash", source / "resources/lib/dash.py"
         )
         cls.manifest = load_path(
             "ha_youtube_manifest_contract",
@@ -136,32 +154,37 @@ class UpstreamDashContractTests(unittest.TestCase):
             ],
         }
 
-    def test_real_upstream_output_crosses_resolver_reader_and_adapter(self):
-        extractor = MagicMock()
-        extractor.__enter__.return_value = extractor
-        extractor.extract_info.return_value = self.public_metadata_fixture()
-        ytdlp = types.SimpleNamespace(YoutubeDL=Mock(return_value=extractor))
-        runtimes = (
-            ytdlp,
-            self.builder,
-            self.selection,
-            Path("/fixture/deno"),
-            "2026.10.26",
-            "v2.9.8",
+    def prepare_sendtokodi(self, _video_id, _home, _log):
+        """Keep validating the enabled SendToKodi builder through publication."""
+        metadata = self.public_metadata_fixture()
+        have_video, have_audio, videos, audios = self.selection.analyze_formats(
+            metadata["formats"]
         )
-        with (
-            patch.object(self.resolver, "runtime_modules", return_value=runtimes),
-            patch.object(
-                self.builder,
-                "find_init_and_index_ranges",
-                return_value=((0, 735), (736, 1067)),
-            ) as ranges,
-        ):
-            result = self.resolver.resolve(
-                "L_LUpnjgPso", self.request_id, self.home, Mock()
-            )
-        self.assertEqual(ranges.call_count, 2)
-        self.requests.get.assert_not_called()
+        video = self.selection.pick_best_dash_video_format(videos, 1920)
+        prepared = {
+            "title": metadata["title"],
+            "width": video["width"],
+            "height": video["height"],
+            "headers": self.resolver.safe_headers(video["http_headers"]),
+        }
+
+        def capture(payload, **_ignored):
+            prepared["payload"] = payload
+            return str(self.state / "requests" / self.request_id / "manifest.mpd")
+
+        self.selection.build_dash_manifest_candidate(
+            metadata["duration"],
+            [video],
+            audios,
+            have_video,
+            have_audio,
+            self.builder.Manifest,
+            capture,
+            preferred_video_format=video,
+        )
+        return prepared
+
+    def assert_prepared_delivery(self, result, title):
         payload = self.manifest.read_manifest(
             self.state, {"request_id": [self.request_id]}
         )
@@ -185,10 +208,51 @@ class UpstreamDashContractTests(unittest.TestCase):
             "contract-private-host-token",
             item.properties["inputstream.adaptive.stream_headers"],
         )
-        item.info.setTitle.assert_called_once_with("Contract fireplace")
+        item.info.setTitle.assert_called_once_with(title)
+        return payload
+
+    def test_real_sendtokodi_output_crosses_publication_reader_and_adapter(self):
+        with (
+            patch.object(
+                self.resolver, "prepare_smarttube", side_effect=self.prepare_sendtokodi
+            ),
+            patch.object(
+                self.builder,
+                "find_init_and_index_ranges",
+                return_value=((0, 735), (736, 1067)),
+            ) as ranges,
+        ):
+            result = self.resolver.resolve(
+                "L_LUpnjgPso", self.request_id, self.home, Mock()
+            )
+        self.assertEqual(ranges.call_count, 2)
+        self.requests.get.assert_not_called()
+        payload = self.assert_prepared_delivery(result, "Contract fireplace")
         print(
             "SendToKodi v0.10.3 contract commit="
             + UPSTREAM_COMMIT
+            + " manifest_sha256="
+            + hashlib.sha256(payload).hexdigest()
+        )
+
+    def test_real_smarttube_source_crosses_resolver_reader_and_adapter(self):
+        raw = json.dumps(public_player_response()).encode()
+        with (
+            patch.object(
+                self.resolver,
+                "smarttube_modules",
+                return_value=(self.inner, self.smart_dash),
+            ),
+            patch.object(
+                self.resolver, "urlopen", return_value=io.BytesIO(raw)
+            ) as transport,
+        ):
+            result = self.resolver.resolve(VIDEO_ID, self.request_id, self.home, Mock())
+        self.assertEqual(transport.call_count, 1)
+        payload = self.assert_prepared_delivery(result, "Fast public fireplace")
+        print(
+            "SmartTube v0.5.3 contract commit="
+            + self.resolver.SMARTTUBE_COMMIT
             + " manifest_sha256="
             + hashlib.sha256(payload).hexdigest()
             + " bytes="

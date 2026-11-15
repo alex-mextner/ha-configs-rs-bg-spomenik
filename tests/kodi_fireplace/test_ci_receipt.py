@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -312,3 +313,119 @@ class CiReceiptTests(unittest.TestCase):
             with self.subTest(operation=arguments[2]):
                 fields = arguments[arguments.index("--json") + 1].split(",")
                 self.assertIn("event", fields)
+
+    def metadata_changed_after_wait(
+        self,
+        final_runs: list[dict[str, Any]],
+        final_receipts: dict[str, dict[str, Any]],
+    ) -> tuple[
+        Callable[[list[str]], str],
+        Callable[[str, str, Callable[[str], None]], None],
+    ]:
+        waited = False
+        baseline = {
+            "ha-regressions.yml": self.receipt(databaseId=101),
+            "kodi-fireplace.yml": self.receipt(
+                databaseId=201,
+                jobs=[
+                    {"name": "host-controller", "conclusion": "success"},
+                    {"name": "home-assistant-script", "conclusion": "success"},
+                ],
+            ),
+            "lint.yml": self.receipt(
+                databaseId=301,
+                jobs=[{"name": "Ruff", "conclusion": "success"}],
+            ),
+        }
+        initial_runs = {name: [dict(receipt)] for name, receipt in baseline.items()}
+        initial_runs["kodi-fireplace.yml"][0].update(
+            status="in_progress", conclusion=None
+        )
+        receipts_by_id = {
+            str(receipt["databaseId"]): receipt for receipt in baseline.values()
+        }
+
+        def response(arguments: list[str]) -> str:
+            if arguments[1:3] == ["repo", "view"]:
+                return '{"nameWithOwner": "example/repo"}'
+            fields = arguments[arguments.index("--json") + 1].split(",")
+            if arguments[1:3] == ["run", "list"]:
+                workflow = arguments[arguments.index("--workflow") + 1]
+                runs = (
+                    final_runs
+                    if waited and workflow == "ha-regressions.yml"
+                    else initial_runs[workflow]
+                )
+                return json.dumps(
+                    [{field: run[field] for field in fields} for run in runs]
+                )
+            run_id = arguments[3]
+            receipts = (
+                {**receipts_by_id, **final_receipts} if waited else receipts_by_id
+            )
+            return json.dumps({field: receipts[run_id][field] for field in fields})
+
+        def finish_wait(
+            _repo: str, _run_id: str, _record: Callable[[str], None]
+        ) -> None:
+            nonlocal waited
+            waited = True
+
+        return response, finish_wait
+
+    def test_later_wait_invalidates_earlier_receipts_without_another_wait(self) -> None:
+        accepted = self.receipt(databaseId=101)
+        failed_rerun = self.receipt(databaseId=101, conclusion="failure")
+        pending_rerun = self.receipt(
+            databaseId=101, status="in_progress", conclusion=None
+        )
+        newer_failed = self.receipt(databaseId=401, conclusion="failure")
+        newer_pending = self.receipt(databaseId=401, status="queued", conclusion=None)
+        scenarios = (
+            ("rerun failed", [accepted], {"101": failed_rerun}),
+            ("rerun pending", [accepted], {"101": pending_rerun}),
+            ("new push failed", [accepted, newer_failed], {"401": newer_failed}),
+            ("new push pending", [accepted, newer_pending], {"401": newer_pending}),
+        )
+        for name, final_runs, final_receipts in scenarios:
+            response, finish_wait = self.metadata_changed_after_wait(
+                final_runs, final_receipts
+            )
+            with (
+                self.subTest(change=name),
+                patch.object(gate, "local_commit", return_value="required-commit"),
+                patch.object(gate, "capture", side_effect=response),
+                patch.object(gate, "watch_run", side_effect=finish_wait) as watch,
+                self.assertRaises(gate.GateError),
+            ):
+                gate.verify_all(Mock(), io.StringIO())
+            self.assertEqual(watch.call_count, 1)
+            self.assertEqual(watch.call_args.args[1], "201")
+
+    def test_final_pass_reselects_latest_success_for_every_workflow(self) -> None:
+        accepted = self.receipt(databaseId=101)
+        newer_success = self.receipt(databaseId=401)
+        response, finish_wait = self.metadata_changed_after_wait(
+            [accepted, newer_success], {"401": newer_success}
+        )
+        with (
+            patch.object(gate, "local_commit", return_value="required-commit"),
+            patch.object(gate, "capture", side_effect=response) as capture,
+            patch.object(gate, "watch_run", side_effect=finish_wait) as watch,
+        ):
+            gate.verify_all(Mock(), io.StringIO())
+        requests = [call.args[0] for call in capture.call_args_list]
+        listings = [
+            arguments[arguments.index("--workflow") + 1]
+            for arguments in requests
+            if arguments[1:3] == ["run", "list"]
+        ]
+        self.assertEqual(
+            listings,
+            ["ha-regressions.yml", "kodi-fireplace.yml", "lint.yml"] * 2,
+        )
+        views = [
+            arguments[3] for arguments in requests if arguments[1:3] == ["run", "view"]
+        ]
+        self.assertEqual(views, ["101", "201", "301", "401", "201", "301"])
+        self.assertEqual(watch.call_count, 1)
