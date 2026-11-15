@@ -86,6 +86,7 @@ jobs:
             tests/ekf_appliances/test_keyboard_notifications.py \
             tests/ekf_appliances/test_keyboard_ws.py \
             tests/ekf_appliances/test_kodi_keyboard_client.py \
+            tests/ekf_appliances/test_kodi_t9_contract.py \
             tests/ekf_appliances/test_mode_press_boundaries.py \
             tests/ekf_appliances/test_native_ir.py \
             tests/ekf_appliances/test_native_mode_observation.py \
