@@ -1,14 +1,15 @@
 """Small, Home Assistant independent announcement state and persistent cache."""
+
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import hashlib
 import json
 import math
 import os
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
 
 PHRASES = {
     "chromecast": "Хромкаст.",
@@ -39,13 +40,18 @@ def can_restore_volume(current: float | None, applied: float, muted: bool) -> bo
     return not muted and current is not None and abs(current - applied) < 0.025
 
 
-def can_resume(before_id: str | None, after_id: str | None, state: str, paused_by_us: bool) -> bool:
+def can_resume(
+    before_id: str | None, after_id: str | None, state: str, paused_by_us: bool
+) -> bool:
     """Resume only our pause while the original media is still selected."""
-    return bool(paused_by_us and before_id and before_id == after_id and state == "paused")
+    return bool(
+        paused_by_us and before_id and before_id == after_id and state == "paused"
+    )
 
 
 class TargetGate:
     """No startup speech, unknown transitions, or repeated route announcements."""
+
     def __init__(self) -> None:
         self.last: str | None = None
 
@@ -86,8 +92,14 @@ def atomic_write(path: Path, content: bytes) -> None:
 
 class ClipCache:
     """Generation is confined to prepare(); get() only reads prepared metadata."""
-    def __init__(self, folder: Path, voice: str, tempo: float,
-                 phrases: dict[str, str] | None = None) -> None:
+
+    def __init__(
+        self,
+        folder: Path,
+        voice: str,
+        tempo: float,
+        phrases: dict[str, str] | None = None,
+    ) -> None:
         self.folder = folder
         self.voice = voice
         self.tempo = tempo
@@ -96,7 +108,13 @@ class ClipCache:
         self.lock = asyncio.Lock()
 
     def key(self, target: str) -> str:
-        spec = [CACHE_VERSION, self.voice, self.tempo, self.phrases[target], "ogg-opus-48000"]
+        spec = [
+            CACHE_VERSION,
+            self.voice,
+            self.tempo,
+            self.phrases[target],
+            "ogg-opus-48000",
+        ]
         return hashlib.sha256(json.dumps(spec, ensure_ascii=False).encode()).hexdigest()
 
     def _read(self, target: str) -> Clip | None:
@@ -112,22 +130,34 @@ class ClipCache:
         except (OSError, KeyError, TypeError, ValueError):
             return None
 
-    async def prepare(self, generate: Callable[[str], Awaitable[tuple[bytes, float]]]) -> None:
+    async def prepare(
+        self, generate: Callable[[str], Awaitable[tuple[bytes, float]]]
+    ) -> None:
         async with self.lock:
             for target, text in self.phrases.items():
                 clip = await asyncio.to_thread(self._read, target)
                 if clip is None:
                     audio, duration = await generate(text)
                     if not audio or not 0 < duration <= 2:
-                        raise ValueError("Generated announcement must be nonempty and at most two seconds")
+                        raise ValueError(
+                            "Generated announcement must be nonempty and at most two seconds"
+                        )
                     key = self.key(target)
                     digest = hashlib.sha256(audio).hexdigest()
                     path = self.folder / f"{key}.ogg"
                     await asyncio.to_thread(atomic_write, path, audio)
-                    metadata = {"target": target, "duration": duration, "sha256": digest,
-                                "voice": self.voice, "tempo": self.tempo}
-                    await asyncio.to_thread(atomic_write, self.folder / f"{key}.json",
-                                            json.dumps(metadata).encode())
+                    metadata = {
+                        "target": target,
+                        "duration": duration,
+                        "sha256": digest,
+                        "voice": self.voice,
+                        "tempo": self.tempo,
+                    }
+                    await asyncio.to_thread(
+                        atomic_write,
+                        self.folder / f"{key}.json",
+                        json.dumps(metadata).encode(),
+                    )
                     clip = Clip(target, key, path, duration, digest)
                 self.clips[target] = clip
 
@@ -137,8 +167,13 @@ class ClipCache:
 
 class LatestAnnouncement:
     """Coalesce pending changes while always allowing an active finally to finish."""
-    def __init__(self, announce: Callable[[str], Awaitable[None]], debounce: float = 0.075,
-                 on_error: Callable[[Exception], None] | None = None) -> None:
+
+    def __init__(
+        self,
+        announce: Callable[[str], Awaitable[None]],
+        debounce: float = 0.075,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
         self.announce = announce
         self.debounce = debounce
         self.on_error = on_error or (lambda error: None)
@@ -165,6 +200,13 @@ class LatestAnnouncement:
         if self.task is not None:
             await self.task
 
-    async def stop(self) -> None:
+    async def stop(self, timeout: float | None = None) -> None:
         self.pending = None
-        await self.drain()
+        if self.task is None:
+            return
+        if timeout is None:
+            await self.drain()
+            return
+        done, _ = await asyncio.wait({self.task}, timeout=timeout)
+        if self.task not in done:
+            self.task.cancel()

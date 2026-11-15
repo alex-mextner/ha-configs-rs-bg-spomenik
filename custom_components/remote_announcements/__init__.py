@@ -1,44 +1,71 @@
 """Cached Bracho announcements for the confirmed universal-remote target."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 import time
+from pathlib import Path
 
-from aiohttp import web
 import voluptuous as vol
-
+from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.tts import async_get_media_source_audio
 from homeassistant.components.tts.media_source import generate_media_source_id
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import callback
-from homeassistant.helpers import config_validation as cv, discovery, entity_registry, device_registry
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry, discovery, entity_registry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .audio import brisk_opus
-from .core import ClipCache, DEFAULT_TEMPO, LatestAnnouncement, PHRASES, TargetGate, VOICE_ID
-from .core import can_restore_volume, can_resume, speech_volume
+from .core import (
+    DEFAULT_TEMPO,
+    PHRASES,
+    VOICE_ID,
+    ClipCache,
+    LatestAnnouncement,
+    TargetGate,
+    can_restore_volume,
+    can_resume,
+    speech_volume,
+)
 from .providers import ProviderNotReady, dialogs_tag, load_settings, prepare_dialogs
+from .service_calls import ServiceCalls
 
 DOMAIN = "remote_announcements"
-PAUSE_COMPLETION_BUDGET = 2.0
+ATTEMPT_BUDGET = 2.0
+RECOVERY_RESERVE = 0.6
+SERVICE_ACK_LIMIT = 0.4
+COMPLETION_MARGIN = 0.2
 _LOGGER = logging.getLogger(__name__)
 
-CONFIG_SCHEMA = vol.Schema({vol.Optional(DOMAIN): vol.Schema({
-    vol.Required("target_entity"): cv.entity_id,
-    vol.Required("backend_entity"): cv.entity_id,
-    vol.Required("yandex_entity"): cv.entity_id,
-    vol.Required("aisis_entity"): cv.entity_id,
-    vol.Required("aisis_connected_entity"): cv.entity_id,
-    vol.Required("area"): cv.string,
-    vol.Optional("tts_entity", default="tts.bracho_bracho"): cv.entity_id,
-    vol.Optional("volume_floor", default=0.5): vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
-    vol.Optional("tempo", default=DEFAULT_TEMPO): vol.All(vol.Coerce(float), vol.Range(min=1, max=1.6)),
-    vol.Optional("music_mode", default="native"): vol.In(("native", "pause")),
-})}, extra=vol.ALLOW_EXTRA)
+CONFIG_SCHEMA = vol.Schema(
+    {
+        vol.Optional(DOMAIN): vol.Schema(
+            {
+                vol.Required("target_entity"): cv.entity_id,
+                vol.Required("backend_entity"): cv.entity_id,
+                vol.Required("yandex_entity"): cv.entity_id,
+                vol.Required("aisis_entity"): cv.entity_id,
+                vol.Required("aisis_connected_entity"): cv.entity_id,
+                vol.Required("area"): cv.string,
+                vol.Optional("tts_entity", default="tts.bracho_bracho"): cv.entity_id,
+                vol.Optional("volume_floor", default=0.5): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=1)
+                ),
+                vol.Optional("tempo", default=DEFAULT_TEMPO): vol.All(
+                    vol.Coerce(float), vol.Range(min=1, max=1.6)
+                ),
+                vol.Optional("music_mode", default="native"): vol.In(
+                    ("native", "pause")
+                ),
+            }
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 async def async_setup(hass, config):
@@ -57,14 +84,13 @@ async def async_setup(hass, config):
 
     async def start(event=None):
         manager.gate.changed(manager.current_target())
-        manager.unsubscribe = async_track_state_change_event(hass,
-            [manager.config["target_entity"]], manager.target_changed)
+        manager.unsubscribe = async_track_state_change_event(
+            hass, [manager.config["target_entity"]], manager.target_changed
+        )
         await manager.prepare()
 
     async def stop(event):
-        if manager.unsubscribe:
-            manager.unsubscribe()
-        await manager.queue.stop()
+        await manager.close()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop)
     if hass.is_running:
@@ -85,7 +111,10 @@ class SpeechPlayback:
         self.applied, self.pause = applied, pause
         self.paused, self.raised = False, False
         self.started = time.monotonic()
-        self.recovery_deadline = self.started + PAUSE_COMPLETION_BUDGET if pause else None
+        self.budget = ATTEMPT_BUDGET
+        self.recovery_deadline = self.started + self.budget
+        self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
+        self.recovery_failed = False
         self.speaking, self.ended = asyncio.Event(), asyncio.Event()
         self.override_observed, self.user_changed_volume = False, False
 
@@ -95,8 +124,11 @@ class SpeechPlayback:
         if state is None:
             return
         if self.raised:
-            at_override = can_restore_volume(state.attributes.get("volume_level"), self.applied,
-                state.attributes.get("is_volume_muted", False))
+            at_override = can_restore_volume(
+                state.attributes.get("volume_level"),
+                self.applied,
+                state.attributes.get("is_volume_muted", False),
+            )
             if at_override:
                 self.override_observed = True
             elif self.override_observed:
@@ -108,9 +140,7 @@ class SpeechPlayback:
             self.ended.set()
 
     def completion_wait(self, normal):
-        if self.recovery_deadline is None:
-            return normal
-        return max(0.0, min(normal, self.recovery_deadline - time.monotonic()))
+        return max(0.0, min(normal, self.work_deadline - time.monotonic()))
 
 
 class Manager:
@@ -127,6 +157,17 @@ class Manager:
         self.public_status = {"voice": "Брачо", "physical_latency_verified": False}
         self.listeners = set()
         self.unsubscribe = None
+        self.generation = 0
+        self.closing = False
+        self.services = ServiceCalls(hass)
+
+    async def close(self):
+        self.closing = True
+        if self.unsubscribe:
+            self.unsubscribe()
+            self.unsubscribe = None
+        await self.queue.stop(timeout=ATTEMPT_BUDGET)
+        await self.services.close(0.05)
 
     @callback
     def update(self, status, **values):
@@ -137,8 +178,12 @@ class Manager:
 
     @callback
     def failed(self, error):
-        reason = str(error) if isinstance(error, ProviderNotReady) else type(error).__name__
-        self.update(reason if isinstance(error, ProviderNotReady) else "error", reason=reason)
+        reason = (
+            str(error) if isinstance(error, ProviderNotReady) else type(error).__name__
+        )
+        self.update(
+            reason if isinstance(error, ProviderNotReady) else "error", reason=reason
+        )
         _LOGGER.info("Announcement not delivered: %s", reason)
 
     def current_target(self):
@@ -149,8 +194,14 @@ class Manager:
     def target_changed(self, event):
         state = event.data.get("new_state")
         old = event.data.get("old_state")
-        if state and (state.attributes.get("initialized") is False
-                or (old and old.attributes.get("initialized") is False)):
+        if self.closing:
+            return
+        if state and (old is None or state.state != old.state):
+            self.generation += 1
+        if state and (
+            state.attributes.get("initialized") is False
+            or (old and old.attributes.get("initialized") is False)
+        ):
             self.gate.changed(state.state)
             return
         if state and self.gate.changed(state.state):
@@ -160,15 +211,27 @@ class Manager:
         async with self.prepare_lock:
             self.update("preparing")
             try:
+
                 async def generate(text):
-                    source = generate_media_source_id(self.hass, text, engine=self.config["tts_entity"],
-                        language="ru", cache=True, options={"voice_id": VOICE_ID,
-                            "backend": "s2.1-pro-free", "latency": "balanced"})
+                    source = generate_media_source_id(
+                        self.hass,
+                        text,
+                        engine=self.config["tts_entity"],
+                        language="ru",
+                        cache=True,
+                        options={
+                            "voice_id": VOICE_ID,
+                            "backend": "s2.1-pro-free",
+                            "latency": "balanced",
+                        },
+                    )
                     _, audio = await async_get_media_source_audio(self.hass, source)
                     return await brisk_opus(audio, self.config["tempo"])
 
                 await self.cache.prepare(generate)
-                self.settings = await self.hass.async_add_executor_job(load_settings, self.settings_path)
+                self.settings = await self.hass.async_add_executor_job(
+                    load_settings, self.settings_path
+                )
                 yandex_status = "needs_dialogs_credentials"
                 try:
                     try:
@@ -176,25 +239,47 @@ class Manager:
                             dialogs_tag(self.settings, clip.key)
                     except ProviderNotReady:
                         if not self.settings.get("dialogs", {}).get("oauth_token"):
-                            raise ProviderNotReady("needs_dialogs_credentials") from None
-                        self.settings = await prepare_dialogs(async_get_clientsession(self.hass),
-                            self.settings_path, self.cache.clips, self.settings)
+                            raise ProviderNotReady(
+                                "needs_dialogs_credentials"
+                            ) from None
+                        self.settings = await prepare_dialogs(
+                            async_get_clientsession(self.hass),
+                            self.settings_path,
+                            self.cache.clips,
+                            self.settings,
+                        )
                     yandex_status = "ready"
                 except ProviderNotReady as error:
                     yandex_status = str(error)
-                self.update("prepared", clips_ready=len(self.cache.clips),
-                    duration_seconds={key: round(clip.duration, 3) for key, clip in self.cache.clips.items()},
+                self.update(
+                    "prepared",
+                    clips_ready=len(self.cache.clips),
+                    duration_seconds={
+                        key: round(clip.duration, 3)
+                        for key, clip in self.cache.clips.items()
+                    },
                     yandex_status=yandex_status,
-                    aisis_status="ready" if self.aisis_ready() else "needs_aisis_cache_install")
+                    aisis_status="ready"
+                    if self.aisis_ready()
+                    else "needs_aisis_cache_install",
+                )
                 backend, _ = self.speaker()
-                self.update(yandex_status if backend == "yandex" else self.public_status["aisis_status"])
+                self.update(
+                    yandex_status
+                    if backend == "yandex"
+                    else self.public_status["aisis_status"]
+                )
             except Exception as error:
                 self.failed(error)
 
     def aisis_ready(self):
         aisis = self.settings.get("aisis", {})
-        return aisis.get("ready") is True and set(aisis.get("keys", [])) == {
-            clip.key for clip in self.cache.clips.values()} and len(self.cache.clips) == len(PHRASES)
+        return (
+            aisis.get("ready") is True
+            and set(aisis.get("keys", []))
+            == {clip.key for clip in self.cache.clips.values()}
+            and len(self.cache.clips) == len(PHRASES)
+        )
 
     def in_area(self, entity_id):
         registry = entity_registry.async_get(self.hass)
@@ -212,12 +297,17 @@ class Manager:
         for backend in ("yandex", "aisis"):
             entity = self.config[backend + "_entity"]
             state = self.hass.states.get(entity)
-            if (not state or state.state in ("unknown", "unavailable")
-                    or (not explicit and not self.in_area(entity))):
+            if (
+                not state
+                or state.state in ("unknown", "unavailable")
+                or (not explicit and not self.in_area(entity))
+            ):
                 continue
             if state.attributes.get("restored"):
                 continue
-            if backend == "aisis" and not self.hass.states.is_state(self.config["aisis_connected_entity"], "on"):
+            if backend == "aisis" and not self.hass.states.is_state(
+                self.config["aisis_connected_entity"], "on"
+            ):
                 continue
             candidates[backend] = entity
         return candidates
@@ -232,19 +322,29 @@ class Manager:
                 return backend, candidates[backend]
             raise ProviderNotReady("selected_" + backend + "_speaker_unavailable")
         for backend in ("aisis", "yandex"):
-            if backend in candidates and self.hass.states.is_state(candidates[backend], "playing"):
+            if backend in candidates and self.hass.states.is_state(
+                candidates[backend], "playing"
+            ):
                 return backend, candidates[backend]
         for backend in ("yandex", "aisis"):
             if backend in candidates:
                 return backend, candidates[backend]
         raise ProviderNotReady("living_room_speaker_unavailable")
 
-    async def call(self, service, entity, **data):
-        await self.hass.services.async_call("media_player", service,
-            {"entity_id": entity, **data}, blocking=True)
+    async def call(self, service, entity, *, deadline, guard=None, **data):
+        return await self.services.call(
+            "media_player",
+            service,
+            {"entity_id": entity, **data},
+            deadline=deadline,
+            limit=SERVICE_ACK_LIMIT,
+            guard=guard,
+        )
 
     def playback(self, backend, entity):
         before = self.hass.states.get(entity)
+        if before is None:
+            raise ProviderNotReady("speaker_unavailable")
         muted_before = bool(before.attributes.get("is_volume_muted"))
         if backend == "yandex" and "alice_state" not in before.attributes:
             raise ProviderNotReady("yandex_local_speech_connection_unavailable")
@@ -264,57 +364,149 @@ class Manager:
             # The device may pause before its service acknowledgement times out.
             # Recovery still checks the actual state and original content.
             playback.paused = True
-            await self.call("media_pause", playback.entity)
+            await self.call(
+                "media_pause", playback.entity, deadline=playback.work_deadline
+            )
         if playback.applied > playback.old_volume or playback.muted_before:
             # Yandex volume_set lifts volume-zero mute and keeps the remembered
             # music level; restore both that level and mute after speech.
             playback.raised = True
-            await self.call("volume_set", playback.entity, volume_level=playback.applied)
+            await self.call(
+                "volume_set",
+                playback.entity,
+                volume_level=playback.applied,
+                deadline=playback.work_deadline,
+            )
 
     async def wait_for_completion(self, backend, playback, clip, target, dispatch_ms):
-        status = {"target": target, "speaker": playback.entity, "dispatch_ms": dispatch_ms}
+        status = {
+            "target": target,
+            "speaker": playback.entity,
+            "dispatch_ms": dispatch_ms,
+        }
         if backend != "yandex":
             # Quasar accepts the request before the device finishes its native TTS buffer.
-            await asyncio.sleep(playback.completion_wait(clip.duration + 0.2))
-            self.update("sent_unconfirmed", **status, reason="aisis_has_no_speech_completion_event")
+            await asyncio.sleep(
+                playback.completion_wait(clip.duration + COMPLETION_MARGIN)
+            )
+            self.update(
+                "sent_unconfirmed",
+                **status,
+                reason="aisis_has_no_speech_completion_event",
+            )
             return
         try:
-            await asyncio.wait_for(playback.speaking.wait(), playback.completion_wait(3))
-            await asyncio.wait_for(playback.ended.wait(), playback.completion_wait(clip.duration + 2))
-        except asyncio.TimeoutError:
-            self.update("sent_unconfirmed", **status, reason="speaker_completion_not_observed")
+            await asyncio.wait_for(
+                playback.ended.wait(),
+                playback.completion_wait(clip.duration + COMPLETION_MARGIN),
+            )
+        except TimeoutError:
+            self.update(
+                "sent_unconfirmed", **status, reason="speaker_completion_not_observed"
+            )
         else:
             self.update("ready", **status)
 
-    async def restore_volume(self, playback):
+    def volume_unchanged(self, playback, expected):
         now = self.hass.states.get(playback.entity)
-        if (not now or not playback.raised or playback.user_changed_volume
-                or not can_restore_volume(now.attributes.get("volume_level"), playback.applied,
-                    now.attributes.get("is_volume_muted", False))):
+        return bool(
+            now
+            and playback.raised
+            and not playback.user_changed_volume
+            and can_restore_volume(
+                now.attributes.get("volume_level"),
+                expected,
+                now.attributes.get("is_volume_muted", False),
+            )
+        )
+
+    async def restore_volume(self, playback):
+        if not self.volume_unchanged(playback, playback.applied):
             return
         try:
-            await self.call("volume_set", playback.entity, volume_level=playback.old_volume)
+            await self.call(
+                "volume_set",
+                playback.entity,
+                volume_level=playback.old_volume,
+                deadline=playback.recovery_deadline,
+                guard=lambda: self.volume_unchanged(playback, playback.applied),
+            )
             # A human can change volume/mute while the restore service is awaited.
             # Check again immediately before restoring mute.
             restored = self.hass.states.get(playback.entity)
-            if playback.muted_before and restored and can_restore_volume(
-                    restored.attributes.get("volume_level"), playback.old_volume,
-                    restored.attributes.get("is_volume_muted", False)):
-                await self.call("volume_mute", playback.entity, is_volume_muted=True)
+            if (
+                playback.muted_before
+                and restored
+                and can_restore_volume(
+                    restored.attributes.get("volume_level"),
+                    playback.old_volume,
+                    restored.attributes.get("is_volume_muted", False),
+                )
+            ):
+                await self.call(
+                    "volume_mute",
+                    playback.entity,
+                    is_volume_muted=True,
+                    deadline=playback.recovery_deadline,
+                    guard=lambda: self.volume_unchanged(playback, playback.old_volume),
+                )
         except Exception as error:
+            playback.recovery_failed = True
             self.failed(error)
 
-    async def restore_playback(self, playback):
-        await self.restore_volume(playback)
+    def music_unchanged(self, playback):
         now = self.hass.states.get(playback.entity)
-        if now and can_resume(playback.old_content, now.attributes.get("media_content_id"),
-                now.state, playback.paused):
-            await self.call("media_play", playback.entity)
+        return bool(
+            now
+            and can_resume(
+                playback.old_content,
+                now.attributes.get("media_content_id"),
+                now.state,
+                playback.paused,
+            )
+        )
+
+    async def resume_music(self, playback):
+        if self.music_unchanged(playback):
+            try:
+                await self.call(
+                    "media_play",
+                    playback.entity,
+                    deadline=playback.recovery_deadline,
+                    guard=lambda: self.music_unchanged(playback),
+                )
+            except Exception as error:
+                playback.recovery_failed = True
+                self.failed(error)
+
+    async def restore_playback(self, playback):
+        # A lost volume acknowledgement must not postpone the original music.
+        await asyncio.gather(self.restore_volume(playback), self.resume_music(playback))
+        elapsed = time.monotonic() - playback.started
+        self.update(
+            "recovery_unconfirmed"
+            if playback.recovery_failed or self.services.pending
+            else self.status,
+            controller_elapsed_ms=round(elapsed * 1000),
+            controller_budget_seconds=playback.budget,
+            controller_deadline_missed=elapsed > playback.budget,
+            pending_service_count=len(self.services.pending),
+        )
+
+    def is_current(self, target, generation):
+        return (
+            not self.closing
+            and target == self.current_target()
+            and generation == self.generation
+        )
 
     async def announce(self, target):
         # Never queue stale speech after a later confirmed target has superseded it.
-        if target != self.current_target():
+        generation = self.generation
+        if not self.is_current(target, generation):
             return
+        if self.services.pending:
+            raise ProviderNotReady("speaker_service_recovery_pending")
         clip = self.cache.get(target)
         if clip is None:
             raise ProviderNotReady("cache_not_ready")
@@ -324,15 +516,40 @@ class Manager:
         elif not self.aisis_ready():
             raise ProviderNotReady("needs_aisis_cache_install")
         playback = self.playback(backend, entity)
-        unsubscribe = async_track_state_change_event(self.hass, [entity], playback.observe)
+        unsubscribe = async_track_state_change_event(
+            self.hass, [entity], playback.observe
+        )
         try:
             await self.prepare_playback(playback)
+            if not self.is_current(target, generation):
+                self.update("superseded", target=target)
+                return
             if backend == "yandex":
-                await self.call("play_media", entity, media_content_type="text", media_content_id=payload)
+                sent = await self.call(
+                    "play_media",
+                    entity,
+                    media_content_type="text",
+                    media_content_id=payload,
+                    deadline=playback.work_deadline,
+                    guard=lambda: self.is_current(target, generation),
+                )
             else:
-                await self.hass.services.async_call("aisis_speaker", "speak",
-                    {"duid": entity.removeprefix("media_player.aisis_speaker_").upper(),
-                     "text": clip.marker}, blocking=True)
+                sent = await self.services.call(
+                    "aisis_speaker",
+                    "speak",
+                    {
+                        "duid": entity.removeprefix(
+                            "media_player.aisis_speaker_"
+                        ).upper(),
+                        "text": clip.marker,
+                    },
+                    deadline=playback.work_deadline,
+                    limit=SERVICE_ACK_LIMIT,
+                    guard=lambda: self.is_current(target, generation),
+                )
+            if not sent:
+                self.update("superseded", target=target)
+                return
             dispatch_ms = round((time.monotonic() - playback.started) * 1000)
             await self.wait_for_completion(backend, playback, clip, target, dispatch_ms)
         finally:
@@ -353,9 +570,19 @@ class ManifestView(HomeAssistantView):
         if len(clips) != len(PHRASES):
             raise web.HTTPServiceUnavailable()
         # Only five nonprivate fixed labels and hashes are public. No settings or tokens.
-        return web.json_response({"voice_id": VOICE_ID, "clips": {
-            target: {"key": clip.key, "sha256": clip.sha256, "duration": clip.duration}
-            for target, clip in clips.items()}})
+        return web.json_response(
+            {
+                "voice_id": VOICE_ID,
+                "clips": {
+                    target: {
+                        "key": clip.key,
+                        "sha256": clip.sha256,
+                        "duration": clip.duration,
+                    }
+                    for target, clip in clips.items()
+                },
+            }
+        )
 
 
 class ClipView(HomeAssistantView):
@@ -367,8 +594,16 @@ class ClipView(HomeAssistantView):
         self.manager = manager
 
     async def get(self, request, key):
-        clip = next((clip for clip in self.manager.cache.clips.values() if clip.key == key), None)
+        clip = next(
+            (clip for clip in self.manager.cache.clips.values() if clip.key == key),
+            None,
+        )
         if clip is None:
             raise web.HTTPNotFound()
-        return web.FileResponse(clip.path, headers={"Content-Type": "audio/ogg",
-            "Cache-Control": "public, max-age=31536000, immutable"})
+        return web.FileResponse(
+            clip.path,
+            headers={
+                "Content-Type": "audio/ogg",
+                "Cache-Control": "public, max-age=31536000, immutable",
+            },
+        )
