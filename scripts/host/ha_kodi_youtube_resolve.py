@@ -196,9 +196,31 @@ def only_owned_files(directory):
     )
 
 
-def owned_request_mtime(directory, current):
-    """Recognize completed and incomplete preparations by their durable marker."""
-    if directory.is_symlink() or not directory.is_dir() or directory.name == current:
+def protected_request_ids(state):
+    """Read durable playback references, or refuse cleanup when state is uncertain."""
+    try:
+        generation = read_json(state / "current-request.json", 4096)
+        selection = read_json(
+            state.parent / "fireplace-selection.json", MAX_DESCRIPTOR_BYTES
+        )
+        if type(selection.get("version")) is not int or selection["version"] != 1:
+            return None
+        protected = {canonical_request_id(generation["request_id"])}
+        for role in ("active", "pending"):
+            identity = selection[role]
+            if identity is None:
+                continue
+            if not isinstance(identity, dict):
+                return None
+            protected.add(canonical_request_id(identity.get("attempt_id")))
+        return protected
+    except (KeyError, OSError, ResolveError):
+        return None
+
+
+def owned_request_mtime(directory, protected):
+    """Recognize owned preparations that no durable playback state protects."""
+    if directory.is_symlink() or not directory.is_dir() or directory.name in protected:
         return None
     try:
         canonical_request_id(directory.name)
@@ -220,21 +242,23 @@ def remove_owned_files(directory):
 
 
 def remove_obsolete_request(state, directory):
-    """Recheck generation and file ownership immediately before retention cleanup."""
-    current = read_json(state / "current-request.json", 4096).get("request_id")
-    if owned_request_mtime(directory, current) is not None:
+    """Recheck durable playback references and ownership immediately before deletion."""
+    protected = protected_request_ids(state)
+    if protected is not None and owned_request_mtime(directory, protected) is not None:
         remove_owned_files(directory)
 
 
 def cleanup_obsolete(state, now):
-    """Bound storage while preserving the current generation and unknown files."""
+    """Bound obsolete storage while preserving durable playback and unknown files."""
     requests = state / "requests"
     if not requests.is_dir() or requests.is_symlink():
         return
-    current = read_json(state / "current-request.json", 4096).get("request_id")
+    protected = protected_request_ids(state)
+    if protected is None:
+        return
     owned = []
     for directory in requests.iterdir():
-        modified = owned_request_mtime(directory, current)
+        modified = owned_request_mtime(directory, protected)
         if modified is not None:
             owned.append((modified, directory))
     for index, (modified, directory) in enumerate(sorted(owned, reverse=True)):

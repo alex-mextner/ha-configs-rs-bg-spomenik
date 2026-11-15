@@ -2,8 +2,6 @@ name: "Lint"
 
 on:
   push:
-    branches:
-      - "main"
   pull_request:
     branches:
       - "main"
@@ -15,6 +13,11 @@ jobs:
     steps:
         - name: "Checkout the repository"
           uses: "actions/checkout@v6.0.2"
+
+        # The tracked u1_* aliases point directly into this pinned submodule.
+        # Do not fetch unrelated or recursive submodules, or follow a branch tip.
+        - name: "Checkout the pinned 3d-cli alias sources"
+          run: git submodule update --init --depth 1 -- 3d-cli
 
         - name: "Set up Python"
           uses: actions/setup-python@v6.2.0

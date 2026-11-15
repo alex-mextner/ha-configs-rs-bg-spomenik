@@ -27,6 +27,30 @@ ignore = [
     "SLF001", # Tests can access private members for white-box behavior checks
 ]
 
+# These copied upstream tests are a frozen historical regression snapshot.
+# Its base/candidate gate requires exact source bytes, including import order.
+"tests/custom_components/home_generative_agent/**/*.py" = ["I001"]
+
+# Both Kodi workflow jobs use stdlib unittest discovery. These two rules
+# prescribe pytest assertions/pytest.raises and do not apply to these suites.
+"tests/kodi_fireplace/test_*.py" = ["PT009", "PT027"]
+"tests/kodi_fireplace_ha/test_living_room_fireplace.py" = ["PT009", "PT027"]
+
+# These command-line tools intentionally report status or machine-readable JSON.
+# Ruff's print rule is intended for accidental debugging output in library code.
+"scripts/agent_browser_memory_guard.py" = ["T201"]
+"scripts/ha_health_monitor.py" = ["T201"]
+"scripts/ha_validate_lovelace.py" = ["T201"]
+"scripts/ma_accounts.py" = ["T201"]
+"scripts/transmission_errors.py" = ["T201"]
+
+# This out-of-tree test module is collected by pytest, which rewrites assertions.
+# It is loaded by path from a standalone container directory, not a Python package.
+"docker/chatgpt-web/test_bridge.py" = ["S101", "INP001"]
+
+# This standalone entry point is launched by its path in a hyphenated directory.
+"scripts/chatgpt-native/bridge.py" = ["INP001"]
+
 [lint.flake8-pytest-style]
 fixture-parentheses = false
 

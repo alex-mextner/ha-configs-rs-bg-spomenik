@@ -12,7 +12,6 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from uuid import uuid4
@@ -30,26 +29,6 @@ def utc():
 
 def file_hash(value):
     return hashlib.sha256(value.split("|", 1)[0].encode()).hexdigest()
-
-
-def atomic_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, temporary = tempfile.mkstemp(prefix=".fireplace-", dir=path.parent)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w") as stream:
-            json.dump(value, stream, sort_keys=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 def seconds(value):
@@ -139,6 +118,10 @@ def reap_resolver(process):
         process.wait(timeout=2)
     except subprocess.TimeoutExpired as error:
         raise SourceUnavailable("resolver_cleanup_unconfirmed") from error
+    finally:
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 def resolve_source(source, deadline, attempt_id, cancelled=None):
@@ -187,6 +170,7 @@ class RotatingFireplaceController:
         rpc,
         receipt_path,
         *,
+        state_writer,
         sources=None,
         resolver=None,
         media_path=None,
@@ -200,6 +184,7 @@ class RotatingFireplaceController:
     ):
         self.Error = error_type
         self._rpc = rpc
+        self._write_state = state_writer
         self._receipt = Path(receipt_path)
         self._state_path = self._receipt.with_name("fireplace-selection.json")
         self._generation = self._receipt.parent / "youtube/current-request.json"
@@ -222,7 +207,10 @@ class RotatingFireplaceController:
         self._last_time = self._last_title = self._progress = None
         self._failed_request = self._launching = self._opening = False
         self._launch_admitted = False
+        self._stop_requested = False
+        self._intent_seq = 0
         self._snapshot = self._empty()
+        self._load_generation()
         self._load_selection(media_path)
         self._owner = owner_factory(
             self._rpc_adapter,
@@ -242,14 +230,30 @@ class RotatingFireplaceController:
         elif self._owner.status()["owned"]:
             self._snapshot.update(state="recovering", owned=True)
 
-    def _validate_identity(self, value):
+    def _load_generation(self):
+        try:
+            if not self._generation.exists():
+                return
+            value = json.loads(self._generation.read_text())
+            cancelled, sequence = (
+                value.get("cancelled", False),
+                value.get("intent_seq", 0),
+            )
+            if type(cancelled) is not bool or type(sequence) is not int or sequence < 0:
+                raise ValueError("invalid_generation")
+            self._stop_requested, self._intent_seq = cancelled, sequence
+            if cancelled:
+                self._cancelled.set()
+        except (OSError, ValueError, TypeError, AttributeError):
+            self._load_error = "selection_unreadable"
+
+    def _validate_identity(self, value, *, pending=False):
         if value is None:
             return None
-        if (
-            not isinstance(value, dict)
-            or value.get("source_id") not in self._ids
-            or not HASH.fullmatch(str(value.get("file_hash", "")))
-        ):
+        if not isinstance(value, dict) or value.get("source_id") not in self._ids:
+            raise ValueError("invalid_selection")
+        preparing = pending and value.get("phase") == "preparing"
+        if not preparing and not HASH.fullmatch(str(value.get("file_hash", ""))):
             raise ValueError("invalid_selection")
         if value.get("open_hash") is not None and not HASH.fullmatch(
             str(value["open_hash"])
@@ -265,8 +269,12 @@ class RotatingFireplaceController:
         if last is not None and not SOURCE_ID.fullmatch(last):
             raise ValueError("invalid_history")
         active = self._validate_identity(state.get("active"))
-        pending = self._validate_identity(state.get("pending"))
-        if pending is not None and pending.get("phase") not in {"prepared", "opening"}:
+        pending = self._validate_identity(state.get("pending"), pending=True)
+        if pending is not None and pending.get("phase") not in {
+            "preparing",
+            "prepared",
+            "opening",
+        }:
             raise ValueError("invalid_pending")
         return last, active, pending
 
@@ -333,7 +341,7 @@ class RotatingFireplaceController:
     def _store(self):
         if self._load_error:
             raise self.Error(self._load_error)
-        atomic_json(
+        self._write_state(
             self._state_path,
             {
                 "version": 1,
@@ -355,14 +363,29 @@ class RotatingFireplaceController:
         if self._closing.is_set() or self._cancelled.is_set():
             raise self.Error("cancelled")
 
+    def _write_generation(self, attempt_id):
+        self._write_state(
+            self._generation,
+            {
+                "request_id": attempt_id,
+                "cancelled": self._stop_requested,
+                "intent_seq": self._intent_seq,
+            },
+        )
+
     def _set_generation(self, attempt_id):
         with self._cancel_lock:
             self._check_cancelled()
-            atomic_json(self._generation, {"request_id": attempt_id})
+            self._write_generation(attempt_id)
 
     def _cancel_attempt(self):
         with self._cancel_lock:
-            atomic_json(self._generation, {"request_id": str(uuid4())})
+            self._write_generation(str(uuid4()))
+
+    def _check_deadline(self, deadline):
+        self._check_cancelled()
+        if time.monotonic() >= deadline:
+            raise self.Error("deadline")
 
     def _open_candidate(self, params, deadline):
         self._check_cancelled()
@@ -371,7 +394,7 @@ class RotatingFireplaceController:
             raise self.Error("invalid_open")
         self._pending["phase"] = "opening"
         self._store()
-        self._check_cancelled()
+        self._check_deadline(deadline)
         self._opening = True
         return self._rpc(
             "Player.Open",
@@ -380,7 +403,7 @@ class RotatingFireplaceController:
         )
 
     def _identities(self):
-        if self._launching and self._opening:
+        if self._launching and self._opening and self._pending is not None:
             return [self._pending]
         values = [self._active]
         if self._pending is not None and self._pending.get("phase") == "opening":
@@ -392,7 +415,10 @@ class RotatingFireplaceController:
             return result
         item = dict(result["item"])
         raw_file = item.get("file")
-        digest = file_hash(raw_file) if isinstance(raw_file, str) else None
+        if not isinstance(raw_file, str) or not raw_file:
+            self._matched = None
+            return result
+        digest = file_hash(raw_file)
         self._matched = next(
             (
                 value
@@ -439,13 +465,17 @@ class RotatingFireplaceController:
             self._progress = None
             return False
         now = time.monotonic()
+        identity = tuple(
+            (self._matched or {}).get(key)
+            for key in ("source_id", "attempt_id", "file_hash")
+        )
         previous = self._progress
-        if previous is None:
-            self._progress = (self._last_time, None)
+        if previous is None or previous[0] != identity:
+            self._progress = (identity, self._last_time, None)
             return False
-        position, changed = previous
+        _, position, changed = previous
         if abs(self._last_time - position) >= self._progress_interval:
-            self._progress = (self._last_time, now)
+            self._progress = (identity, self._last_time, now)
             return True
         return changed is not None and now - changed <= 5
 
@@ -482,7 +512,9 @@ class RotatingFireplaceController:
             [
                 item
                 for item in self._sources
-                if item["kind"] == kind and item["id"] not in excluded
+                if item["kind"] == kind
+                and item["id"] not in excluded
+                and item.get("selectable", True) is True
             ]
             for kind in ("youtube", "local")
         ]
@@ -496,11 +528,17 @@ class RotatingFireplaceController:
         with self._cancel_lock:
             attempt_id = self._active.get("attempt_id")
             if attempt_id and not self._cancelled.is_set():
-                atomic_json(self._generation, {"request_id": attempt_id})
+                self._write_generation(attempt_id)
 
     def _failure(self, request, code, uncertain=False):
         if not uncertain:
             self._restore_active_generation()
+            if self._pending is not None and self._pending.get("phase") in {
+                "preparing",
+                "prepared",
+            }:
+                self._pending = None
+                self._store()
         self._failed_request = True
         value = self._empty()
         value.update(
@@ -513,8 +551,17 @@ class RotatingFireplaceController:
         self.start_monitor()
 
     def _prepare(self, source, request, deadline):
-        self._check_cancelled()
+        self._check_deadline(deadline)
         attempt_id = str(uuid4())
+        # Recovery must know this is pre-Open before the generation changes.
+        self._pending = {
+            **request,
+            "source_id": source["id"],
+            "source_kind": source["kind"],
+            "attempt_id": attempt_id,
+            "phase": "preparing",
+        }
+        self._store()
         self._set_generation(attempt_id)
         resolve_deadline = min(
             deadline - min(3.0, self._timeout / 3), time.monotonic() + 20
@@ -524,38 +571,30 @@ class RotatingFireplaceController:
             if self._resolver
             else resolve_source(source, resolve_deadline, attempt_id, self._cancelled)
         )
-        self._check_cancelled()
+        self._check_deadline(deadline)
         if not isinstance(target, dict) or not isinstance(target.get("file"), str):
             raise self.Error("invalid_target")
         self._target = target
-        self._pending = {
-            **request,
-            "source_id": source["id"],
-            "source_kind": source["kind"],
-            "file_hash": file_hash(target["file"]),
-            "open_hash": file_hash(target.get("open_file", target["file"])),
-            "title": target.get("title") or source.get("title"),
-            "attempt_id": attempt_id,
-            "phase": "prepared",
-        }
+        self._pending.update(
+            file_hash=file_hash(target["file"]),
+            open_hash=file_hash(target.get("open_file", target["file"])),
+            title=target.get("title") or source.get("title"),
+            phase="prepared",
+        )
         self._store()
         self._progress = self._last_time = self._last_title = None
         self._opening = False
 
     def _open_owned(self, deadline):
-        previous_timeout = self._owner._operation_timeout
+        self._check_deadline(deadline)
         try:
-            self._owner._operation_timeout = max(
-                0.1, min(8.0, deadline - time.monotonic())
-            )
-            return self._owner.start(force_new=True)
+            return self._owner.start(force_new=True, deadline=deadline)
         except Exception as error:
             self._cancel_attempt()
+            self._check_cancelled()
             if not self._opening:
-                raise SourceUnavailable("owner_not_ready") from error
+                raise self.Error("sources_unavailable") from error
             raise self.Error("open_unconfirmed") from error
-        finally:
-            self._owner._operation_timeout = previous_timeout
 
     def _promote(self):
         self._active = {
@@ -576,16 +615,21 @@ class RotatingFireplaceController:
                 and self._matched is self._pending
             ):
                 self._promote()
-                self._publish(value)
+                with self._cancel_lock:
+                    self._check_cancelled()
+                    self._publish(value)
                 self.start_monitor()
                 return value
             if self._closing.wait(self._poll):
                 raise self.Error("cancelled")
-            proof = self._owner.observe()
+            proof = self._owner.observe(deadline=progress_deadline)
         self._cancel_attempt()
-        stopped = self._owner.stop()
-        if stopped["owned"]:
-            raise self.Error("stop_unconfirmed")
+        try:
+            stopped = self._owner.stop(deadline=deadline + 8.0)
+            if stopped["owned"]:
+                raise self.Error("stop_unconfirmed")
+        except Exception as error:
+            raise self.Error("stop_unconfirmed") from error
         self._active = self._pending = None
         self._store()
         return None
@@ -619,6 +663,8 @@ class RotatingFireplaceController:
             if self._launch_admitted:
                 raise self.Error("busy")
             self._launch_admitted = True
+            self._intent_seq += 1
+            self._stop_requested = False
             self._cancelled.clear()
         try:
             with self._lock:
@@ -638,7 +684,6 @@ class RotatingFireplaceController:
             self._launching, self._opening = True, False
             starting = {**self._empty(), **request, "state": "starting"}
             self._publish(starting)
-            self._cancel_attempt()
             if not candidates:
                 raise self.Error("no_distinct_source")
             self._pending = None
@@ -649,7 +694,13 @@ class RotatingFireplaceController:
                 request,
                 str(error),
                 str(error)
-                in {"open_unconfirmed", "stop_unconfirmed", "deadline", "cancelled"},
+                in {
+                    "open_unconfirmed",
+                    "stop_unconfirmed",
+                    "deadline",
+                    "cancelled",
+                    "owner_not_ready",
+                },
             )
             raise
         except Exception as error:
@@ -659,18 +710,17 @@ class RotatingFireplaceController:
             self._launching = self._opening = False
 
     def _recover_prepared(self):
-        if self._pending is None or self._pending.get("phase") != "prepared":
+        if self._pending is None or self._pending.get("phase") not in {
+            "preparing",
+            "prepared",
+        }:
             return
-        # No Player.Open was issued. Keep the previous source/lease and restore
-        # its manifest generation so its next repeat remains usable.
         with self._cancel_lock:
             if not self._cancelled.is_set():
                 previous_attempt = (
                     self._active.get("attempt_id") if self._active else None
                 )
-                atomic_json(
-                    self._generation, {"request_id": previous_attempt or str(uuid4())}
-                )
+                self._write_generation(previous_attempt or str(uuid4()))
         self._pending = None
         self._store()
 
@@ -689,18 +739,25 @@ class RotatingFireplaceController:
         ):
             self._active = self._pending = None
             self._store()
-        return (
-            self.status()
-            if self._failed_request or self._cancelled.is_set()
-            else self._publish(value)
-        )
+        with self._cancel_lock:
+            if (self._failed_request or self._cancelled.is_set()) and value["owned"]:
+                previous = self.status()
+                previous.update(owned=True, progressing=False)
+                return self._publish(previous)
+            return self._publish(value)
 
     def observe(self):
         if self._load_error or not self._lock.acquire(blocking=False):
             return self.status()
         try:
             self._recover_prepared()
-            return self._finish_observation(self._owner.observe())
+            if self._pending is not None and not self._owner.status()["owned"]:
+                self._cancel_attempt()
+                self._stop_unleased_candidate()
+            proof = (
+                self._owner.stop() if self._stop_requested else self._owner.observe()
+            )
+            return self._finish_observation(proof)
         except Exception:
             value = self.status()
             value.update(
@@ -714,7 +771,11 @@ class RotatingFireplaceController:
             self._lock.release()
 
     def _stop_unleased_candidate(self):
-        if self._pending is None or self._owner.status()["owned"]:
+        if (
+            self._pending is None
+            or self._pending.get("phase") != "opening"
+            or self._owner.status()["owned"]
+        ):
             return
         deadline = time.monotonic() + 3
         players = self._rpc("Player.GetActivePlayers", {}, deadline)
@@ -740,17 +801,24 @@ class RotatingFireplaceController:
     def stop(self):
         if self._load_error:
             raise self.Error(self._load_error)
-        # Signal first: extraction and the adapter must see cancellation before
-        # this thread waits for the serialized owner transition.
         with self._cancel_lock:
+            self._intent_seq += 1
+            sequence = self._intent_seq
+            self._stop_requested = True
             self._cancelled.set()
-            atomic_json(self._generation, {"request_id": str(uuid4())})
-        value = self.status()
-        value.update(
-            state="unknown", progressing=False, observed_at=None, error="stop_pending"
-        )
-        self._publish(value)
+            self._write_generation(str(uuid4()))
+            value = self.status()
+            value.update(
+                state="unknown",
+                progressing=False,
+                observed_at=None,
+                error="stop_pending",
+            )
+            self._publish(value)
         with self._lock:
+            with self._cancel_lock:
+                if sequence != self._intent_seq:
+                    return self.status()
             try:
                 self._stop_unleased_candidate()
                 proof = self._owner.stop()
@@ -767,13 +835,16 @@ class RotatingFireplaceController:
                 self._failure(request, "stop_unconfirmed", True)
                 raise self.Error("stop_unconfirmed") from error
 
+    def _recovery_pending(self):
+        return self._owner.status()["owned"] or self._pending is not None
+
     def start_monitor(self):
         with self._lock:
             if (
                 not self._auto_monitor
                 or self._closing.is_set()
                 or self._load_error
-                or not self._owner.status()["owned"]
+                or not self._recovery_pending()
                 or self._thread is not None
                 and self._thread.is_alive()
             ):
@@ -787,7 +858,7 @@ class RotatingFireplaceController:
         try:
             while not self._closing.is_set():
                 self.observe()
-                if not self._owner.status()["owned"] or self._closing.wait(1):
+                if not self._recovery_pending() or self._closing.wait(1):
                     return
         finally:
             with self._lock:

@@ -1,6 +1,8 @@
 """Crash recovery and intent ordering against the real rotation controller."""
 
 import json
+import multiprocessing
+import traceback
 import threading
 import time
 from unittest.mock import patch
@@ -67,11 +69,63 @@ class RecoveryCases(fixtures.FixtureBase):
 
     multi = fixtures.RotationCases.multi
 
+    def isolated(self, operation) -> None:
+        """Bound a race in its own process and reap it before fixture deletion."""
+        context = multiprocessing.get_context("fork")
+        receive, send = context.Pipe(duplex=False)
+
+        def invoke() -> None:
+            receive.close()
+            try:
+                operation()
+            except BaseException:
+                send.send(traceback.format_exc())
+            else:
+                send.send(None)
+            finally:
+                for controller in self.controllers:
+                    controller.close()
+                send.close()
+
+        process = context.Process(target=invoke)
+        process.start()
+        send.close()
+        try:
+            process.join(timeout=15)
+            if process.is_alive():
+                self.fail("Request workers exceeded the isolated race deadline")
+            self.assertEqual(process.exitcode, 0)
+            self.assertTrue(receive.poll(), "Race child returned no result")
+            result = receive.recv()
+            self.assertIsNone(result, result)
+        finally:
+            if process.is_alive():
+                process.kill()
+            process.join()
+            receive.close()
+            process.close()
+
     def selection(self) -> dict:
         return json.loads((self.root / "fireplace-selection.json").read_text())
 
     def generation(self) -> dict:
         return json.loads((self.root / "youtube/current-request.json").read_text())
+
+    def test_disabled_sources_are_never_selected(self) -> None:
+        controller = self.multi()
+        controller._sources[0]["selectable"] = False
+        first = controller.start("first")
+        second = controller.start("second")
+        self.assertEqual(
+            [first["source_id"], second["source_id"]], ["local-1", "local-2"]
+        )
+        self.assertFalse(
+            any(
+                params.get("item", {}).get("file", "").endswith("0.webm")
+                for method, params in self.kodi.calls
+                if method == "Player.Open"
+            )
+        )
 
     def test_extraction_crash_restores_the_previous_active_manifest(self) -> None:
         controller = self.multi()
@@ -116,7 +170,25 @@ class RecoveryCases(fixtures.FixtureBase):
         self.assertIsNone(self.kodi.file)
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Open"])
 
+    def test_stop_crash_without_replacement_keeps_generation_cancelled(self) -> None:
+        controller = self.multi()
+        controller.start("previous")
+        active_attempt = self.selection()["active"]["attempt_id"]
+        with patch.object(controller, "_lock", CrashLock()):
+            with self.assertRaises(SimulatedCrashError):
+                controller.stop()
+        controller.close()
+        recovered = self.multi()
+        proof = recovered.observe()
+        self.assertNotEqual(self.generation()["request_id"], active_attempt)
+        self.assertIsNone(self.kodi.file)
+        self.assertFalse(proof["owned"])
+        self.assertNotEqual(proof["state"], "playing")
+
     def test_stop_during_promotion_cannot_receive_a_later_success(self) -> None:
+        self.isolated(self.stop_during_promotion)
+
+    def stop_during_promotion(self) -> None:
         controller = self.multi(operation_timeout=5)
         saving, release = threading.Event(), threading.Event()
         original_store = controller._store
@@ -150,6 +222,9 @@ class RecoveryCases(fixtures.FixtureBase):
         self.assertFalse(controller.status()["owned"])
 
     def test_an_older_waiting_stop_cannot_kill_a_newer_start(self) -> None:
+        self.isolated(self.older_waiting_stop)
+
+    def older_waiting_stop(self) -> None:
         controller = self.multi(operation_timeout=5)
         controller.start("previous")
         gate = DelayedStopLock()
@@ -258,13 +333,18 @@ class RecoveryCases(fixtures.FixtureBase):
         self.assertEqual(self.kodi.repeat, "off")
 
     def test_preparation_past_the_launch_deadline_never_opens(self) -> None:
+        now, prepared = [100.0], []
+
         def delayed(source, _deadline):
-            time.sleep(0.08)
+            prepared.append(source["id"])
+            now[0] = 102.0
             return {"file": source["path"]}
 
-        controller = self.multi(operation_timeout=0.04, resolver=delayed)
-        with self.assertRaises(fixtures.fireplace.FireplaceError):
-            controller.start("expired")
+        controller = self.multi(operation_timeout=1.0, resolver=delayed)
+        with patch.object(time, "monotonic", side_effect=lambda: now[0]):
+            with self.assertRaises(fixtures.fireplace.FireplaceError):
+                controller.start("expired")
+        self.assertEqual(prepared, ["local-0"])
         self.assertFalse([call for call in self.kodi.calls if call[0] == "Player.Open"])
 
     def test_missing_item_file_retains_ownership_during_a_native_transition(

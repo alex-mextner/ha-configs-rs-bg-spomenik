@@ -704,7 +704,14 @@ class RotationCases(FixtureBase):
             ):
                 controller.start("pre-open-failed")
         self.assertEqual(controller.status()["state"], "error")
-        self.assertEqual(json.loads(generation.read_text()), active_generation)
+        observed_generation = json.loads(generation.read_text())
+        self.assertEqual(
+            observed_generation["request_id"], active_generation["request_id"]
+        )
+        self.assertFalse(observed_generation["cancelled"])
+        self.assertGreater(
+            observed_generation["intent_seq"], active_generation["intent_seq"]
+        )
         self.assertEqual(self.kodi.file, previous_file)
         self.assertEqual(
             sum(method == "Player.Open" for method, _ in self.kodi.calls), 1

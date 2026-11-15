@@ -1,13 +1,14 @@
 """The remote-only ship gate must reject stale or skipped verification."""
 
-from contextlib import redirect_stdout
 import importlib.util
 import io
 import json
-from pathlib import Path
 import subprocess
-from typing import Any
+import sys
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +20,9 @@ spec.loader.exec_module(gate)
 
 
 class CiReceiptTests(unittest.TestCase):
-    def receipt(self, **changes):
+    """Require complete native push evidence before the shipping gate succeeds."""
+
+    def receipt(self, **changes: Any) -> dict[str, Any]:
         value = {
             "headSha": "required-commit",
             "event": "push",
@@ -31,19 +34,19 @@ class CiReceiptTests(unittest.TestCase):
         value.update(changes)
         return value
 
-    def test_exact_commit_and_successful_required_suite_are_accepted(self):
+    def test_exact_commit_and_successful_required_suite_are_accepted(self) -> None:
         self.assertEqual(
             gate.verify_receipt(self.receipt(), "required-commit"),
             self.receipt()["url"],
         )
 
-    def test_success_for_another_commit_is_not_evidence(self):
+    def test_success_for_another_commit_is_not_evidence(self) -> None:
         with self.assertRaises(gate.GateError):
             gate.verify_receipt(
                 self.receipt(headSha="previous-commit"), "required-commit"
             )
 
-    def test_skipped_missing_or_duplicate_job_is_not_a_pass(self):
+    def test_skipped_missing_or_duplicate_job_is_not_a_pass(self) -> None:
         for jobs in (
             [],
             [{"name": "maintained-suites", "conclusion": "skipped"}],
@@ -52,7 +55,7 @@ class CiReceiptTests(unittest.TestCase):
             with self.subTest(jobs=jobs), self.assertRaises(gate.GateError):
                 gate.verify_receipt(self.receipt(jobs=jobs), "required-commit")
 
-    def test_pending_failed_and_cancelled_runs_fail_closed(self):
+    def test_pending_failed_and_cancelled_runs_fail_closed(self) -> None:
         for changes in (
             {"status": "in_progress"},
             {"conclusion": "failure"},
@@ -61,7 +64,7 @@ class CiReceiptTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(gate.GateError):
                 gate.verify_receipt(self.receipt(**changes), "required-commit")
 
-    def test_feature_receipt_requires_both_actual_jobs(self):
+    def test_feature_receipt_requires_both_actual_jobs(self) -> None:
         required = ("host-controller", "home-assistant-script")
         jobs = [{"name": name, "conclusion": "success"} for name in required]
         self.assertEqual(
@@ -77,19 +80,17 @@ class CiReceiptTests(unittest.TestCase):
                     self.receipt(jobs=invalid), "required-commit", required
                 )
 
-    def test_dirty_worktree_cannot_borrow_clean_head_evidence(self):
-        from unittest.mock import patch
-
-        with patch.object(
-            gate, "capture", return_value=" M scripts/host/ha_kodi_fireplace.py"
-        ) as capture:
-            with self.assertRaisesRegex(gate.GateError, "clean"):
-                gate.local_commit()
+    def test_dirty_worktree_cannot_borrow_clean_head_evidence(self) -> None:
+        with (
+            patch.object(
+                gate, "capture", return_value=" M scripts/host/ha_kodi_fireplace.py"
+            ) as capture,
+            self.assertRaisesRegex(gate.GateError, "clean"),
+        ):
+            gate.local_commit()
         self.assertEqual(capture.call_count, 1)
 
-    def test_feature_failure_blocks_after_maintained_suite_success(self):
-        from unittest.mock import Mock, patch
-
+    def test_feature_failure_blocks_after_maintained_suite_success(self) -> None:
         with (
             patch.object(gate, "local_commit", return_value="required-commit"),
             patch.object(
@@ -100,9 +101,9 @@ class CiReceiptTests(unittest.TestCase):
                 "verify_workflow",
                 side_effect=[None, gate.GateError("feature failed")],
             ) as workflow,
+            self.assertRaisesRegex(gate.GateError, "feature failed"),
         ):
-            with self.assertRaisesRegex(gate.GateError, "feature failed"):
-                gate.verify_all(Mock(), Mock())
+            gate.verify_all(Mock(), Mock())
         self.assertEqual(
             [call.args[2] for call in workflow.call_args_list],
             ["ha-regressions.yml", "kodi-fireplace.yml"],
@@ -112,9 +113,7 @@ class CiReceiptTests(unittest.TestCase):
             ("host-controller", "home-assistant-script"),
         )
 
-    def test_head_movement_during_remote_wait_invalidates_evidence(self):
-        from unittest.mock import Mock, patch
-
+    def test_head_movement_during_remote_wait_invalidates_evidence(self) -> None:
         with (
             patch.object(
                 gate, "local_commit", side_effect=["required-commit", "new-commit"]
@@ -138,18 +137,20 @@ class CiReceiptTests(unittest.TestCase):
 
     def test_pr_only_run_cannot_satisfy_the_exact_source_gate(self) -> None:
         run = self.receipt(event="pull_request", databaseId=301)
-        with patch.object(
-            gate, "capture", side_effect=[json.dumps([run]), json.dumps(run)]
-        ) as capture:
-            with self.assertRaises(gate.GateError):
-                gate.verify_workflow(
-                    "example/repo",
-                    "required-commit",
-                    "ha-regressions.yml",
-                    ("maintained-suites",),
-                    Mock(),
-                    io.StringIO(),
-                )
+        with (
+            patch.object(
+                gate, "capture", side_effect=[json.dumps([run]), json.dumps(run)]
+            ) as capture,
+            self.assertRaises(gate.GateError),
+        ):
+            gate.verify_workflow(
+                "example/repo",
+                "required-commit",
+                "ha-regressions.yml",
+                ("maintained-suites",),
+                Mock(),
+                io.StringIO(),
+            )
         self.assertEqual(capture.call_count, 1)
 
     def test_newer_pr_success_cannot_hide_a_failed_push(self) -> None:
@@ -206,9 +207,9 @@ class CiReceiptTests(unittest.TestCase):
                 "verify_workflow",
                 side_effect=[None, None, gate.GateError("Ruff did not pass")],
             ) as workflow,
+            self.assertRaisesRegex(gate.GateError, "Ruff"),
         ):
-            with self.assertRaisesRegex(gate.GateError, "Ruff"):
-                gate.verify_all(Mock(), Mock())
+            gate.verify_all(Mock(), Mock())
         self.assertEqual(
             [(call.args[2], call.args[3]) for call in workflow.call_args_list],
             [
@@ -253,7 +254,7 @@ class CiReceiptTests(unittest.TestCase):
         process.__enter__.return_value = process
 
         def record(message: str) -> None:
-            print(message)
+            sys.stdout.write(message + "\n")
             print(message, file=log)
 
         def legacy_watch(
@@ -282,3 +283,32 @@ class CiReceiptTests(unittest.TestCase):
             )
         self.assertIn(progress.strip(), terminal.getvalue())
         self.assertIn(progress.strip(), log.getvalue())
+
+    def test_event_field_is_requested_for_list_and_view(self) -> None:
+        run = self.receipt(databaseId=201)
+        observed: list[list[str]] = []
+
+        def response(arguments: list[str]) -> str:
+            observed.append(arguments)
+            fields = arguments[arguments.index("--json") + 1].split(",")
+            projected = {name: run[name] for name in fields}
+            payload = [projected] if arguments[1:3] == ["run", "list"] else projected
+            return json.dumps(payload)
+
+        with patch.object(gate, "capture", side_effect=response):
+            gate.verify_workflow(
+                "example/repo",
+                "required-commit",
+                "ha-regressions.yml",
+                ("maintained-suites",),
+                Mock(),
+                io.StringIO(),
+            )
+        self.assertEqual(
+            [arguments[1:3] for arguments in observed],
+            [["run", "list"], ["run", "view"]],
+        )
+        for arguments in observed:
+            with self.subTest(operation=arguments[2]):
+                fields = arguments[arguments.index("--json") + 1].split(",")
+                self.assertIn("event", fields)

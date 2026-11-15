@@ -26,6 +26,27 @@ class FireplaceError(Exception):
     """A safe error code; never include Kodi response bodies or other filenames."""
 
 
+def atomic_json(path, value):
+    """Durably replace a private JSON record, including its directory entry."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary = tempfile.mkstemp(prefix=".fireplace-", dir=path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 class OwnedPlayback:
     def __init__(
         self,
@@ -51,6 +72,8 @@ class OwnedPlayback:
         self._closing = threading.Event()
         self._thread = None
         self._owner = None
+        self._idle_since = None
+        self._stop_requested = False
         self._load_error = False
         self._snapshot = self._empty()
         try:
@@ -92,24 +115,7 @@ class OwnedPlayback:
 
     def _persist(self, receipt):
         """Fsync both data and rename before the first repeat mutation."""
-        parent = self._receipt_path.parent
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, temporary = tempfile.mkstemp(prefix=".fireplace-", dir=parent)
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w") as stream:
-                json.dump(receipt, stream, sort_keys=True)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self._receipt_path)
-            directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        atomic_json(self._receipt_path, receipt)
 
     def _forget(self):
         self._receipt_path.unlink(missing_ok=True)
@@ -128,7 +134,11 @@ class OwnedPlayback:
             "Player.GetItem", {"playerid": 1, "properties": ["file", "title"]}, deadline
         )
         item = response.get("item") if isinstance(response, dict) else None
-        if not isinstance(item, dict) or not isinstance(item.get("file"), str):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("file"), str)
+            or not item["file"]
+        ):
             raise FireplaceError("invalid_item_state")
         return item
 
@@ -208,11 +218,21 @@ class OwnedPlayback:
         }
         return dict(self._snapshot)
 
-    def _observe(self, deadline):
+    def _defer_absence(self, current, grace):
+        if current["active"] or self._stop_requested or not grace:
+            self._idle_since = None
+            return False
+        now = time.monotonic()
+        if self._idle_since is None:
+            self._idle_since = now
+        return now - self._idle_since < 2.0
+
+    def _observe(self, deadline, *, grace=False):
         current = self._read(deadline)
         if self._owner is None:
             return self._publish(current)
         if current["foreign_player"]:
+            self._idle_since = None
             return self._publish(current, error="foreign_player_active")
         if current["repeat"] != "one":
             # Covers external off/all, a crash before SetRepeat, and a crash
@@ -220,6 +240,9 @@ class OwnedPlayback:
             self._forget()
             return self._publish(current)
         if current["file_matches"]:
+            self._idle_since = None
+            return self._publish(current)
+        if self._defer_absence(current, grace):
             return self._publish(current)
         # Recheck the value immediately before cleanup. This detects an external
         # mode edit made while the first observation was in flight.
@@ -253,16 +276,20 @@ class OwnedPlayback:
         self._forget()
         return self._publish(latest)
 
-    def observe(self):
+    def _bounded_deadline(self, deadline, limit=None):
+        end = time.monotonic() + min(
+            self._operation_timeout, limit or self._operation_timeout
+        )
+        return min(end, deadline) if deadline is not None else end
+
+    def observe(self, *, deadline=None):
         with self._lock:
             if self._closing.is_set():
                 return self._failed("stopped")
             if self._load_error:
                 return dict(self._snapshot)
             try:
-                return self._observe(
-                    time.monotonic() + min(3.0, self._operation_timeout)
-                )
+                return self._observe(self._bounded_deadline(deadline, 3.0), grace=True)
             except Exception:
                 return self._failed("observation_failed")
 
@@ -364,15 +391,20 @@ class OwnedPlayback:
         }
         self._persist(receipt)
         self._owner = receipt
-        latest = self._read(deadline)
-        if (
-            latest["foreign_player"]
-            or not latest["file_matches"]
-            or latest["speed"] <= 0
-            or latest["repeat"] != current["repeat"]
-        ):
+        try:
+            latest = self._read(deadline)
+            if (
+                latest["foreign_player"]
+                or not latest["file_matches"]
+                or latest["speed"] <= 0
+                or latest["repeat"] != current["repeat"]
+            ):
+                raise FireplaceError("content_changed")
+        except Exception:
+            # No repeat mutation has been sent. A failed/expired durable arm
+            # must not leave a receipt that can later reclaim unrelated repeat.
             self._forget()
-            raise FireplaceError("content_changed")
+            raise
         self._rpc("Player.SetRepeat", {"playerid": 1, "repeat": "one"}, deadline)
         proof = self._observe(deadline)
         self.start_monitor()
@@ -380,13 +412,15 @@ class OwnedPlayback:
             raise FireplaceError("loop_unconfirmed")
         return proof
 
-    def start(self, *, force_new=False):
+    def start(self, *, force_new=False, deadline=None):
         with self._lock:
             if self._closing.is_set():
                 raise FireplaceError("stopped")
             if self._load_error:
                 raise FireplaceError("owner_unreadable")
-            deadline = time.monotonic() + self._operation_timeout
+            deadline = self._bounded_deadline(deadline)
+            self._stop_requested = False
+            self._idle_since = None
             try:
                 self._asset_check()
                 opened, proof = self._resume_owned(deadline, force_new)
@@ -407,13 +441,14 @@ class OwnedPlayback:
                 self.start_monitor()
                 raise FireplaceError("start_unconfirmed") from exc
 
-    def stop(self):
+    def stop(self, *, deadline=None):
         with self._lock:
             if self._closing.is_set():
                 raise FireplaceError("stopped")
+            self._stop_requested = True
             if not self._owner:
                 return self.status()
-            deadline = time.monotonic() + self._operation_timeout
+            deadline = self._bounded_deadline(deadline)
             try:
                 current = self._read(deadline)
                 if current["foreign_player"]:
@@ -481,4 +516,11 @@ SourceUnavailable = _rotation.SourceUnavailable
 class FireplaceController(_rotation.RotatingFireplaceController):
     def __init__(self, rpc, receipt_path, **options):
         options.setdefault("expected_sha256", MEDIA_SHA256)
-        super().__init__(OwnedPlayback, FireplaceError, rpc, receipt_path, **options)
+        super().__init__(
+            OwnedPlayback,
+            FireplaceError,
+            rpc,
+            receipt_path,
+            state_writer=atomic_json,
+            **options,
+        )

@@ -28,12 +28,14 @@ class OwnerRecoveryCases(unittest.TestCase):
 
     def test_confirmed_absence_eventually_restores_the_previous_repeat(self) -> None:
         self.kodi.repeat = "all"
-        self.controller.start()
-        self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
-        with patch.object(self.module.time, "monotonic", return_value=100.0):
+        now = [99.0]
+        with patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]):
+            self.controller.start()
+            self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
+            now[0] = 100.0
             first = self.controller.observe()
-        self.assertTrue(first["owned"])
-        with patch.object(self.module.time, "monotonic", return_value=102.5):
+            self.assertTrue(first["owned"])
+            now[0] = 102.5
             second = self.controller.observe()
         self.assertFalse(second["owned"])
         self.assertEqual(self.kodi.repeat, "all")

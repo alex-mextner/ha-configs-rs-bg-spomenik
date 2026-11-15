@@ -154,12 +154,17 @@ class HostFireplaceTests(unittest.TestCase):
 
     def test_repeated_request_does_not_reopen_or_forget_original_repeat(self):
         self.kodi.repeat = "all"
-        self.controller.start()
-        self.kodi.calls.clear()
-        self.assertEqual(self.controller.start()["state"], "playing")
-        self.assertEqual(self.kodi.changes(), [])
-        self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
-        self.controller.observe()
+        now = [99.0]
+        with patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]):
+            self.controller.start()
+            self.kodi.calls.clear()
+            self.assertEqual(self.controller.start()["state"], "playing")
+            self.assertEqual(self.kodi.changes(), [])
+            self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
+            now[0] = 100.0
+            self.controller.observe()
+            now[0] = 102.5
+            self.controller.observe()
         self.assertEqual(self.kodi.repeat, "all")
         self.assertFalse(self.receipt.exists())
 
@@ -228,14 +233,19 @@ class HostFireplaceTests(unittest.TestCase):
         self.assertEqual(self.kodi.repeat, "all")
 
     def test_failed_rpc_never_claims_playing_and_preserves_recovery_receipt(self):
-        self.controller.start()
-        self.kodi.available = False
-        proof = self.controller.observe()
-        self.assertNotEqual(proof["state"], "playing")
-        self.assertTrue(self.receipt.exists())
-        self.kodi.available = True
-        self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
-        self.controller.observe()
+        now = [99.0]
+        with patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]):
+            self.controller.start()
+            self.kodi.available = False
+            proof = self.controller.observe()
+            self.assertNotEqual(proof["state"], "playing")
+            self.assertTrue(self.receipt.exists())
+            self.kodi.available = True
+            self.kodi.active, self.kodi.file, self.kodi.speed = None, None, 0
+            now[0] = 100.0
+            self.controller.observe()
+            now[0] = 102.5
+            self.controller.observe()
         self.assertEqual(self.kodi.repeat, "off")
         self.assertFalse(self.receipt.exists())
 

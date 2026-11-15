@@ -32,7 +32,9 @@
       "source": "https://commons.wikimedia.org/wiki/File:Fireplace_1_2021-02-14.webm",
       "license": "CC BY-SA 4.0",
       "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
-      "download_url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/0/04/Fireplace_1_2021-02-14.webm/Fireplace_1_2021-02-14.webm.1080p.vp9.webm"
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/0/04/Fireplace_1_2021-02-14.webm/Fireplace_1_2021-02-14.webm.1080p.vp9.webm",
+      "selectable": false,
+      "selection_note": "Retained for attribution/legacy ownership only; not quality-approved for new playback."
     },
     {
       "id": "local-fantastic",
@@ -44,7 +46,9 @@
       "source": "https://commons.wikimedia.org/wiki/File:Fantastic-fireplace-fire-chimney-hearth-_background_-_texture_-_motion_graphics_-_free_video_library.webm",
       "license": "CC BY 3.0",
       "license_url": "https://creativecommons.org/licenses/by/3.0/",
-      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/Fantastic-fireplace-fire-chimney-hearth-_background_-_texture_-_motion_graphics_-_free_video_library.webm"
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/Fantastic-fireplace-fire-chimney-hearth-_background_-_texture_-_motion_graphics_-_free_video_library.webm",
+      "selectable": false,
+      "selection_note": "Retained for attribution/legacy ownership only; not quality-approved for new playback."
     },
     {
       "id": "local-hotel",
@@ -56,7 +60,9 @@
       "source": "https://commons.wikimedia.org/wiki/File:ABOedit2015-Video.webm",
       "license": "CC0 1.0",
       "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
-      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/5b/ABOedit2015-Video.webm"
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/5b/ABOedit2015-Video.webm",
+      "selectable": false,
+      "selection_note": "Retained for attribution/legacy ownership only; not quality-approved for new playback."
     }
   ]
 }
