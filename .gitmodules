@@ -60,3 +60,8 @@
 [submodule "3d-cli"]
 	path = 3d-cli
 	url = https://github.com/alex-mextner/3d-cli.git
+
+[submodule "submodules/ha-androidtv-remote"]
+	path = submodules/ha-androidtv-remote
+	url = https://github.com/alex-mextner/ha-androidtv-remote.git
+	branch = local/ime-fix
