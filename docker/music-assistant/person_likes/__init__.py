@@ -1,21 +1,30 @@
-"""Per-person likes: like or unlike a track in exactly one streaming account (aisis#17).
+"""
+Per-person likes: like or unlike a track in exactly one streaming account (aisis#17).
 
 Why this exists (Music Assistant 2.10.4):
-- the library is shared: MusicController.match_provider_instances() gives a library item a
-  mapping for EVERY instance of a streaming provider, and music/library/add_item forwards the
-  add to every mapped instance with sync-back on, so a like from MA would land in all accounts;
-- music/favorites/add_item only forwards to providers with FAVORITE_*_EDIT, which neither
+- the library is shared: MusicController.match_provider_instances() gives a library
+item a
+  mapping for EVERY instance of a streaming provider, and music/library/add_item
+forwards the
+  add to every mapped instance with sync-back on, so a like from MA would land in all
+accounts;
+- music/favorites/add_item only forwards to providers with FAVORITE_*_EDIT, which
+neither
   ytmusic nor yandex_music declares (the favourite stays inside MA);
-- ytmusic cannot like a track at all (library_add raises NotImplementedError for tracks).
+- ytmusic cannot like a track at all (library_add raises NotImplementedError for
+tracks).
 
 This plugin adds two API commands that act on the ONE provider instance the caller picks
-from a person's own accounts, with that instance's stored credentials (they never leave MA):
+from a person's own accounts, with that instance's stored credentials (they never
+leave MA):
 
   person_likes/like    provider_instances, player_id | uri, liked=True, dry_run=False
   person_likes/status  provider_instances, player_id | uri
 
-Home Assistant's music_accounts integration calls them; the mapping person -> instances lives
-there. Mounted read-only into the MA image by ha.docker-compose.yaml; tested on MA 2.10.4.
+Home Assistant's music_accounts integration calls them; the mapping person ->
+instances lives
+there. Mounted read-only into the MA image by ha.docker-compose.yaml; tested on MA
+2.10.4.
 """
 
 from __future__ import annotations
@@ -24,6 +33,11 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 import ytmusicapi
+from music_assistant.controllers.webserver.helpers.auth_middleware import (
+    get_current_user,
+    has_scope,
+)
+from music_assistant.models.plugin import PluginProvider
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import MediaType
 from music_assistant_models.errors import (
@@ -38,24 +52,18 @@ from music_assistant_models.errors import (
 from ytmusicapi import LikeStatus
 from ytmusicapi.helpers import get_authorization, sapisid_from_cookie
 
-from music_assistant.controllers.webserver.helpers.auth_middleware import (
-    get_current_user,
-    has_scope,
-)
-from music_assistant.models.plugin import PluginProvider
-
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from music_assistant_models.config_entries import ProviderConfig
-    from music_assistant_models.media_items import Track
-    from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
     from music_assistant.models.music_provider import MusicProvider
+    from music_assistant_models.config_entries import ProviderConfig
+    from music_assistant_models.media_items import Track
+    from music_assistant_models.provider import ProviderManifest
 
 SUPPORTED_DOMAINS = ("ytmusic", "yandex_music")
+_YOUTUBE_BRAND_ID_LENGTH = 21
 YTM_ORIGIN = "https://music.youtube.com"
 
 
@@ -83,7 +91,7 @@ class PersonLikesProvider(PluginProvider):
             ),
         ]
 
-    async def unload(self, is_removed: bool = False) -> None:
+    async def unload(self, is_removed: bool = False) -> None:  # noqa: FBT001, FBT002 -- Preserve PluginProvider positional override.
         """Unregister the API commands."""
         for unregister in getattr(self, "_unregister", []):
             unregister()
@@ -94,13 +102,13 @@ class PersonLikesProvider(PluginProvider):
         provider_instances: list[str],
         player_id: str | None = None,
         uri: str | None = None,
-        liked: bool = True,
-        dry_run: bool = False,
+        liked: bool = True,  # noqa: FBT001, FBT002 -- Registered MA API signature.
+        dry_run: bool = False,  # noqa: FBT001, FBT002 -- Registered MA API signature.
     ) -> dict[str, Any]:
         """
         Like (or unlike) a track in exactly one of the given accounts.
 
-        :param provider_instances: One person's own provider instance ids (ytmusic/yandex_music).
+        :param provider_instances: One person's own streaming instance ids.
         :param player_id: Take the track playing on this player's active queue...
         :param uri: ...or this track uri (give exactly one of the two).
         :param liked: True to like, False to remove the like.
@@ -112,9 +120,9 @@ class PersonLikesProvider(PluginProvider):
         if dry_run:
             return {**result, "dry_run": True}
         if prov.domain == "ytmusic":
-            ok = await self._ytm_rate(prov, item_id, liked)
+            ok = await self._ytm_rate(prov, item_id, liked=liked)
         else:
-            ok = await self._yandex_set(prov, item_id, liked)
+            ok = await self._yandex_set(prov, item_id, liked=liked)
         if not ok:
             msg = f"{prov.name} did not accept the {'like' if liked else 'unlike'}"
             raise ProviderUnavailableError(msg)
@@ -140,61 +148,78 @@ class PersonLikesProvider(PluginProvider):
 
     # ---------------------------------------------------------------- resolution
 
-    async def _get_track(self, player_id: str | None, uri: str | None) -> tuple[Track, str | None]:
+    async def _get_track(
+        self, player_id: str | None, uri: str | None
+    ) -> tuple[Track, str | None]:
         """Return the track (and the instance streaming it, if playing)."""
         if bool(player_id) == bool(uri):
-            raise InvalidDataError("Give exactly one of player_id or uri")
+            message = "Give exactly one of player_id or uri"
+            raise InvalidDataError(message)
         playing_on: str | None = None
         if player_id:
             if not (player := self.mass.players.get_player(player_id)):
-                raise PlayerUnavailableError(f"Player {player_id} is not available")
+                message = f"Player {player_id} is not available"
+                raise PlayerUnavailableError(message)
             queue = self.mass.players.get_active_queue(player)
             current = queue.current_item if queue else None
             if not current or not current.media_item:
-                raise MediaNotFoundError("Nothing is playing on this player")
+                message = "Nothing is playing on this player"
+                raise MediaNotFoundError(message)
             item: Any = current.media_item
             if current.streamdetails:
                 playing_on = current.streamdetails.provider
         else:
             item = await self.mass.music.get_item_by_uri(str(uri))
         if getattr(item, "media_type", None) != MediaType.TRACK:
-            raise UnsupportedFeaturedException("Only tracks can be liked")
+            message = "Only tracks can be liked"
+            raise UnsupportedFeaturedException(message)
         return item, playing_on
 
     async def _resolve(
         self, track: Track, instances: list[str], playing_on: str | None
     ) -> tuple[MusicProvider, str]:
         """Pick the account and the track id in its catalogue."""
-        self._check_caller(instances)
-        targets: list[MusicProvider] = []
-        for instance_id in instances:
-            prov = self.mass.get_provider(instance_id)
-            # get_provider() falls back to ANOTHER instance of the same streaming domain when
-            # the named one is unavailable: never act on someone else's account
-            if prov is None or prov.instance_id != instance_id or not prov.available:
-                raise ProviderUnavailableError(f"Account {instance_id} is not available")
-            if prov.domain not in SUPPORTED_DOMAINS:
-                raise UnsupportedFeaturedException(f"Likes are not supported for {prov.domain}")
-            targets.append(prov)  # type: ignore[arg-type]
-        if not targets:
-            raise InvalidDataError("No account given")
+        targets = self._target_accounts(instances)
         playing_domain = None
-        if playing_on and (p := self.mass.get_provider(playing_on, return_unavailable=True)):
+        if playing_on and (
+            p := self.mass.get_provider(playing_on, return_unavailable=True)
+        ):
             playing_domain = p.domain
-        # catalogue ids are global per service (YouTube videoId, Yandex track id), so a
-        # mapping of any instance of the same domain names the track for every account
+        # Catalogue IDs identify the same track across instances of a service.
         mapped: dict[str, str] = {}
         for mapping in sorted(track.provider_mappings, key=lambda m: not m.available):
             mapped.setdefault(mapping.provider_domain, mapping.item_id)
-        # prefer the service that is playing, then one that already knows the track
+        # Prefer the playing service, then an account that already knows the track.
         targets.sort(key=lambda p: (p.domain != playing_domain, p.domain not in mapped))
         for prov in targets:
             if item_id := mapped.get(prov.domain):
                 return prov, item_id
-        # not in the person's catalogues yet: find the same song with MA's own matcher
-        # (library linking). strict=False only drops the version/explicit checks; the title
-        # must still match exactly, an artist must match and the album or the duration too,
-        # so a remix or a different song is not liked by mistake
+        return await self._find_track_match(track, targets)
+
+    def _target_accounts(self, instances: list[str]) -> list[MusicProvider]:
+        """Validate every selected account before resolving a catalogue track."""
+        self._check_caller(instances)
+        targets: list[MusicProvider] = []
+        for instance_id in instances:
+            prov = self.mass.get_provider(instance_id)
+            # MA may return another account when the requested one is unavailable.
+            if prov is None or prov.instance_id != instance_id or not prov.available:
+                message = f"Account {instance_id} is not available"
+                raise ProviderUnavailableError(message)
+            if prov.domain not in SUPPORTED_DOMAINS:
+                message = f"Likes are not supported for {prov.domain}"
+                raise UnsupportedFeaturedException(message)
+            targets.append(prov)  # type: ignore[arg-type]
+        if not targets:
+            message = "No account given"
+            raise InvalidDataError(message)
+        return targets
+
+    async def _find_track_match(
+        self, track: Track, targets: list[MusicProvider]
+    ) -> tuple[MusicProvider, str]:
+        """Try MA's existing strict match, then its permitted relaxed match."""
+        # Relaxed matching still requires title/artist plus album or duration.
         for strict in (True, False):
             for prov in targets if track.artists else []:
                 for match in await self.mass.music.tracks.match_provider(
@@ -203,16 +228,20 @@ class PersonLikesProvider(PluginProvider):
                     if match.provider_domain == prov.domain:
                         return prov, match.item_id
         names = ", ".join(p.name for p in targets)
-        raise MediaNotFoundError(f"{track.name} was not found in {names}")
+        message = f"{track.name} was not found in {names}"
+        raise MediaNotFoundError(message)
 
     @staticmethod
     def _check_caller(instances: list[str]) -> None:
-        """Admins may use any account; other users only accounts in their provider filter."""
+        """Allow admins or users whose provider filter includes every target."""
         user = get_current_user()
         if user is None or has_scope(user, Scope.ALL):
             return
-        if not user.provider_filter or any(i not in user.provider_filter for i in instances):
-            raise InsufficientPermissions(f"{user.username} may not use these accounts")
+        if not user.provider_filter or any(
+            i not in user.provider_filter for i in instances
+        ):
+            message = f"{user.username} may not use these accounts"
+            raise InsufficientPermissions(message)
 
     @staticmethod
     def _describe(
@@ -232,10 +261,11 @@ class PersonLikesProvider(PluginProvider):
 
     @staticmethod
     def _ytm_client(prov: MusicProvider) -> ytmusicapi.YTMusic:
-        """Build a ytmusicapi client from the instance's stored cookie (as the provider does)."""
+        """Build the native YouTube Music client from this instance's cookie."""
         cookie = str(prov.get_setup_value("cookie") or "")
         if "__Secure-3PAPISID" not in cookie:
-            raise LoginFailed(f"{prov.name}: no signed-in YouTube Music cookie stored")
+            message = f"{prov.name}: no signed-in YouTube Music cookie stored"
+            raise LoginFailed(message)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:72.0) "
             "Gecko/20100101 Firefox/72.0",
@@ -245,13 +275,21 @@ class PersonLikesProvider(PluginProvider):
             "X-Goog-AuthUser": "0",
             "x-origin": YTM_ORIGIN,
             "Cookie": cookie,
-            "Authorization": get_authorization(sapisid_from_cookie(cookie) + " " + YTM_ORIGIN),
+            "Authorization": get_authorization(
+                sapisid_from_cookie(cookie) + " " + YTM_ORIGIN
+            ),
         }
         username = str(prov.get_setup_value("username") or "")
-        brand_user = username if len(username) == 21 and username.isdigit() else None
+        brand_user = (
+            username
+            if len(username) == _YOUTUBE_BRAND_ID_LENGTH and username.isdigit()
+            else None
+        )
         return ytmusicapi.YTMusic(auth=headers, user=brand_user)
 
-    async def _ytm_rate(self, prov: MusicProvider, video_id: str, liked: bool) -> bool:
+    async def _ytm_rate(
+        self, prov: MusicProvider, video_id: str, *, liked: bool
+    ) -> bool:
         rating = LikeStatus.LIKE if liked else LikeStatus.INDIFFERENT
 
         def _rate() -> Any:
@@ -276,11 +314,15 @@ class PersonLikesProvider(PluginProvider):
     def _yandex_client(prov: MusicProvider) -> Any:
         client = getattr(prov, "client", None)
         if client is None:
-            raise ProviderUnavailableError(f"{prov.name}: Yandex Music client is not ready")
+            message = f"{prov.name}: Yandex Music client is not ready"
+            raise ProviderUnavailableError(message)
         return client
 
-    async def _yandex_set(self, prov: MusicProvider, item_id: str, liked: bool) -> bool:
-        # My Wave items carry the station after '@' (see yandex_music _parse_radio_item_id)
+    async def _yandex_set(
+        self, prov: MusicProvider, item_id: str, *, liked: bool
+    ) -> bool:
+        # My Wave items carry the station after '@' (see yandex_music
+        # _parse_radio_item_id)
         track_id = item_id.split("@", 1)[0]
         client = self._yandex_client(prov)
         if liked:
