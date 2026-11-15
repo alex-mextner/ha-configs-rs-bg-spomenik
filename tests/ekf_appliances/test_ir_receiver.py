@@ -178,7 +178,7 @@ class TestReceiver(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.receiver.probe_waiter)
 
     async def test_opt_in_can_listen_until_first_known_press_without_probe(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await asyncio.sleep(0.01)
         self.assertTrue(self.receiver.enabled)
         self.assertFalse(self.receiver.validated)
@@ -200,7 +200,7 @@ class TestReceiver(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.device.commands, ["study_exit", "study"])
 
     async def test_first_known_press_validates_and_saves_existing_mapping(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await asyncio.sleep(0.01)
         self.receiver.on_receive({"202": code(command=0xEA15)}, False)
         self.assertEqual(self.events, ["ok"])
@@ -216,7 +216,7 @@ class TestReceiver(unittest.IsolatedAsyncioTestCase):
         self.store.async_delay_save.assert_called_once()
 
     async def test_unknown_full_poll_and_reflection_cannot_validate_listener(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await asyncio.sleep(0.01)
         self.receiver.on_receive({"202": code(address=0x0707)}, False)
         self.receiver.on_receive({"202": code()}, True)
@@ -424,7 +424,7 @@ class TestContinuousReceiver(TestReceiver):
                 await asyncio.sleep(0.01)
 
     async def test_two_separate_identical_presses_reach_event_after_rearm(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         self.assertTrue(self.device.press(code(command=0xE41B)))
         await asyncio.sleep(0.4)
@@ -432,7 +432,7 @@ class TestContinuousReceiver(TestReceiver):
         self.assertEqual(self.events, ["smart", "smart"])
 
     async def test_idle_expiry_does_not_leave_an_optimistic_but_deaf_receiver(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         self.device.listening = False  # The firmware's learning timeout.
         self.receiver.last_arm -= 16
@@ -441,7 +441,7 @@ class TestContinuousReceiver(TestReceiver):
         self.assertEqual(self.events, ["power"])
 
     async def test_native_reconnect_renews_the_hardware_learning_session(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         self.device.socket = None
         self.device.listening = False
@@ -453,7 +453,7 @@ class TestContinuousReceiver(TestReceiver):
 
 
     async def test_unknown_capture_consumes_session_but_next_known_press_still_arrives(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         self.assertTrue(self.device.press("not-base64"))
         await asyncio.sleep(0.4)
@@ -463,7 +463,7 @@ class TestContinuousReceiver(TestReceiver):
         self.assertEqual(self.receiver.event_count, 1)
 
     async def test_periodic_snapshot_cannot_replay_code_or_suppress_next_press(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         self.receiver.on_receive({"201": '{"control":"send_ir"}',
                                   "202": code(command=0xE41B)}, True)
@@ -474,14 +474,14 @@ class TestContinuousReceiver(TestReceiver):
         self.assertEqual(self.receiver.capture_count, 1)
 
     async def test_no_reset_flood_between_captures_or_renewal_deadline(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         await asyncio.sleep(0.65)
         self.assertEqual(self.receiver.study_sessions, 1)
         self.assertEqual(self.device.commands, ["study_exit", "study"])
 
     async def test_send_pause_drops_reflection_and_resumes_for_same_code(self):
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         self.device.press(code(command=0xE41B))
         async with self.receiver.runtime.transport._lock:
@@ -525,7 +525,7 @@ class TestContinuousReceiver(TestReceiver):
         self.receiver.add_callback(
             lambda _: changes.append((self.receiver.status, self.receiver.last_error))
         )
-        await self.receiver.async_set_enabled(True)
+        await self.receiver.async_set_enabled(enabled=True)
         await self.wait_for(lambda: self.device.listening)
         self.device.socket = None
         self.device.listening = False

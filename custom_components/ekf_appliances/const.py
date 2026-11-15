@@ -1,4 +1,5 @@
 """Configuration keys for the local living-room appliances."""
+
 DOMAIN = "ekf_appliances"
 CONF_REMOTE_ENTITY_ID = "remote_entity_id"
 CONF_TEMPERATURE_ENTITY_ID = "temperature_entity_id"

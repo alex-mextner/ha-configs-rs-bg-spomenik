@@ -206,7 +206,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_guarded_tv_service_routes_verified_power_and_rejects_completed_newer_off(self):
         from custom_components.ekf_appliances import async_setup
-        from custom_components.ekf_appliances.power_pair import PowerEndpoint, PowerPair
+        from custom_components.ekf_appliances.power_pair import PowerEndpoint, PowerPair, PowerPairHooks
         player_state = [False]
         player_calls = []
 
@@ -220,7 +220,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         pair = PowerPair(
             "TV guarded test", PowerEndpoint(lambda: self.coordinator.data, self.player._async_power),
             PowerEndpoint(lambda: player_state[0], player_power),
-            changed=lambda: self.player.async_write_ha_state(),
+            hooks=PowerPairHooks(changed=lambda: self.player.async_write_ha_state()),
         )
         self.runtime.tv_power_pair = pair
         pair.start()
@@ -234,7 +234,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player_calls, [True])
         self.assertIs(self.player.extra_state_attributes["last_power_intent"], True)
         self.assertEqual(self.player.extra_state_attributes["power_intent_revision"], pair.intent_revision)
-        await pair.request(False)
+        await pair.request(target=False)
         self.assertIsNone(pair.target)
         with self.assertRaisesRegex(HomeAssistantError, "superseded"):
             await self.hass.services.async_call("ekf_appliances", "wake_if_current", {

@@ -252,7 +252,7 @@ class SamsungTvMediaPlayer(CoordinatorEntity[SamsungPowerCoordinator], MediaPlay
 
     async def _async_pair_power(self, target: bool) -> None:
         if pair := self.runtime.tv_power_pair:
-            await pair.request(target)
+            await pair.request(target=target)
         else:
             await self._async_power(target)
 

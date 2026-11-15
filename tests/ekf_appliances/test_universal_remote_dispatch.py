@@ -245,7 +245,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.weather(18.3)
         self.controller.refresh()
-        self.controller.mode.select(source, navigation == "on")
+        self.controller.mode.select(source, native=navigation == "on")
 
     def weather(self, value, unit="°C", state="sunny"):
         self.hass.states.async_set(

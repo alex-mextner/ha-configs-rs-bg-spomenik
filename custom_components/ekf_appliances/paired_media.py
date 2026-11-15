@@ -11,7 +11,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
 from .const import CONF_TV_ANDROIDTV_ENTITY_ID, CONF_TV_KODI_ENTITY_ID
-from .power_pair import PowerEndpoint, PowerPair
+from .power_pair import PowerEndpoint, PowerPair, PowerPairHooks
 
 
 def observed_boolean(hass, entity_id: str | None, *, max_age: float | None = None) -> bool | None:
@@ -54,15 +54,17 @@ def _projector_pair(runtime, changed) -> PowerPair:
         "Projector / Kodi",
         PowerEndpoint(
             lambda: observed_boolean(hass, runtime.projector_power_entity_id, max_age=12),
-            runtime.async_projector_power,
+            lambda target: runtime.async_projector_power(turn_on=target),
         ),
         PowerEndpoint(
             lambda: observed_boolean(hass, "sensor.kodi_service_state", max_age=20),
             kodi_power,
         ),
-        changed=changed,
-        create_task=hass.async_create_task,
-        requested=runtime.note_projector_off_requested,
+        hooks=PowerPairHooks(
+            changed=changed,
+            create_task=hass.async_create_task,
+            requested=lambda target: runtime.note_projector_off_requested(target=target),
+        ),
     )
 
 
@@ -151,8 +153,9 @@ def install_power_pairs(runtime, projector, television=None) -> None:
             lambda: observed_boolean(hass, routing.entity_id(CONF_TV_ANDROIDTV_ENTITY_ID)),
             android_power,
         ),
-        changed=notify(television),
-        create_task=hass.async_create_task,
+        hooks=PowerPairHooks(
+            changed=notify(television), create_task=hass.async_create_task,
+        ),
     )
     runtime.tv_power_pair = television_pair
     entry.async_on_unload(television.coordinator.async_add_listener(television_pair.observe))

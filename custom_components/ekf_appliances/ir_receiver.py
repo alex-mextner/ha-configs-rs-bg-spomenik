@@ -414,7 +414,7 @@ class IrReceiver:
             self.task.add_done_callback(lambda _: self._notify())
         self._notify()
 
-    async def async_set_enabled(self, enabled):
+    async def async_set_enabled(self, *, enabled: bool) -> None:
         if enabled:
             await self._attach()
             self.enabled = True

@@ -46,9 +46,9 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.calls = []
         self.starts = []
 
-        async def projector_power(target):
-            self.calls.append(("projector", target))
-            self.hass.states.async_set("binary_sensor.hdmi", "on" if target else "off")
+        async def projector_power(*, turn_on):
+            self.calls.append(("projector", turn_on))
+            self.hass.states.async_set("binary_sensor.hdmi", "on" if turn_on else "off")
 
         self.runtime = SimpleNamespace(
             hass=self.hass, entry=self.entry,
@@ -111,17 +111,17 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_real_ha_services_start_and_stop_both_pairs(self):
-        await self.runtime.projector_power_pair.request(True)
+        await self.runtime.projector_power_pair.request(target=True)
         self.assertIn(("rest_command", "host_kodi_start", {}), self.calls)
         self.assertIn(("projector", True), self.calls)
-        await self.runtime.projector_power_pair.request(False)
+        await self.runtime.projector_power_pair.request(target=False)
         self.assertIn(("rest_command", "host_kodi_stop", {}), self.calls)
-        await self.runtime.tv_power_pair.request(True)
+        await self.runtime.tv_power_pair.request(target=True)
         self.assertIn(("media_player", "turn_on", {"entity_id": "media_player.android"}), self.calls)
         self.assertIn(("tv", True), self.calls)
 
     async def test_kodi_json_rpc_unavailable_does_not_switch_projector_off(self):
-        await self.runtime.projector_power_pair.request(True)
+        await self.runtime.projector_power_pair.request(target=True)
         self.calls.clear()
         self.hass.states.async_set("media_player.home", "unavailable")
         await self.hass.async_block_till_done()
@@ -129,7 +129,7 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.states.get("binary_sensor.hdmi").state, "on")
 
     async def test_cast_session_off_does_not_switch_tv_off(self):
-        await self.runtime.tv_power_pair.request(True)
+        await self.runtime.tv_power_pair.request(target=True)
         self.calls.clear()
         self.hass.states.async_set("media_player.gostinaia_2", "off")
         await self.hass.async_block_till_done()
@@ -137,7 +137,7 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.television.coordinator.data)
 
     async def test_process_status_off_follows_to_projector(self):
-        await self.runtime.projector_power_pair.request(True)
+        await self.runtime.projector_power_pair.request(target=True)
         self.calls.clear()
         self.hass.states.async_set("sensor.kodi_service_state", "off")
         await self.hass.async_block_till_done()
@@ -151,7 +151,7 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(new_id, "off")
         await self.hass.async_block_till_done()
         self.runtime.tv_power_pair.timeout = 0.2
-        await self.runtime.tv_power_pair.request(True)
+        await self.runtime.tv_power_pair.request(target=True)
         self.assertIn(("media_player", "turn_on", {"entity_id": new_id}), self.calls)
         self.assertTrue(self.television.coordinator.data)
         self.calls.clear()
@@ -166,9 +166,9 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
             hass.states.async_set("binary_sensor.hdmi", "off")
             hass.states.async_set("sensor.kodi_service_state", "off")
 
-            async def projector_power(target):
-                calls.append(("projector", target))
-                hass.states.async_set("binary_sensor.hdmi", "on" if target else "off")
+            async def projector_power(*, turn_on):
+                calls.append(("projector", turn_on))
+                hass.states.async_set("binary_sensor.hdmi", "on" if turn_on else "off")
 
             async def kodi_power(call):
                 calls.append(("kodi", call.service))

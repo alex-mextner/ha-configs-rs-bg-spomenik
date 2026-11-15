@@ -1,6 +1,13 @@
 """Serialize whole IR bursts at one async send boundary."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Sequence
+
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
 import math
 
 from .protocol import encode_pulses
@@ -10,16 +17,26 @@ class Transport:
     """One lock for every appliance using this remote."""
 
     def __init__(self, send: Callable[[str], Awaitable[None]]) -> None:
+        """Bind the physical send callback and initialize the shared burst lock."""
         self._send = send
         self._lock = asyncio.Lock()
         self._busy_until = 0.0
 
-    async def async_send(self, pulses: Sequence[int], *, repeats: int = 1, gap: float = 0) -> None:
+    async def async_send(
+        self, pulses: Sequence[int], *, repeats: int = 1, gap: float = 0
+    ) -> None:
         """Send full single frames, releasing the lock even on failure/cancellation."""
         if type(repeats) is not int or repeats < 1:
-            raise ValueError("Repeat count must be a positive integer")
-        if isinstance(gap, bool) or not isinstance(gap, (int, float)) or not math.isfinite(gap) or gap < 0:
-            raise ValueError("Repeat delay must be finite and nonnegative")
+            error_message = "Repeat count must be a positive integer"
+            raise ValueError(error_message)
+        if (
+            isinstance(gap, bool)
+            or not isinstance(gap, (int, float))
+            or not math.isfinite(gap)
+            or gap < 0
+        ):
+            error_message = "Repeat delay must be finite and nonnegative"
+            raise ValueError(error_message)
         command = encode_pulses(pulses)
         async with self._lock:
             loop = asyncio.get_running_loop()
