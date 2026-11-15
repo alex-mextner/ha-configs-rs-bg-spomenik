@@ -1,0 +1,93 @@
+probe_remote_receive:
+  name: Проверить приём универсального пульта
+  description: До 30 секунд ожидает кнопку физического пульта через EKF. Не отправляет команды бытовой технике. После проверки выходит из обучения.
+  fields:
+    remote_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: remote
+          integration: tuya_local
+    seconds:
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: s
+
+wake_if_current:
+  target:
+    entity:
+      integration: ekf_appliances
+      domain: media_player
+  fields:
+    expected_revision:
+      required: true
+      selector:
+        text:
+
+remote_prepare:
+  name: Prepare universal remote mode
+  description: Resolve one accepted physical key through the canonical mode controller.
+  fields:
+    button:
+      required: true
+      selector: {text: {}}
+    received_ms:
+      description: Trusted receiver event time in UTC milliseconds; retrieves the captured route without replaying the press. Omit for a current-time compatibility call.
+      selector: {number: {min: 0, max: 9999999999999, mode: box}}
+    expected_ms:
+      selector: {number: {min: 0, max: 9999999999999, mode: box}}
+    wake_id:
+      selector: {text: {}}
+
+remote_select:
+  name: Select universal remote pair
+  description: Commit one explicit pair/native choice with a sixty-second inactivity lease.
+  fields:
+    pair:
+      required: true
+      selector: {select: {options: [tv, projector]}}
+    native:
+      default: false
+      selector: {boolean: {}}
+    explicit:
+      default: true
+      selector: {boolean: {}}
+
+remote_resolve:
+  name: Resolve universal remote target
+  description: Recheck a queued command's pair and native target against current safety state.
+  fields:
+    pair:
+      selector: {select: {options: [tv, projector]}}
+    native:
+      selector: {boolean: {}}
+
+remote_power:
+  name: Universal remote power
+  description: Dispatch power through the current guard and establish projector shutdown before yielding.
+  fields:
+    pair:
+      selector: {select: {options: [tv, projector]}}
+    native:
+      selector: {boolean: {}}
+
+remote_dispatch:
+  name: Dispatch guarded remote command
+  description: Final command boundary for the universal remote package; preserves native service responses.
+  fields:
+    domain:
+      required: true
+      selector: {select: {options: [kodi, media_player, button, rest_command, remote, androidtv_remote]}}
+    service:
+      required: true
+      selector: {text: {}}
+    service_data:
+      selector: {object: {}}
+    pair:
+      selector: {select: {options: [tv, projector]}}
+    return_response:
+      default: false
+      selector: {boolean: {}}

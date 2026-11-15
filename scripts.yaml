@@ -2,9 +2,9 @@ igraj_na_teleke:
   sequence:
   - action: media_player.select_source
     data:
-      source: media_player.gostinaia
+      source: Телевизор
     target:
-      entity_id: media_player.yandex_station_m00zrw3008rajg
+      entity_id: media_player.yandex_station_m0011hm00z86hg
   alias: Играй на телеке
   description: ''
   icon: mdi:television-classic
@@ -12,9 +12,9 @@ igraj_na_kolonke:
   sequence:
   - action: media_player.select_source
     data:
-      source: ''
+      source: Станция
     target:
-      entity_id: media_player.yandex_station_m00zrw3008rajg
+      entity_id: media_player.yandex_station_m0011hm00z86hg
   alias: Играй на колонке
   description: ''
   icon: mdi:speaker-wireless
@@ -22,124 +22,21 @@ vkliuchi_serialy:
   alias: Включи сериалы
   mode: single
   sequence:
-  # Always make sure Kodi is up (idempotent), even if the TV is already on pc:
-  # Kodi quits itself after 30 min without playback (packages/kodi_lifecycle.yaml).
-  - action: rest_command.host_screen_unlock
-    continue_on_error: true
-  - action: rest_command.host_kodi_start
-    continue_on_error: true
-  - if:
-    - condition: template
-      value_template: '{{ states("input_text.tv_source") == "pc" }}'
-    then:
-    - stop: already on pc
-  - action: remote.turn_off
-    target:
-      entity_id: remote.televizor
-  - action: button.press
-    target:
-      entity_id: button.samsung_tv_source
-    data: {}
-  - delay:
-      milliseconds: 999
-  - action: button.press
-    target:
-      entity_id: button.samsung_tv_left
-    data: {}
-  - delay:
-      milliseconds: 500
-  - action: button.press
-    target:
-      entity_id: button.samsung_tv_ok
-    data: {}
-  - action: input_text.set_value
-    target:
-      entity_id: input_text.tv_source
-    data:
-      value: pc
+    - action: media_player.turn_on
+      target: { entity_id: media_player.projector }
 vkliuchi_hromkast:
   alias: Включи хромкаст
   mode: single
   sequence:
-  - if:
-    - condition: template
-      value_template: '{{ states("input_text.tv_source") == "chromecast" }}'
-    then:
-    - stop: already on chromecast
-  - action: button.press
-    target:
-      entity_id: button.samsung_tv_source
-    data: {}
-  - delay:
-      milliseconds: 999
-  - action: button.press
-    target:
-      entity_id: button.samsung_tv_right
-    data: {}
-  - delay:
-      milliseconds: 500
-  - action: button.press
-    target:
-      entity_id: button.samsung_tv_ok
-    data: {}
-  - action: input_text.set_value
-    target:
-      entity_id: input_text.tv_source
-    data:
-      value: chromecast
+    - action: media_player.turn_on
+      target: { entity_id: media_player.ue48j5500_ue48j5500 }
 tv_pause:
-  sequence:
-  - choose:
-    - conditions:
-      - condition: state
-        entity_id: input_text.tv_source
-        state:
-        - pc
-      sequence:
-      - action: media_player.media_pause
-        metadata: {}
-        target:
-          device_id: 684f74444c4499ff98d966a4775657f8
-        data: {}
-    - conditions:
-      - condition: state
-        entity_id: input_text.tv_source
-        state:
-        - chromecast
-      sequence:
-      - action: media_player.media_pause
-        metadata: {}
-        target:
-          entity_id: media_player.televizor
-        data: {}
-      alias: Chromecast
   alias: TV pause
-  description: ''
-tv_play:
   sequence:
-  - choose:
-    - conditions:
-      - condition: state
-        entity_id: input_text.tv_source
-        state:
-        - pc
-      sequence:
-      - action: media_player.media_play
-        metadata: {}
-        target:
-          device_id: 684f74444c4499ff98d966a4775657f8
-        data: {}
-    - conditions:
-      - condition: state
-        entity_id: input_text.tv_source
-        state:
-        - chromecast
-      sequence:
-      - action: media_player.media_play
-        metadata: {}
-        target:
-          entity_id: media_player.televizor
-        data: {}
-      alias: Chromecast
+    - action: media_player.media_pause
+      target: { entity_id: media_player.ue48j5500_ue48j5500 }
+tv_play:
   alias: TV play
-  description: ''
+  sequence:
+    - action: media_player.media_play
+      target: { entity_id: media_player.ue48j5500_ue48j5500 }

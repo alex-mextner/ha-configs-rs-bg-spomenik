@@ -7,8 +7,8 @@ usage() {
     cat <<'EOF'
 Usage: scripts/ha_validate_yaml.sh [YAML_FILE ...]
 
-Validate Home Assistant YAML syntax with the PyYAML version available inside
-the running HA container. Unknown HA tags such as !include, !secret, and !input
+Validate the current checkout using local PyYAML, or the HA container as a
+parser when local PyYAML is unavailable. File contents are supplied on stdin. Unknown HA tags such as !include, !secret, and !input
 are parsed as plain YAML nodes so syntax errors are still caught.
 
 With no files, validates active repo-level HA YAML files:
@@ -16,7 +16,7 @@ With no files, validates active repo-level HA YAML files:
   templates.yaml, known_devices.yaml, packages/*.yaml, blueprints/**/*.yaml,
   ui-*.yaml
 
-Set HA_CONTAINER to override the container name.
+Set HA_CONTAINER to override the fallback container; HA_YAML_PYTHON selects a local Python.
 EOF
 }
 
@@ -28,8 +28,13 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
 
-if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-    echo "ERROR: HA container '$CONTAINER' is not available" >&2
+PYTHON="${HA_YAML_PYTHON:-python3}"
+if "$PYTHON" -c 'import yaml' >/dev/null 2>&1; then
+    parser=("$PYTHON")
+elif docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    parser=(docker exec -i "$CONTAINER" python3)
+else
+    echo "ERROR: local PyYAML and HA container are both unavailable" >&2
     exit 2
 fi
 
@@ -80,8 +85,7 @@ def construct_ha_tag(loader, tag_suffix, node):
 HALoader.add_multi_constructor("!", construct_ha_tag)
 
 try:
-    with open(path, encoding="utf-8") as handle:
-        list(yaml.load_all(handle, Loader=HALoader))
+    list(yaml.load_all(sys.stdin, Loader=HALoader))
 except Exception as err:
     print(f"{type(err).__name__}: {err}", file=sys.stderr)
     sys.exit(1)
@@ -113,7 +117,7 @@ for input_file in "${files[@]}"; do
         continue
     fi
 
-    if docker exec "$CONTAINER" python3 -c "$PY_CODE" "/config/$file" >/dev/null; then
+    if "${parser[@]}" -c "$PY_CODE" "$file" < "$file" >/dev/null; then
         echo "OK: $file"
     else
         echo "ERROR: $file" >&2

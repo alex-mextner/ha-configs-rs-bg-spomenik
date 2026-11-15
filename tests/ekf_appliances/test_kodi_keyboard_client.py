@@ -1,0 +1,254 @@
+"""Kodi provider hooks the existing native connection without text-bearing HA services."""
+import asyncio
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+ROOT = Path(__file__).resolve().parents[2]
+
+def safe_snapshot(text="preFIX", revision=1):
+    return {"session_id":"a"*32,"revision":revision,"focused":True,"sensitive":False,
+            "text":text,"selection":None,"capabilities":{"edit":True,"commit":True,"close":True,"selection":False},
+            "status":"ready","fresh_at":"2026-11-13T18:00:00+00:00"}
+
+class NativeServer:
+    def __init__(self):
+        object.__setattr__(self, "_server_request_handlers", {})
+    def __setattr__(self, name, value):
+        self._server_request_handlers[name] = value
+
+class KodiProviderClientTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        path = ROOT / "custom_components/ekf_appliances/keyboard_kodi.py"
+        self.assertTrue(path.exists(), "Kodi keyboard client provider is not implemented")
+        spec = importlib.util.spec_from_file_location("kodi_keyboard_provider_contract", path)
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.tasks = []
+        def create_task(coroutine, *args, **kwargs):
+            task = asyncio.create_task(coroutine)
+            self.tasks.append(task)
+            return task
+        self.hass = SimpleNamespace(async_create_task=create_task, services=SimpleNamespace(async_call=AsyncMock()))
+        self.server = NativeServer()
+        self.connection = SimpleNamespace(server=self.server, connected=True, can_subscribe=True)
+        self.provider = self.module.KodiKeyboardProvider(self.hass, "media_player.home", "http://127.0.0.1:8787", "private-test-token")
+        self.provider._resolve_connection = Mock(return_value=self.connection)
+        self.provider._post = AsyncMock(return_value={"snapshot":safe_snapshot()})
+        with patch.object(self.module, "async_track_time_interval", return_value=lambda: None):
+            await self.provider.async_start()
+
+    async def asyncTearDown(self):
+        if hasattr(self, "provider"):
+            await self.provider.async_shutdown()
+        for task in getattr(self, "tasks", []):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*getattr(self, "tasks", []), return_exceptions=True)
+
+    async def event(self, name, data=None):
+        self.server._server_request_handlers[name]("kodi", data)
+        await asyncio.sleep(0)
+        await asyncio.gather(*[t for t in self.tasks if not t.done()])
+
+    async def test_actual_input_event_sends_only_type_and_returns_observed_field(self):
+        await self.event("Input.OnInputRequested", {"type":"keyboard","title":"Private title","value":"private raw value"})
+        self.provider._post.assert_awaited_once_with({"action":"context","kind":"keyboard"})
+        self.assertEqual((await self.provider.async_snapshot())["text"], "preFIX")
+        self.hass.services.async_call.assert_not_called()
+
+    async def test_password_event_never_publishes_text_even_if_host_reply_is_wrong(self):
+        observed = []
+        self.provider.subscribe(observed.append)
+        await self.event("Input.OnInputRequested", {"type":"password","value":"PASSWORD"})
+        self.assertTrue(observed)
+        self.assertTrue(all("text" not in snapshot for snapshot in observed))
+        self.assertNotIn("text", await self.provider.async_snapshot())
+        self.assertEqual(self.provider._post.await_args.args[0], {"action":"context","kind":"password"})
+
+    async def test_phone_edit_calls_private_host_directly_and_does_not_use_ha_services(self):
+        await self.event("Input.OnInputRequested", {"type":"keyboard"})
+        self.provider._post.reset_mock()
+        self.provider._post.return_value = {"snapshot":safe_snapshot("preNEWFIX",2),"verified":True}
+        result = await self.provider.async_edit("a"*32,1,"preNEWFIX")
+        self.assertEqual(result["text"],"preNEWFIX")
+        self.provider._post.assert_awaited_once_with({"action":"edit","session_id":"a"*32,"expected_revision":1,"text":"preNEWFIX"})
+        self.hass.services.async_call.assert_not_called()
+
+    async def test_queued_edit_is_rejected_when_projector_shutdown_starts(self):
+        await self.event("Input.OnInputRequested", {"type":"keyboard"})
+        self.provider._post.reset_mock()
+        allowed = True
+        self.provider.command_allowed = lambda: allowed
+        await self.provider._lock.acquire()
+        operation = asyncio.create_task(self.provider.async_edit("a"*32, 1, "new"))
+        await asyncio.sleep(0)
+        allowed = False
+        self.provider._lock.release()
+        with self.assertRaises(self.module.KodiKeyboardError) as caught:
+            await operation
+        self.assertEqual(caught.exception.code, "unavailable")
+        self.provider._post.assert_not_awaited()
+
+    async def test_unknown_type_and_finished_event_revoke_cached_text(self):
+        await self.event("Input.OnInputRequested", {"type":"keyboard"})
+        await self.event("Input.OnInputRequested", {"type":"numeric","value":"1234"})
+        self.assertNotIn("text",await self.provider.async_snapshot())
+        await self.event("Input.OnInputFinished")
+        self.assertNotIn("text",await self.provider.async_snapshot())
+        self.assertFalse((await self.provider.async_snapshot())["capabilities"]["edit"])
+
+    async def test_shutdown_removes_only_callbacks_that_this_provider_still_owns(self):
+        foreign = Mock()
+        self.server._server_request_handlers["Input.OnInputRequested"] = foreign
+        await self.provider.async_shutdown()
+        self.assertIs(self.server._server_request_handlers["Input.OnInputRequested"],foreign)
+        self.assertNotIn("Input.OnInputFinished", self.server._server_request_handlers)
+
+    async def test_terminal_ack_does_not_overwrite_a_newly_opened_native_field(self):
+        await self.event("Input.OnInputRequested", {"type":"keyboard"})
+        entered, release = asyncio.Event(), asyncio.Event()
+        second = safe_snapshot("new field", 1)
+        second["session_id"] = "b"*32
+        terminal = {"session_id":"c"*32,"revision":0,"focused":False,"sensitive":False,
+                    "selection":None,"capabilities":{"edit":False,"commit":False,"close":False,"selection":False},
+                    "status":"idle","fresh_at":None}
+        async def post(payload):
+            if payload["action"] == "commit":
+                entered.set()
+                await release.wait()
+                return {"snapshot":terminal,"verified":True}
+            return {"snapshot":second}
+        self.provider._post.side_effect = post
+        commit = asyncio.create_task(self.provider.async_commit("a"*32,1))
+        try:
+            await asyncio.wait_for(entered.wait(),1)
+            self.server._server_request_handlers["Input.OnInputFinished"]("kodi",None)
+            self.server._server_request_handlers["Input.OnInputRequested"]("kodi",{"type":"keyboard"})
+        finally:
+            release.set()
+        ack = await commit
+        await asyncio.gather(*[task for task in self.tasks if not task.done()])
+        self.assertEqual(ack["status"],"idle")
+        current = await self.provider.async_snapshot()
+        self.assertEqual(current["session_id"],"b"*32)
+        self.assertEqual(current["text"],"new field")
+
+    async def test_rebinding_connected_native_server_clears_old_text_and_rejects_late_callbacks(self):
+        await self.event("Input.OnInputRequested", {"type":"keyboard"})
+        old_requested = self.server._server_request_handlers["Input.OnInputRequested"]
+        old_finished = self.server._server_request_handlers["Input.OnInputFinished"]
+        self.server = NativeServer()
+        self.connection = SimpleNamespace(server=self.server, connected=True, can_subscribe=True)
+        self.provider._resolve_connection.return_value = self.connection
+        published = []
+        self.provider.subscribe(published.append)
+        self.assertTrue(self.provider._ensure_connection())
+        with self.subTest(boundary="connected_to_connected_rebind"):
+            current = await self.provider.async_snapshot()
+            self.assertNotIn("text",current)
+            self.assertFalse(current["capabilities"]["edit"])
+            self.assertTrue(published)
+        await self.event("Input.OnInputRequested", {"type":"password"})
+        before = await self.provider.async_snapshot()
+        self.provider._post.reset_mock()
+        old_requested("old-kodi", {"type":"keyboard","value":"old-private-value"})
+        old_finished("old-kodi", None)
+        await asyncio.sleep(0)
+        await asyncio.gather(*[task for task in self.tasks if not task.done()])
+        with self.subTest(boundary="late_old_callbacks"):
+            self.provider._post.assert_not_called()
+            self.assertEqual(await self.provider.async_snapshot(),before)
+            self.assertNotIn("text", await self.provider.async_snapshot())
+
+    async def test_real_native_jsonrpc_notification_does_not_log_keyboard_content_at_debug(self):
+        import io
+        import logging
+        import jsonrpc_base
+        from jsonrpc_websocket import Server
+
+        secret = "PRIVATE-NATIVE-KEYBOARD-FIXTURE"
+        server = Server("ws://127.0.0.1:9090/jsonrpc", session=SimpleNamespace())
+        connection = SimpleNamespace(server=server, connected=True, can_subscribe=True)
+        self.provider._resolve_connection.return_value = connection
+        self.provider._ensure_connection()
+        output = io.StringIO()
+        handler = logging.StreamHandler(output)
+        loggers = [logging.getLogger(name) for name in (
+            "jsonrpc_websocket.jsonrpc","jsonrpc_base.jsonrpc","pykodi.kodi")]
+        previous = [(logger,logger.level,logger.propagate) for logger in loggers]
+        try:
+            for logger in loggers:
+                logger.setLevel(logging.DEBUG)
+                logger.propagate = False
+                logger.addHandler(handler)
+            request = jsonrpc_base.Request.parse({
+                "jsonrpc":"2.0","method":"Input.OnInputRequested",
+                "params":{"sender":"xbmc","data":{"type":"keyboard","title":secret,"value":secret}}})
+            await server._receive_request(request)
+            await asyncio.gather(*[task for task in self.tasks if not task.done()])
+            self.assertEqual(self.provider._post.await_args.args[0],
+                             {"action":"context","kind":"keyboard"})
+            self.assertNotIn(secret,output.getvalue())
+            self.hass.services.async_call.assert_not_called()
+        finally:
+            for logger,level,propagate in previous:
+                logger.removeHandler(handler)
+                logger.setLevel(level)
+                logger.propagate = propagate
+            await server.close()
+
+    async def test_actual_homeassistant_interval_dispatch_keeps_poll_on_event_loop(self):
+        import tempfile
+        import threading
+        from homeassistant import loader
+        from homeassistant.core import HomeAssistant
+        from homeassistant.helpers import frame
+
+        with tempfile.TemporaryDirectory() as config_dir:
+            hass = HomeAssistant(config_dir)
+            loader.async_setup(hass)
+            frame.async_setup(hass)
+            provider = self.module.KodiKeyboardProvider(
+                hass, "media_player.home", "http://127.0.0.1:8787", "private-test-token")
+            server = NativeServer()
+            connection = SimpleNamespace(server=server, connected=True, can_subscribe=True)
+            provider._resolve_connection = Mock(return_value=connection)
+            changed = asyncio.Event()
+            owner_thread = threading.get_ident()
+            observed_threads = []
+            original_ensure = provider._ensure_connection
+
+            def ensure_connection():
+                observed_threads.append(threading.get_ident())
+                return original_ensure()
+
+            async def post(payload):
+                if payload["action"] == "context":
+                    return {"snapshot": safe_snapshot("", 1)}
+                changed.set()
+                return {"snapshot": safe_snapshot("a", 2)}
+
+            provider._ensure_connection = ensure_connection
+            provider._post = AsyncMock(side_effect=post)
+            try:
+                # Real HA async_track_time_interval and HassJob dispatch. Never
+                # call _tick ourselves or replace the scheduler with a lambda.
+                await provider.async_start()
+                server._server_request_handlers["Input.OnInputRequested"](
+                    "kodi", {"type": "keyboard"})
+                await hass.async_block_till_done()
+                observed_threads.clear()
+                await asyncio.wait_for(changed.wait(), 1.5)
+                await hass.async_block_till_done()
+                self.assertTrue(observed_threads)
+                self.assertTrue(all(thread == owner_thread for thread in observed_threads))
+                current = await provider.async_snapshot()
+                self.assertEqual(current["text"], "a")
+                self.assertEqual(current["revision"], 2)
+            finally:
+                await provider.async_shutdown()
+                await hass.async_block_till_done()
+                await hass.async_stop()
