@@ -233,6 +233,21 @@ class OwnedPlayback:
             self._idle_since = now
         return now - self._idle_since < 2.0
 
+    def _repeat_superseded(self, current):
+        self._forget()
+        return {**self._publish(current), "repeat_superseded": True}
+
+    def _restore_repeat(self, latest, prior, deadline):
+        if prior != "one":
+            self._rpc("Player.SetRepeat", {"playerid": 1, "repeat": prior}, deadline)
+            latest = self._read(deadline)
+            if latest["foreign_player"] or latest["repeat"] == "one":
+                return self._publish(latest, error="restore_unconfirmed")
+            if latest["repeat"] != prior:
+                return self._repeat_superseded(latest)
+        self._forget()
+        return self._publish(latest)
+
     def _observe(self, deadline, *, grace=False):
         current = self._read(deadline)
         if self._owner is None:
@@ -243,8 +258,7 @@ class OwnedPlayback:
         if current["repeat"] != "one":
             # Covers external off/all, a crash before SetRepeat, and a crash
             # after successful restoration. Never replay an old repeat intent.
-            self._forget()
-            return self._publish(current)
+            return self._repeat_superseded(current)
         if current["file_matches"]:
             self._idle_since = None
             return self._publish(current)
@@ -256,8 +270,7 @@ class OwnedPlayback:
         if latest["foreign_player"]:
             return self._publish(latest, error="foreign_player_active")
         if latest["repeat"] != "one":
-            self._forget()
-            return self._publish(latest)
+            return self._repeat_superseded(latest)
         if latest["file_matches"]:
             return self._publish(latest)
         prior = self._owner["prior_repeat"]
@@ -270,17 +283,10 @@ class OwnedPlayback:
         if latest["foreign_player"]:
             return self._publish(latest, error="foreign_player_active")
         if latest["repeat"] != "one":
-            self._forget()
-            return self._publish(latest)
+            return self._repeat_superseded(latest)
         if latest["file_matches"]:
             return self._publish(latest)
-        if prior != "one":
-            self._rpc("Player.SetRepeat", {"playerid": 1, "repeat": prior}, deadline)
-            latest = self._read(deadline)
-            if latest["foreign_player"] or latest["repeat"] == "one":
-                return self._publish(latest, error="restore_unconfirmed")
-        self._forget()
-        return self._publish(latest)
+        return self._restore_repeat(latest, prior, deadline)
 
     def _bounded_deadline(self, deadline, limit=None):
         end = time.monotonic() + min(
@@ -371,6 +377,8 @@ class OwnedPlayback:
             # The callback atomically records the pending source before Open.
             opened = self._open_confirmed(deadline)
             proof = self._observe(deadline)
+        if opened is not None and proof.get("repeat_superseded") is True:
+            return opened, proof
         if proof["state"] == "paused":
             self._rpc("Player.PlayPause", {"playerid": 1, "play": True}, deadline)
             proof = self._observe(deadline)
@@ -400,6 +408,12 @@ class OwnedPlayback:
         try:
             latest = self._read(deadline)
             if (
+                not latest["foreign_player"]
+                and latest["file_matches"]
+                and latest["repeat"] != current["repeat"]
+            ):
+                return self._repeat_superseded(latest)
+            if (
                 latest["foreign_player"]
                 or not latest["file_matches"]
                 or latest["speed"] <= 0
@@ -417,6 +431,8 @@ class OwnedPlayback:
             self._forget()
             raise
         proof = self._observe(deadline)
+        if proof.get("repeat_superseded") is True:
+            return proof
         self.start_monitor()
         if proof["state"] != "playing":
             raise FireplaceError("loop_unconfirmed")
@@ -463,10 +479,16 @@ class OwnedPlayback:
                 current = self._read(deadline)
                 if current["foreign_player"]:
                     return self._publish(current, error="foreign_player_active")
+                if current["repeat"] != "one":
+                    return {**self._repeat_superseded(current), "stopped": False}
                 if current["file_matches"]:
                     self._rpc("Player.Stop", {"playerid": 1}, deadline)
                 proof = self._observe(deadline)
+                if proof.get("repeat_superseded") is True:
+                    return {**proof, "stopped": False}
                 latest = self._read(deadline)
+                if not latest["foreign_player"] and latest["repeat"] != proof["repeat"]:
+                    proof = self._repeat_superseded(latest)
                 return {
                     **proof,
                     "stopped": current["file_matches"]

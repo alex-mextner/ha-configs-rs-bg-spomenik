@@ -390,6 +390,11 @@ class RotatingFireplaceController:
         if time.monotonic() >= deadline:
             raise self.Error("deadline")
 
+    def _reset_prepared_open(self):
+        self._opening = False
+        self._pending["phase"] = "prepared"
+        self._store()
+
     def _open_candidate(self, params, deadline):
         self._check_cancelled()
         self._asset_check()
@@ -397,19 +402,23 @@ class RotatingFireplaceController:
             raise self.Error("invalid_open")
         self._pending["phase"] = "opening"
         self._store()
-        self._check_deadline(deadline)
         try:
+            self._check_deadline(deadline)
             self._check_fallback_intent(deadline)
+            self._check_deadline(deadline)
         except Exception:
-            self._pending["phase"] = "prepared"
-            self._store()
+            self._reset_prepared_open()
             raise
         self._opening = True
-        return self._rpc(
-            "Player.Open",
-            {"item": {"file": self._target.get("open_file", self._target["file"])}},
-            deadline,
-        )
+        try:
+            return self._rpc(
+                "Player.Open",
+                {"item": {"file": self._target.get("open_file", self._target["file"])}},
+                deadline,
+            )
+        except self.NotDispatched:
+            self._reset_prepared_open()
+            raise
 
     def _check_fallback_intent(self, deadline):
         if self._fallback_repeat is None:
@@ -610,10 +619,12 @@ class RotatingFireplaceController:
         try:
             return self._owner.start(force_new=True, deadline=deadline)
         except Exception as error:
+            if str(error) == "playback_changed":
+                self._active = self._pending = None
+                self._store()
+                raise
             self._cancel_attempt()
             self._check_cancelled()
-            if str(error) == "playback_changed":
-                raise
             if not self._opening:
                 raise self.Error("sources_unavailable") from error
             raise self.Error("open_unconfirmed") from error
@@ -626,7 +637,16 @@ class RotatingFireplaceController:
         self._pending = None
         self._store()
 
+    def _release_superseded(self, proof):
+        if proof.get("repeat_superseded") is not True:
+            return False
+        self._active = self._pending = None
+        self._store()
+        return True
+
     def _require_progress_ownership(self, proof):
+        if self._release_superseded(proof):
+            raise self.Error("playback_changed")
         if not proof["owned"]:
             self._cancel_attempt()
             if proof.get("active") is not True:
@@ -660,10 +680,12 @@ class RotatingFireplaceController:
         self._cancel_attempt()
         try:
             stopped = self._owner.stop(deadline=deadline + 8.0)
-            if stopped["owned"] or stopped.get("stopped") is not True:
-                raise self.Error("stop_unconfirmed")
         except Exception as error:
             raise self.Error("stop_unconfirmed") from error
+        if self._release_superseded(stopped):
+            raise self.Error("playback_changed")
+        if stopped["owned"] or stopped.get("stopped") is not True:
+            raise self.Error("stop_unconfirmed")
         self._fallback_repeat = stopped["repeat"]
         self._active = self._pending = None
         self._store()
@@ -798,6 +820,8 @@ class RotatingFireplaceController:
                 self._write_generation(str(uuid4()))
 
     def _settle_unleased(self, proof):
+        if self._release_superseded(proof):
+            return True
         identity = self._cleanup_identity()
         if identity is None or proof["owned"]:
             return True
