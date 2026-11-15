@@ -94,3 +94,57 @@ class RestorationReturnCases(fixtures.FixtureBase):
         controller.close()
         recovered = self.multi()
         self.assert_human_repeat_survives(recovered, expected, "observe")
+
+    def test_repeat_change_during_durable_stop_confirmation_is_preserved(self):
+        controller = self.looped_pending()
+        expected = self.kodi.file
+        self.kodi.file, self.kodi.speed = None, 0
+        controller._owner._idle_since = time.monotonic() - 3
+        persist = controller._owner._persist
+
+        def crash_during_restoration(receipt):
+            persist(receipt)
+            if receipt["phase"] == "restoring":
+                raise recovery.SimulatedCrashError
+
+        with patch.object(
+            controller._owner, "_persist", side_effect=crash_during_restoration
+        ):
+            with self.assertRaises(recovery.SimulatedCrashError):
+                controller.observe()
+        controller.close()
+        recovered = self.multi()
+        self.kodi.file, self.kodi.speed = expected, 1
+        self.kodi.calls.clear()
+        persist = recovered._owner._persist
+        confirmations = []
+
+        def human_repeat_during_confirmation(receipt):
+            persist(receipt)
+            if receipt["phase"] == "looping":
+                confirmations.append(receipt["phase"])
+                self.kodi.repeat = "off"
+
+        with patch.object(
+            recovered._owner,
+            "_persist",
+            side_effect=human_repeat_during_confirmation,
+        ):
+            recovered.stop()
+        self.assertEqual(confirmations, ["looping"])
+        self.assertEqual(self.kodi.file, expected)
+        self.assertEqual(self.kodi.repeat, "off")
+        self.assertIsNone(self.selection()["pending"])
+        self.assertIsNone(self.selection()["active"])
+        recovered.close()
+        restarted = self.multi()
+        restarted.observe()
+        self.assertEqual(self.kodi.file, expected)
+        self.assertEqual(self.kodi.repeat, "off")
+        self.assertFalse(
+            [
+                call
+                for call in self.kodi.calls
+                if call[0] in {"Player.Stop", "Player.SetRepeat"}
+            ]
+        )

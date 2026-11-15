@@ -254,6 +254,8 @@ class OwnedPlayback:
             receipt = {**self._owner, "phase": "looping"}
             self._persist(receipt)
             self._owner = receipt
+            return True
+        return False
 
     def _confirm_playback(self, observed):
         """A positively matched return cancels the old restoration disposition."""
@@ -263,7 +265,8 @@ class OwnedPlayback:
             and observed.get("file_matches")
             and observed.get("repeat") == "one"
         ):
-            self._confirm_looping()
+            return self._confirm_looping()
+        return False
 
     def _restore_repeat(self, latest, prior, deadline):
         if prior != "one":
@@ -508,7 +511,9 @@ class OwnedPlayback:
             deadline = self._bounded_deadline(deadline)
             try:
                 current = self._read(deadline)
-                self._confirm_playback(current)
+                if self._confirm_playback(current):
+                    # The durable write may block; newer native intent wins.
+                    current = self._read(deadline)
                 if current["foreign_player"]:
                     return self._publish(current, error="foreign_player_active")
                 if current["repeat"] != "one":
