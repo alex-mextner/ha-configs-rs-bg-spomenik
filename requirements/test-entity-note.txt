@@ -12,3 +12,6 @@ home-assistant-intents==2026.8.28
 # Cached remote announcements import Home Assistant TTS audio helpers.
 ha-ffmpeg==3.2.2
 mutagen==1.48.1
+
+# Standalone Atom compatibility tests import the parser directly.
+defusedxml==0.7.1
