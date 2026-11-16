@@ -1,0 +1,63 @@
+"""Serialize whole IR bursts at one async send boundary."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Sequence
+
+import asyncio
+import math
+
+from .protocol import encode_pulses
+
+
+class Transport:
+    """One lock for every appliance using this remote."""
+
+    def __init__(self, send: Callable[[str], Awaitable[None]]) -> None:
+        """Bind the physical send callback and initialize the shared burst lock."""
+        self._send = send
+        self._lock = asyncio.Lock()
+        self._busy_until = 0.0
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Share the burst lock with native receiver mode writes."""
+        return self._lock
+
+    async def async_send(
+        self, pulses: Sequence[int], *, repeats: int = 1, gap: float = 0
+    ) -> None:
+        """Send full single frames, releasing the lock even on failure/cancellation."""
+        if type(repeats) is not int or repeats < 1:
+            error_message = "Repeat count must be a positive integer"
+            raise ValueError(error_message)
+        if (
+            isinstance(gap, bool)
+            or not isinstance(gap, (int, float))
+            or not math.isfinite(gap)
+            or gap < 0
+        ):
+            error_message = "Repeat delay must be finite and nonnegative"
+            raise ValueError(error_message)
+        command = encode_pulses(pulses)
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            remaining = self._busy_until - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._busy_until = 0.0
+            for index in range(repeats):
+                if index:
+                    await asyncio.sleep(gap)
+                try:
+                    await self._send(command)
+                finally:
+                    # Preserve this deadline if a service or waiting task is cancelled.
+                    self._busy_until = loop.time() + sum(pulses) / 1_000_000
+                # Tuya Local queues packets; service return is not waveform completion.
+                # Keep the shared lock through the final frame as well.
+                await asyncio.sleep(sum(pulses) / 1_000_000)
+                self._busy_until = 0.0

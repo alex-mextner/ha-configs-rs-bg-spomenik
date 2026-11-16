@@ -1,56 +1,245 @@
-# Universal Remote — complete feature package.
-# Everything related to the living-room IR remote lives here.
-
+# Living-room universal remote. Device integrations own their hardware;
+# the integration publishes the canonical target and mirrors legacy helpers.
+input_select:
+  universal_remote_pair:
+    name: Пульт — телевизор или проектор
+    options: [tv, projector]
+    initial: tv
+    icon: mdi:remote
 input_text:
+  universal_remote_input_ms:
+    name: Пульт — ожидающее нажатие INPUT
+    max: 16
+    initial: "0"
+  universal_remote_input_context:
+    name: Пульт — режим при первом INPUT
+    max: 255
+    initial: "{}"
+  universal_remote_focus_seconds:
+    name: Пульт — длительность фокуса
+    max: 3
+    initial: "60"
+  universal_remote_wake_context:
+    name: Пульт — запрос включения пары
+    max: 255
+    initial: "{}"
+  universal_remote_projector_until_ms:
+    name: Пульт — срок выбранного режима
+    max: 16
+    initial: "0"
   audio_last_press_ms:
-    # Epoch ms of the last 'audio' button press — used for double-tap detection.
     name: Audio last press (ms)
     max: 16
     initial: "0"
     icon: mdi:gesture-double-tap
   ac_last_mode:
-    # Last non-off hvac mode of the Haier AC. Restored when the AC is turned
-    # on from the remote (prime short-press) so it comes back in the mode you
-    # last used instead of whatever climate.turn_on would pick by default.
+    # Kept for external references; Amazon uses the outdoor temperature.
     name: AC last used mode
     max: 10
-    initial: "cool"
+    initial: cool
     icon: mdi:air-conditioner
-
 input_boolean:
+  universal_remote_native_target:
+    name: Пульт — меню самого экрана
+    initial: false
+    icon: mdi:television-settings
   nav_to_tv:
-    name: Nav routes to TV (guide mode)
+    # Legacy external helper; actual remote routing uses native_target.
+    name: Nav routes to TV (legacy)
+    initial: false
     icon: mdi:remote-tv
   audio_mode:
-    # Yandex speaker control mode. Activated by double-tap on 'audio' button.
-    # One-shot: the next button press runs its mapped action and deactivates.
-    # 5s of inactivity also deactivates (safety fallback).
+    # Double AUDIO within 800ms enters; another AUDIO exits. One action exits,
+    # except volume/up/down which keep it active until 3s of inactivity.
     name: Audio mode (Yandex speaker)
+    initial: false
     icon: mdi:speaker
   audio_was_playing:
-    # Snapshots whether the Yandex speaker was playing at activation time,
-    # so deactivation can resume playback (the activation beep pauses it).
+    # Compatibility helper. Leaving Audio must not resume a requested pause.
     name: Audio mode — was playing at activation
+    initial: false
     icon: mdi:play-pause
-
+timer:
+  universal_remote_projector:
+    # Compatibility entity only; exact focus deadlines belong to the integration.
+    name: Пульт — выбранный режим
+    duration: "00:01:00"
+    restore: false
 script:
-  # Source-aware nav. Routing:
-  #   nav_to_tv: on (guide mode) → Samsung TV IR (control its menu)
-  #   source == chromecast → Android TV native keycode via remote.televizor
-  #     (direct TCP to AndroidTV — FAST, no IR round-trip via HDMI-CEC)
-  #   source == pc → Kodi JSON-RPC
-  remote_nav:
-    alias: Remote nav dispatcher
-    mode: parallel
+  # CH changes the setpoint in every remote mode. The climate entity keeps
+  # an off appliance off and stores an off-state setpoint without sending IR.
+  remote_ac_temperature:
+    alias: Remote AC temperature step
+    mode: queued
     max: 20
     fields:
-      direction:
-        description: up | down | left | right | ok | back | menu
-        example: up
+      delta:
+        description: Temperature steps (+1 or -1)
     sequence:
       - variables:
-          to_tv: "{{ is_state('input_boolean.nav_to_tv', 'on') }}"
-          source: "{{ states('input_text.tv_source') }}"
+          current_target: "{{ state_attr('climate.kondei_1', 'temperature') }}"
+      - if: >-
+          {{ states('climate.kondei_1') in ['unknown', 'unavailable']
+             or not is_number(current_target) }}
+        then:
+          - stop: "AC setpoint is unavailable; temperature command was not sent"
+            error: true
+      - variables:
+          next_target: >-
+            {% set step = state_attr('climate.kondei_1', 'target_temp_step') | float(1) %}
+            {% set low = state_attr('climate.kondei_1', 'min_temp') | float(16) %}
+            {% set high = state_attr('climate.kondei_1', 'max_temp') | float(30) %}
+            {{ [[current_target | float + (delta | int) * step, high] | min, low] | max }}
+      - if: "{{ next_target | float != current_target | float }}"
+        then:
+          - action: climate.set_temperature
+            target: { entity_id: climate.kondei_1 }
+            data: { temperature: "{{ next_target }}" }
+
+  # One Amazon press sends one complete state. The outdoor weather temperature
+  # selects heat below 24 C and cool at/above 24 C; indoor readings are not a fallback.
+  remote_ac_toggle:
+    alias: Remote AC power
+    mode: single
+    sequence:
+      - choose:
+          - conditions: "{{ is_state('climate.kondei_1', 'off') }}"
+            sequence:
+              - variables:
+                  outdoor: "{{ state_attr('weather.forecast_home_assistant', 'temperature') }}"
+                  outdoor_unit: "{{ state_attr('weather.forecast_home_assistant', 'temperature_unit') }}"
+              - if: >-
+                  {{ states('weather.forecast_home_assistant') in ['unknown', 'unavailable']
+                     or not is_number(outdoor) or outdoor_unit != '°C' }}
+                then:
+                  - action: system_log.write
+                    data:
+                      level: error
+                      message: "Remote AC: weather.forecast_home_assistant has no valid outdoor temperature in Celsius; no power command sent"
+                  - stop: "Outdoor temperature from weather.forecast_home_assistant is unavailable in Celsius; AC remains off"
+                    error: true
+              - action: climate.set_temperature
+                target: { entity_id: climate.kondei_1 }
+                data:
+                  temperature: 24
+                  hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
+          - conditions: "{{ states('climate.kondei_1') in ['unknown', 'unavailable'] }}"
+            sequence:
+              - stop: "AC state is unavailable; power command was not sent"
+                error: true
+        default:
+          - action: climate.turn_off
+            target: { entity_id: climate.kondei_1 }
+
+  # The integration owns mode, INPUT timing, focus expiry and wake intent.
+  # Keep these public script names and helpers for existing callers.
+  remote_mode_select_pair:
+    alias: Пульт — выбрать пару
+    mode: queued
+    max: 20
+    fields:
+      pair:
+        description: tv | projector
+      native:
+        description: Control the display instead of its player
+      lease_seconds:
+        description: Compatibility field; explicit focus is always 60 seconds
+      explicit:
+        description: False when following the observed power states
+    sequence:
+      - action: ekf_appliances.remote_select
+        data:
+          pair: "{{ pair }}"
+          native: "{{ native | default(false) }}"
+          explicit: "{{ explicit | default(true) }}"
+        response_variable: route
+      - stop: Return the canonical mode
+        response_variable: route
+
+  remote_pair_wake:
+    alias: Пульт — включить выбранную пару
+    mode: parallel
+    max: 4
+    fields:
+      pair:
+        description: Compatibility field; wake intent belongs to the controller
+      wake_id:
+        description: Compatibility token from an obsolete YAML waiter
+    sequence:
+      - action: ekf_appliances.remote_resolve
+        response_variable: route
+      - stop: Wake requests are owned by the canonical controller
+        response_variable: route
+
+  remote_input_single:
+    alias: Пульт — одиночный INPUT
+    mode: queued
+    max: 20
+    sequence:
+      - action: ekf_appliances.remote_resolve
+        response_variable: route
+      - stop: INPUT decisions are owned by the canonical controller
+        response_variable: route
+
+  remote_input_finish:
+    alias: Пульт — ожидание второго INPUT
+    mode: parallel
+    max: 10
+    fields:
+      press_ms:
+        description: Compatibility timestamp from an obsolete YAML waiter
+    sequence:
+      - action: ekf_appliances.remote_resolve
+        response_variable: route
+      - stop: INPUT deadlines are owned by the canonical controller
+        response_variable: route
+
+  remote_modes_prepare:
+    alias: Пульт — выбор получателя
+    mode: queued
+    max: 100
+    fields:
+      button:
+        description: Logical key or compatibility callback
+      received_ms:
+        description: Physical reception timestamp, including fractional milliseconds
+      expected_ms:
+        description: Compatibility INPUT waiter timestamp
+      wake_id:
+        description: Compatibility wake token
+    sequence:
+      - action: ekf_appliances.remote_prepare
+        data:
+          button: "{{ button }}"
+          received_ms: "{{ received_ms | default(none) }}"
+          expected_ms: "{{ expected_ms | default(0) | float }}"
+          wake_id: "{{ wake_id | default('') | string }}"
+        response_variable: route
+      - stop: Return the canonical mode
+        response_variable: route
+
+  remote_nav:
+    alias: Remote nav dispatcher
+    mode: queued
+    max: 30
+    fields:
+      direction:
+        description: up | down | left | right | ok | back | menu | home | exit | info | guide
+      pair:
+        description: tv | projector
+      native:
+        description: Control the display menu instead of its player
+    sequence:
+      - action: ekf_appliances.remote_resolve
+        data: >-
+          {% set request = {} %}
+          {% if pair is defined %}{% set request = dict(request, pair=pair) %}{% endif %}
+          {% if native is defined %}{% set request = dict(request, native=native) %}{% endif %}
+          {{ request }}
+        response_variable: route
+      - variables:
+          selected_pair: "{{ route.pair }}"
+          selected_native: "{{ route.native }}"
           kodi_map:
             up: Input.Up
             down: Input.Down
@@ -58,15 +247,22 @@ script:
             right: Input.Right
             ok: Input.Select
             back: Input.Back
+            exit: Input.Back
             menu: Input.ContextMenu
+            info: Input.Info
+            guide: Input.ShowOSD
           samsung_map:
-            up: button.samsung_tv_up
-            down: button.samsung_tv_down
-            left: button.samsung_tv_left
-            right: button.samsung_tv_right
-            ok: button.samsung_tv_ok
-            back: button.samsung_tv_back
-            menu: button.samsung_tv_menu
+            up: KEY_UP
+            down: KEY_DOWN
+            left: KEY_LEFT
+            right: KEY_RIGHT
+            ok: KEY_ENTER
+            back: KEY_RETURN
+            exit: KEY_EXIT
+            menu: KEY_MENU
+            home: KEY_CONTENTS
+            info: KEY_INFO
+            guide: KEY_GUIDE
           atv_map:
             up: KEYCODE_DPAD_UP
             down: KEYCODE_DPAD_DOWN
@@ -74,97 +270,220 @@ script:
             right: KEYCODE_DPAD_RIGHT
             ok: KEYCODE_DPAD_CENTER
             back: KEYCODE_BACK
+            exit: KEYCODE_HOME
             menu: KEYCODE_MENU
+            home: KEYCODE_HOME
+            info: KEYCODE_INFO
+            guide: KEYCODE_GUIDE
+          projector_map:
+            up: button.projector_up
+            down: button.projector_down
+            left: button.projector_left
+            right: button.projector_right
+            ok: button.projector_ok
+            back: button.projector_back
+            exit: button.projector_back
+            menu: button.projector_menu
+            home: button.projector_menu
       - choose:
-          - conditions: "{{ to_tv }}"
+          - conditions: "{{ selected_pair == 'projector' and selected_native }}"
             sequence:
-              - action: button.press
-                target:
-                  entity_id: "{{ samsung_map[direction] }}"
-          - conditions: "{{ source == 'chromecast' }}"
+              - if: "{{ direction not in projector_map }}"
+                then:
+                  - stop: This projector has no verified command for that key
+                    error: true
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: button
+                  service: press
+                  pair: projector
+                  service_data:
+                    entity_id:
+                    - "{{ projector_map[direction] }}"
+          - conditions: "{{ selected_pair == 'projector' }}"
+            sequence:
+              - choose:
+                  - conditions: "{{ direction == 'home' }}"
+                    sequence:
+                      - action: ekf_appliances.remote_dispatch
+                        data:
+                          domain: kodi
+                          service: call_method
+                          pair: projector
+                          service_data:
+                            entity_id: media_player.home
+                            method: GUI.ActivateWindow
+                            window: home
+                default:
+                  - action: ekf_appliances.remote_dispatch
+                    data:
+                      domain: kodi
+                      service: call_method
+                      pair: projector
+                      service_data:
+                        entity_id: media_player.home
+                        method: "{{ kodi_map[direction] }}"
+          - conditions: "{{ selected_native }}"
             sequence:
               - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data:
-                  command: "{{ atv_map[direction] }}"
-                  delay_secs: 0
-          # projector source behaves like pc for navigation — content is
-          # Kodi on the PC; only power/volume/mute divert to the projector.
-          - conditions: "{{ source in ['pc', 'projector'] }}"
-            sequence:
-              - action: kodi.call_method
-                data:
-                  entity_id: media_player.home
-                  method: "{{ kodi_map[direction] }}"
+                target: { entity_id: remote.ue48j5500_ue48j5500 }
+                data: { command: "{{ samsung_map[direction] }}", delay_secs: 0 }
+        default:
+          - action: remote.send_command
+            target: { entity_id: remote.televizor }
+            data: { command: "{{ atv_map[direction] }}", delay_secs: 0 }
 
-  # Media transport: play/prev/next for the active source.
-  # Chromecast: native Android TV media keycodes via remote.televizor —
-  # direct TCP to the device, no IR/HDMI-CEC detour. The previous
-  # implementation routed through Samsung OK/LEFT/RIGHT which isn't
-  # the same as play/pause and often silently did nothing.
+  remote_volume:
+    alias: Remote volume dispatcher
+    mode: queued
+    max: 30
+    fields:
+      command:
+        description: volume_up | volume_down | mute
+      pair:
+        description: tv | projector
+      native:
+        description: Control the display instead of its player
+    sequence:
+      - action: ekf_appliances.remote_resolve
+        data: >-
+          {% set request = {} %}
+          {% if pair is defined %}{% set request = dict(request, pair=pair) %}{% endif %}
+          {% if native is defined %}{% set request = dict(request, native=native) %}{% endif %}
+          {{ request }}
+        response_variable: route
+      - variables:
+          selected_pair: "{{ route.pair }}"
+          selected_native: "{{ route.native }}"
+          projector_buttons:
+            volume_up: button.projector_vol_up
+            volume_down: button.projector_vol_down
+            mute: button.projector_mute
+          target_player: >-
+            {{ 'media_player.home' if selected_pair == 'projector'
+               else 'media_player.ue48j5500_ue48j5500_network' if selected_native
+               else 'media_player.ue48j5500_ue48j5500' }}
+      - choose:
+          - conditions: "{{ selected_pair == 'projector' and selected_native }}"
+            sequence:
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: button
+                  service: press
+                  pair: projector
+                  service_data:
+                    entity_id:
+                    - "{{ projector_buttons[command] }}"
+          - conditions: "{{ selected_pair == 'tv' and selected_native }}"
+            sequence:
+              - action: remote.send_command
+                target: { entity_id: remote.ue48j5500_ue48j5500 }
+                data:
+                  command: "{{ {'volume_up': 'KEY_VOLUP', 'volume_down': 'KEY_VOLDOWN', 'mute': 'KEY_MUTE'}[command] }}"
+                  delay_secs: 0
+          - conditions: "{{ command == 'mute' }}"
+            sequence:
+              - if: "{{ state_attr(target_player, 'is_volume_muted') is not boolean }}"
+                then:
+                  - stop: Player mute state is unknown; no toggle was guessed
+                    error: true
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: media_player
+                  service: volume_mute
+                  pair: "{{ selected_pair }}"
+                  service_data:
+                    is_volume_muted: "{{ not state_attr(target_player, 'is_volume_muted') }}"
+                    entity_id:
+                    - "{{ target_player }}"
+        default:
+          - action: ekf_appliances.remote_dispatch
+            data:
+              domain: media_player
+              service: "{{ command }}"
+              pair: "{{ selected_pair }}"
+              service_data:
+                entity_id:
+                - "{{ target_player }}"
+
   remote_media:
     alias: Remote media transport
-    mode: parallel
-    max: 10
+    mode: queued
+    max: 20
     fields:
       action:
         description: play_pause | previous | next
+      pair:
+        description: tv | projector
     sequence:
+      - action: ekf_appliances.remote_resolve
+        data: >-
+          {% set request = {} %}
+          {% if pair is defined %}{% set request = dict(request, pair=pair) %}{% endif %}
+          {% if native is defined %}{% set request = dict(request, native=native) %}{% endif %}
+          {{ request }}
+        response_variable: route
       - variables:
-          source: "{{ states('input_text.tv_source') }}"
-          atv_media_map:
-            play_pause: KEYCODE_MEDIA_PLAY_PAUSE
-            previous: KEYCODE_MEDIA_PREVIOUS
-            next: KEYCODE_MEDIA_NEXT
-      - choose:
-          - conditions: "{{ source == 'chromecast' }}"
-            sequence:
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data:
-                  command: "{{ atv_media_map[action] }}"
-                  delay_secs: 0
-          - conditions: "{{ source in ['pc', 'projector'] and action == 'play_pause' }}"
-            sequence:
-              - action: media_player.media_play_pause
-                target: { entity_id: media_player.home }
-          - conditions: "{{ source in ['pc', 'projector'] and action == 'previous' }}"
-            sequence:
-              - action: media_player.media_previous_track
-                target: { entity_id: media_player.home }
-          - conditions: "{{ source in ['pc', 'projector'] and action == 'next' }}"
-            sequence:
-              - action: media_player.media_next_track
-                target: { entity_id: media_player.home }
+          selected_pair: "{{ route.pair }}"
+          media_actions:
+            play_pause: media_play_pause
+            previous: media_previous_track
+            next: media_next_track
+      - action: ekf_appliances.remote_dispatch
+        data:
+          domain: media_player
+          service: "{{ media_actions[action] }}"
+          pair: "{{ selected_pair }}"
+          service_data:
+            entity_id:
+            - "{{ 'media_player.home' if selected_pair == 'projector' else 'media_player.ue48j5500_ue48j5500' }}"
 
   # Kodi: resume next episode of the last in-progress show.
   kodi_play_next_episode:
     alias: Kodi play next episode
     mode: single
     sequence:
-      - action: kodi.call_method
+      - action: ekf_appliances.remote_dispatch
         data:
-          entity_id: media_player.home
-          method: VideoLibrary.GetInProgressTVShows
-          properties: ["title", "lastplayed"]
-          sort:
-            order: descending
-            method: lastplayed
+          domain: kodi
+          service: call_method
+          pair: projector
+          return_response: true
+          service_data:
+            entity_id: media_player.home
+            method: VideoLibrary.GetInProgressTVShows
+            properties:
+            - title
+            - lastplayed
+            sort:
+              order: descending
+              method: lastplayed
         response_variable: shows_resp
       - choose:
           - conditions: "{{ (shows_resp.tvshows | default([])) | length > 0 }}"
             sequence:
               - variables:
                   show_id: "{{ shows_resp.tvshows[0].tvshowid }}"
-              - action: kodi.call_method
+              - action: ekf_appliances.remote_dispatch
                 data:
-                  entity_id: media_player.home
-                  method: VideoLibrary.GetEpisodes
-                  tvshowid: "{{ show_id }}"
-                  properties: ["title", "playcount", "resume", "file", "season", "episode"]
-                  sort:
-                    order: ascending
-                    method: episode
+                  domain: kodi
+                  service: call_method
+                  pair: projector
+                  return_response: true
+                  service_data:
+                    entity_id: media_player.home
+                    method: VideoLibrary.GetEpisodes
+                    tvshowid: "{{ show_id }}"
+                    properties:
+                    - title
+                    - playcount
+                    - resume
+                    - file
+                    - season
+                    - episode
+                    sort:
+                      order: ascending
+                      method: episode
                 response_variable: eps_resp
               - variables:
                   # First episode with playcount == 0 or a non-zero resume position.
@@ -175,56 +494,56 @@ script:
               - choose:
                   - conditions: "{{ next_ep != none }}"
                     sequence:
-                      - action: kodi.call_method
+                      - action: ekf_appliances.remote_dispatch
                         data:
-                          entity_id: media_player.home
-                          method: Player.Open
-                          item: { episodeid: "{{ next_ep.episodeid }}" }
+                          domain: kodi
+                          service: call_method
+                          pair: projector
+                          service_data:
+                            entity_id: media_player.home
+                            method: Player.Open
+                            item:
+                              episodeid: "{{ next_ep.episodeid }}"
         default:
           # No in-progress shows: fallback to resume, then open Kodi home.
-          - action: media_player.media_play
-            target: { entity_id: media_player.home }
+          - action: ekf_appliances.remote_dispatch
+            data:
+              domain: media_player
+              service: media_play
+              pair: projector
+              service_data:
+                entity_id:
+                - media_player.home
 
-  # Switch HDMI source only if not already there.
+  # Compatibility names now address permanently connected pairs.
+  # They no longer switch TV HDMI inputs or shut down the other pair.
   source_to_chromecast:
-    alias: Source → chromecast (idempotent)
+    alias: Source → Chromecast
     mode: single
     sequence:
-      - if: "{{ states('input_text.tv_source') == 'chromecast' }}"
-        then:
-          - stop: "already on chromecast"
-      - action: script.vkliuchi_hromkast
-
+      - action: script.remote_mode_select_pair
+        data: { pair: tv }
+      - action: media_player.turn_on
+        target: { entity_id: media_player.ue48j5500_ue48j5500 }
   source_to_pc:
-    alias: Source → pc (idempotent)
+    alias: Source → Kodi and projector
     mode: single
     sequence:
-      - if: "{{ states('input_text.tv_source') == 'pc' }}"
-        then:
-          - stop: "already on pc"
-      - action: script.vkliuchi_serialy
-
-  # Projector source: no HDMI switch (the projector is its own display fed
-  # by the PC); just record the source and power the projector on. Content
-  # routing (nav / play-pause / etc.) is handled as 'pc' elsewhere.
+      - action: script.source_to_projector
   source_to_projector:
-    alias: Source → projector (idempotent)
+    alias: Source → projector
     mode: single
     sequence:
-      - if: "{{ states('input_text.tv_source') == 'projector' }}"
-        then:
-          - stop: "already on projector"
-      - action: input_text.set_value
-        target: { entity_id: input_text.tv_source }
-        data: { value: projector }
-      # Auto power-on (assumed-state aware: media_player.turn_on no-ops the
-      # IR send only if we already think it's on).
-      - if: "{{ not is_state('media_player.projector', 'on') }}"
-        then:
-          - action: media_player.turn_on
-            target: { entity_id: media_player.projector }
-
-  # App launcher for Chromecast/Google TV.
+      - action: script.remote_mode_select_pair
+        data: { pair: projector }
+      - action: ekf_appliances.remote_dispatch
+        data:
+          domain: media_player
+          service: turn_on
+          pair: projector
+          service_data:
+            entity_id:
+            - media_player.projector
   app_launch_on_chromecast:
     alias: Launch app on Chromecast
     mode: single
@@ -233,95 +552,137 @@ script:
         description: Android package or deep-link URL
     sequence:
       - action: script.source_to_chromecast
-      - delay: "00:00:02"
       - action: remote.turn_on
         target: { entity_id: remote.televizor }
+        # Google Play no longer reliably launches these package IDs.
+        # Preserve every other activity, including direct content URLs.
         data:
-          activity: "{{ activity }}"
+          activity: >-
+            {{ {'com.netflix.ninja': 'netflix://',
+                'com.google.android.youtube.tv': 'https://www.youtube.com'}.get(activity, activity) }}
+  guide_toggle:
+    alias: Guide (compatibility)
+    mode: single
+    sequence:
+      - action: script.remote_nav
+        data: { direction: guide }
 
   # Compatibility helper only. Normal remote flow uses the regular OK event;
   # this script is kept so external callers no longer touch deleted T9 helpers.
   t9_commit:
     alias: T9 commit (submit)
-    mode: single
+    mode: parallel
+    max: 100
     sequence:
-      - variables:
-          source: "{{ states('input_text.tv_source') }}"
-      - choose:
-          - conditions: "{{ source == 'chromecast' }}"
-            sequence:
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: KEYCODE_ENTER, delay_secs: 0 }
-          - conditions: "{{ source in ['pc', 'projector'] }}"
-            sequence:
-              - action: kodi.call_method
-                data:
-                  entity_id: media_player.home
-                  method: Input.SendText
-                  text: ""
-                  done: true
+      - action: ekf_appliances.remote_resolve
+        data: >-
+          {% set request = {} %}
+          {% if pair is defined %}{% set request = dict(request, pair=pair) %}{% endif %}
+          {% if native is defined %}{% set request = dict(request, native=native) %}{% endif %}
+          {{ request }}
+        response_variable: route
+      # Capture the target now; each transport has one ordered write queue.
+      - action: script.t9_send_char
+        data:
+          mode: commit
+          pair: "{{ route.pair }}"
+          native: "{{ route.native }}"
 
-  # Guide toggle: flips nav_to_tv (nav buttons → Samsung TV IR menu).
-  # It used to also open/close a browser window via a listener on the old
-  # Windows install of this PC (192.168.0.11:8765); that host is gone since the
-  # move to Linux (2026-05), so only the routing toggle remains.
-  guide_toggle:
-    alias: Guide toggle
-    mode: single
-    sequence:
-      - action: input_boolean.toggle
-        target: { entity_id: input_boolean.nav_to_tv }
-
-  # T9 character send — called from dispatcher for each t9_add_* / t9_cycle_*
-  # event. `char` is the logical character name ('a'-'z', 'space', '1').
+  # Enter the native FIFO immediately so queued keys capture its current app
+  # generation. Kodi HTTP operations use their own shared queue below.
   t9_send_char:
     alias: T9 send char
-    mode: queued
-    max: 20
+    mode: parallel
+    max: 100
     fields:
       char:
-        description: "a-z, space, 1"
+        description: "a-z, space, 1; used by add and cycle"
       mode:
-        description: "add | cycle"
+        description: "add | cycle | backspace | commit"
     sequence:
+      - action: ekf_appliances.remote_resolve
+        data: >-
+          {% set request = {} %}
+          {% if pair is defined %}{% set request = dict(request, pair=pair) %}{% endif %}
+          {% if native is defined %}{% set request = dict(request, native=native) %}{% endif %}
+          {{ request }}
+        response_variable: route
       - variables:
-          source: "{{ states('input_text.tv_source') }}"
+          source: "{{ 'projector' if route.pair == 'projector' else 'chromecast' }}"
+      - if: "{{ mode not in ['add', 'cycle', 'backspace', 'commit'] }}"
+        then:
+          - stop: Unsupported T9 text operation
+            error: true
       - choose:
-          - conditions: "{{ mode == 'cycle' and source == 'chromecast' }}"
+          - conditions: "{{ route.native }}"
             sequence:
+              - if: "{{ mode in ['backspace', 'commit'] }}"
+                then:
+                  - stop: Text editing is available only in the player target
+              - if: "{{ source == 'projector' }}"
+                then:
+                  - stop: This projector has no verified numeric keypad
+                    error: true
               - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: KEYCODE_DEL, delay_secs: 0 }
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: "text:{{ ' ' if (char | string) == 'space' else (char | string) }}" }
-          - conditions: "{{ mode == 'add' and source == 'chromecast' }}"
+                target: { entity_id: remote.ue48j5500_ue48j5500 }
+                data: { command: "KEY_{{ digit }}", delay_secs: 0 }
+          - conditions: "{{ source == 'chromecast' }}"
             sequence:
-              - action: remote.send_command
+              # One ordered relative input batch per physical operation. Keeping text
+              # in a dictionary preserves literal space and the string digit "1".
+              - action: androidtv_remote.send_text
                 target: { entity_id: remote.televizor }
-                data: { command: "text:{{ ' ' if (char | string) == 'space' else (char | string) }}" }
-          - conditions: "{{ mode == 'cycle' and source in ['pc', 'projector'] }}"
+                data: >-
+                  {{ {'operation': {'add': 'insert', 'cycle': 'replace_previous',
+                                    'backspace': 'delete_backward', 'commit': 'submit'}[mode],
+                      'text': (' ' if (char | default('') | string) == 'space'
+                               else (char | default('') | string))} }}
+                response_variable: chromecast_text_result
+              - if: >-
+                  {% set response = chromecast_text_result | default({}) %}
+                  {% set body = response.get('remote.televizor', {})
+                     if response is mapping else {} %}
+                  {{ body is not mapping or body.get('sent') is not sameas true
+                     or body.get('verified') is not sameas false }}
+                then:
+                  - stop: Chromecast physical text input was not sent by the native integration
+                    error: true
+          - conditions: "{{ source in ['pc', 'projector'] }}"
             sequence:
-              - action: kodi.call_method
+              # Keep 'space' logical until the JSON payload: HA trims a template
+              # whose whole result is whitespace. SendText would replace the word.
+              - action: script.t9_kodi_text
                 data:
-                  entity_id: media_player.home
-                  method: Input.ExecuteAction
-                  action: backspace
-              - action: kodi.call_method
-                data:
-                  entity_id: media_player.home
-                  method: Input.SendText
-                  text: "{{ ' ' if (char | string) == 'space' else (char | string) }}"
-                  done: false
-          - conditions: "{{ mode == 'add' and source in ['pc', 'projector'] }}"
-            sequence:
-              - action: kodi.call_method
-                data:
-                  entity_id: media_player.home
-                  method: Input.SendText
-                  text: "{{ ' ' if (char | string) == 'space' else (char | string) }}"
-                  done: false
+                  mode: "{{ mode }}"
+                  char: "{{ char | default('') | string }}"
+                response_variable: kodi_text_result
+              - if: >-
+                  {% set body = kodi_text_result.content | default({}) %}
+                  {{ kodi_text_result.status | default(0) != 200
+                     or body is not mapping
+                     or body.get('ok') is not sameas true
+                     or body.get('verified') is not sameas true }}
+                then:
+                  - stop: Kodi text edit was not confirmed by the host
+                    error: true
+
+  t9_kodi_text:
+    alias: T9 — ordered Kodi text input
+    mode: queued
+    max: 100
+    sequence:
+      - action: ekf_appliances.remote_dispatch
+        data:
+          domain: rest_command
+          service: host_kodi_text_input
+          pair: projector
+          return_response: true
+          service_data:
+            action: "{{ mode }}"
+            char: "{{ char | default('') | string }}"
+        response_variable: result
+      - stop: Return the actual bridge response to the caller
+        response_variable: result
 
   # Universal TV search: opens search and types the query on the active
   # source. Used from Yandex intent ("Алиса, спроси Умный дом найди в
@@ -334,8 +695,15 @@ script:
         description: Search phrase
         example: Интерстеллар
     sequence:
+      - action: ekf_appliances.remote_resolve
+        data: >-
+          {% set request = {} %}
+          {% if pair is defined %}{% set request = dict(request, pair=pair) %}{% endif %}
+          {% if native is defined %}{% set request = dict(request, native=native) %}{% endif %}
+          {{ request }}
+        response_variable: route
       - variables:
-          source: "{{ states('input_text.tv_source') }}"
+          source: "{{ 'projector' if route.pair == 'projector' else 'chromecast' }}"
       - choose:
           - conditions: "{{ source == 'chromecast' }}"
             sequence:
@@ -358,64 +726,63 @@ script:
           - conditions: "{{ source in ['pc', 'projector'] }}"
             sequence:
               # Kodi: open the Search window, type the query, submit.
-              - action: kodi.call_method
+              - action: ekf_appliances.remote_dispatch
                 data:
-                  entity_id: media_player.home
-                  method: GUI.ActivateWindow
-                  window: search
+                  domain: kodi
+                  service: call_method
+                  pair: projector
+                  service_data:
+                    entity_id: media_player.home
+                    method: GUI.ActivateWindow
+                    window: search
               - delay: "00:00:00.5"
-              - action: kodi.call_method
+              - action: ekf_appliances.remote_dispatch
                 data:
-                  entity_id: media_player.home
-                  method: Input.SendText
-                  text: "{{ query }}"
-                  done: true
+                  domain: kodi
+                  service: call_method
+                  pair: projector
+                  service_data:
+                    entity_id: media_player.home
+                    method: Input.SendText
+                    text: "{{ query }}"
+                    done: true
 
   t9_backspace:
     alias: T9 backspace
-    mode: queued
-    max: 5
+    mode: parallel
+    max: 100
     sequence:
-      - variables:
-          source: "{{ states('input_text.tv_source') }}"
-      - choose:
-          - conditions: "{{ source == 'chromecast' }}"
-            sequence:
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: KEYCODE_DEL, delay_secs: 0 }
-          - conditions: "{{ source in ['pc', 'projector'] }}"
-            sequence:
-              - action: kodi.call_method
-                data:
-                  entity_id: media_player.home
-                  method: Input.ExecuteAction
-                  action: backspace
+      - action: ekf_appliances.remote_resolve
+        data: >-
+          {% set request = {} %}
+          {% if pair is defined %}{% set request = dict(request, pair=pair) %}{% endif %}
+          {% if native is defined %}{% set request = dict(request, native=native) %}{% endif %}
+          {{ request }}
+        response_variable: route
+      - action: script.t9_send_char
+        data:
+          mode: backspace
+          pair: "{{ route.pair }}"
+          native: "{{ route.native }}"
 
-  # ========== Audio mode (Yandex speaker control) ==========
-
-  # Use media_player.play_media with content_type=dialog — parses SSML
-  # (<speaker audio=...>). sendText was wrong: it treats the tag as a
-  # voice-search query, so Alice said "не могу найти".
+  # ========== Audio mode (selected music backend) ==========
+  # Explicit legacy beeps remain available to existing callers. Mode changes
+  # are confirmed only by the canonical target announcement listener.
   audio_mode_beep_on:
     alias: Audio mode — activation beep
     mode: single
     sequence:
-      - action: media_player.play_media
-        target: { entity_id: media_player.yandex_station_m00zrw3008rajg }
-        data:
-          media_content_type: dialog
-          media_content_id: '<speaker audio="alice-sounds-game-powerup-1.opus">'
+      - action: script.music_remote_command
+        continue_on_error: true
+        data: { command: beep_on }
 
   audio_mode_beep_off:
     alias: Audio mode — deactivation beep
     mode: single
     sequence:
-      - action: media_player.play_media
-        target: { entity_id: media_player.yandex_station_m00zrw3008rajg }
-        data:
-          media_content_type: dialog
-          media_content_id: '<speaker audio="alice-sounds-game-ping-1.opus">'
+      - action: script.music_remote_command
+        continue_on_error: true
+        data: { command: beep_off }
 
   audio_mode_activate:
     alias: Audio mode — activate
@@ -423,16 +790,8 @@ script:
     sequence:
       - action: input_boolean.turn_on
         target: { entity_id: input_boolean.audio_mode }
-      # Snapshot playback state so deactivation can resume after the beep.
-      - if: >-
-          {{ is_state('media_player.yandex_station_m00zrw3008rajg', 'playing') }}
-        then:
-          - action: input_boolean.turn_on
-            target: { entity_id: input_boolean.audio_was_playing }
-        else:
-          - action: input_boolean.turn_off
-            target: { entity_id: input_boolean.audio_was_playing }
-      - action: script.audio_mode_beep_on
+      - action: input_boolean.turn_off
+        target: { entity_id: input_boolean.audio_was_playing }
 
   audio_mode_deactivate:
     alias: Audio mode — deactivate
@@ -442,17 +801,11 @@ script:
         then:
           - stop: already off
       - action: input_boolean.turn_off
-        target: { entity_id: input_boolean.audio_mode }
-      - action: script.audio_mode_beep_off
-      # If the speaker was playing at activation, resume after the beep
-      # finishes. 1.5s covers the beep duration on Station M.
-      - if: "{{ is_state('input_boolean.audio_was_playing', 'on') }}"
-        then:
-          - delay: "00:00:01.5"
-          - action: media_player.media_play
-            target: { entity_id: media_player.yandex_station_m00zrw3008rajg }
-          - action: input_boolean.turn_off
-            target: { entity_id: input_boolean.audio_was_playing }
+        target:
+          entity_id:
+            - input_boolean.audio_mode
+            - input_boolean.audio_was_playing
+      # Never resume music here: it would undo a requested Pause or Power action.
 
   # Handler for the 'audio' button itself. Detects double-tap, toggles mode,
   # and falls back to single-press play/pause on the speaker otherwise.
@@ -485,12 +838,11 @@ script:
       # mode:restart cancels this delay. Otherwise fall through to
       # play/pause as the single-press action.
       - delay: "00:00:00.8"
-      - action: media_player.media_play_pause
-        target: { entity_id: media_player.yandex_station_m00zrw3008rajg }
+      - action: script.music_remote_command
+        data: { command: play_pause }
 
-  # Route a button to a Yandex action. Called from the dispatcher only when
-  # audio_mode is on. Volume/nav keys keep the mode active (so you can
-  # adjust multiple times); other keys are one-shot and deactivate.
+  # Audio-mode actions use the selected music owner. Global appliance keys
+  # are handled before this script, so audio mode cannot change their meaning.
   audio_mode_dispatch:
     alias: Audio mode — dispatch action
     mode: parallel
@@ -500,127 +852,73 @@ script:
         description: Button name (e.g. 'left', 'volume_up', 'info')
     sequence:
       - variables:
-          ys: media_player.yandex_station_m00zrw3008rajg
-          # HA re-coerces template output back to native type after rendering
-          # in variables. So `b = button | string` does NOT stick — digit-
-          # looking strings become ints again. For digit checks we compare
-          # via `button | int(-1)` (type-safe: works for "5", 5, "abc"→-1).
-          # For non-numeric button names `== 'name'` works fine regardless
-          # since they never coerce to int.
           digit_num: "{{ button | int(-1) }}"
-          # Buttons that DON'T exit the mode (repeatable in-mode controls).
-          sticky: >-
-            {{ button in ['volume_up','volume_down','up','down'] }}
-          # Commands that go through Alice NL ("скажи …") need a delay
-          # before the deactivation beep — otherwise beep-off fires before
-          # Alice starts speaking.
-          via_alice: >-
-            {{ button in ['channel_down','info','apple_tv'] }}
-      # Refresh inactivity timer.
+          sticky: "{{ button in ['volume_up', 'volume_down', 'up', 'down'] }}"
+          music_commands:
+            left: previous
+            prev: previous
+            right: next
+            next: next
+            play: play_pause
+            mute: play_pause
+            ok: play_pause
+            volume_up: volume_up
+            up: volume_up
+            volume_down: volume_down
+            down: volume_down
+            info: info
+            apple_tv: bluetooth_enable
       - action: input_text.set_value
         target: { entity_id: input_text.audio_last_press_ms }
         data:
           value: "{{ (now().timestamp() * 1000) | int }}"
       - choose:
-          # prev track — use sendText; standard media_previous_track
-          # doesn't always reach Station M through AlexxIT.
-          - conditions: "{{ button in ['left','prev'] }}"
+          - conditions: "{{ button in music_commands }}"
             sequence:
-              - action: yandex_station.send_command
-                target: { entity_id: "{{ ys }}" }
-                data: { command: sendText, text: "Предыдущий трек", delay_secs: 0 }
-          - conditions: "{{ button in ['right','next'] }}"
+              - action: script.music_remote_command
+                data: { command: "{{ music_commands[button] }}" }
+          - conditions: "{{ digit_num == 0 }}"
             sequence:
-              - action: yandex_station.send_command
-                target: { entity_id: "{{ ys }}" }
-                data: { command: sendText, text: "Следующий трек", delay_secs: 0 }
-          # play/mute/ok/0 → toggle play/pause via media_player (handles
-          # both "playing → pause" and "paused → resume" automatically).
-          - conditions: "{{ button in ['play','mute','ok'] or digit_num == 0 }}"
+              - action: script.music_remote_command
+                data: { command: play_pause }
+          - conditions: "{{ 1 <= digit_num <= 9 }}"
             sequence:
-              - action: media_player.media_play_pause
-                target: { entity_id: "{{ ys }}" }
-          # power → turn off the speaker (one-shot).
-          - conditions: "{{ button == 'power' }}"
-            sequence:
-              - action: media_player.turn_off
-                target: { entity_id: "{{ ys }}" }
-          # back → exit audio mode without firing any speaker action.
-          # The non-sticky deactivation below handles the actual exit.
-          - conditions: "{{ button == 'back' }}"
-            sequence:
-              - delay: "00:00:00.01"
-          - conditions: "{{ button in ['volume_up','up'] }}"
-            sequence:
-              - action: media_player.volume_up
-                target: { entity_id: "{{ ys }}" }
-          - conditions: "{{ button in ['volume_down','down'] }}"
-            sequence:
-              - action: media_player.volume_down
-                target: { entity_id: "{{ ys }}" }
-          # Digits 1-9: set volume. Use int comparison (type-safe).
-          - conditions: "{{ digit_num >= 1 and digit_num <= 9 }}"
-            sequence:
-              - action: media_player.volume_set
-                target: { entity_id: "{{ ys }}" }
+              - action: script.music_remote_command
                 data:
+                  command: volume_set
                   volume_level: "{{ digit_num / 10 }}"
-          - conditions: "{{ button == 'info' }}"
-            sequence:
-              - action: yandex_station.send_command
-                target: { entity_id: "{{ ys }}" }
-                data: { command: sendText, text: "Что сейчас играет?", delay_secs: 0 }
-          - conditions: "{{ button == 'channel_up' }}"
-            sequence:
-              - action: button.press
-                target: { entity_id: button.gostinaia_favorite_current_song_2 }
-          - conditions: "{{ button == 'channel_down' }}"
-            sequence:
-              - action: yandex_station.send_command
-                target: { entity_id: "{{ ys }}" }
-                data: { command: sendText, text: "Поставь дизлайк", delay_secs: 0 }
-          - conditions: "{{ button == 'apple_tv' }}"
-            sequence:
-              - action: yandex_station.send_command
-                target: { entity_id: "{{ ys }}" }
-                data: { command: sendText, text: "Переключи блютуз", delay_secs: 0 }
-      # Non-sticky buttons exit the mode. For via-Alice commands, wait
-      # for her to actually react before the deactivation beep.
+      # Back and other non-sticky keys only leave the mode when unmapped.
       - if: "{{ not sticky }}"
         then:
-          - if: "{{ via_alice }}"
+          - if: "{{ button == 'info' }}"
             then:
               - delay: "00:00:02.5"
           - action: script.audio_mode_deactivate
 
 automation:
-  # ===== Main dispatcher =====
   - alias: Universal Remote Dispatcher
     id: universal_remote_dispatcher
     mode: parallel
     max: 100
     trigger:
       - platform: state
-        entity_id: event.universal_remote_universal_remote
+        entity_id: event.ekf_universal_remote
     condition:
-      # from_state guard: reject re-registration after ESP reconnect
-      # (to_state would carry the last event_type from attributes and fire a
-      # phantom press — e.g. "power" → TV turns on at every ESP boot).
       - condition: template
         value_template: >-
-          {{ trigger.to_state is not none
-             and trigger.from_state is not none
-             and trigger.to_state.attributes.event_type is defined
-             and trigger.to_state.attributes.event_type not in ['', none, 'unknown', 'unavailable', 'undefined']
-             and trigger.to_state.state not in ['unknown', 'unavailable']
-             and trigger.from_state.state not in ['unknown', 'unavailable']
-             and (
-               trigger.to_state.state != trigger.from_state.state or
-               trigger.to_state.attributes.event_type !=
-                 (trigger.from_state.attributes.event_type | default('', true))
-             ) }}
+          {% set current = trigger.to_state %} {% set previous = trigger.from_state %} {% set received = current.attributes.last_received | default(0) | float(0) if current is not none else 0 %} {% set age = as_timestamp(now()) - received %} {{ current is not none and previous is not none
+             and current.attributes.event_type is defined
+             and current.attributes.event_type not in ['', none, 'unknown', 'unavailable', 'undefined']
+             and current.state not in ['unknown', 'unavailable']
+             and current.attributes.receiver_enabled | default(false)
+             and 0 <= age < 5
+             and (current.state != previous.state or
+                  current.attributes.event_type !=
+                    (previous.attributes.event_type | default('', true)))
+             and (previous.state not in ['unknown', 'unavailable']
+                  or received > as_timestamp(previous.last_updated, 0))
+              }}
     variables:
-      # raw_button is the ESP event_type exactly as received.
       raw_button: "{{ trigger.to_state.attributes.event_type }}"
       t9_mode: >-
         {{ (raw_button | string).split('_')[1]
@@ -637,9 +935,6 @@ automation:
            if (raw_button | string).startswith('t9_add_') or
               (raw_button | string).startswith('t9_cycle_')
            else '' }}
-      # button is the logical button used by non-T9 handlers. T9 char events
-      # normalize back to their physical digit so audio-mode digit shortcuts
-      # keep working. OK remains a normal OK event.
       button: >-
         {%- if (raw_button | string).startswith('t9_add_') or
               (raw_button | string).startswith('t9_cycle_') -%}
@@ -648,380 +943,175 @@ automation:
           {{ raw_button }}
         {%- endif -%}
     action:
+      - action: script.remote_modes_prepare
+        data:
+          button: "{{ button }}"
+          received_ms: >-
+            {{ trigger.to_state.attributes.last_received | float * 1000 }}
+        response_variable: route
       - choose:
-          # ---- Audio mode: intercept ALL keys when active (except 'audio' itself,
-          # which routes to its own handler below). One-shot — dispatches + exits.
-          - conditions: >-
-              {{ is_state('input_boolean.audio_mode', 'on')
-                 and button != 'audio' }}
-            sequence:
-              - action: script.audio_mode_dispatch
-                data: { button: "{{ button }}" }
-              - stop: "handled by audio mode"
-
-          # ---- Prime / Disney: handled by dedicated automations below ----
-          - conditions: "{{ button in ['prime', 'prime_hold', 'disney', 'disney_hold'] }}"
-            sequence:
-              - stop: "handled by dedicated automation"
-
-          # ---- Samsung IR passback — handled by dedicated automation ----
-          - conditions: "{{ (button | string).startswith('samsung_ir_') }}"
-            sequence:
-              - stop: "handled by passback automation"
-
-          # ---- Power and source ----
-          # Power toggles both Samsung TV and (if chromecast is active
-          # source) the Chromecast — HDMI-CEC alone isn't reliable.
-          # Chromecast direction follows its own current state (the TV
-          # doesn't expose on/off state to HA, but Chromecast does).
-          - conditions: "{{ button == 'power' }}"
-            sequence:
-              - choose:
-                  # projector source → power the projector through explicit
-                  # scripts so the OFF path always sends the required double
-                  # power frame.
-                  - conditions: "{{ states('input_text.tv_source') == 'projector' }}"
-                    sequence:
-                      - choose:
-                          - conditions: "{{ is_state('input_boolean.projector_power', 'on') }}"
-                            sequence:
-                              - action: script.projector_turn_off
-                        default:
-                          - action: script.projector_turn_on
-                default:
-                  - action: button.press
-                    target: { entity_id: button.samsung_tv_power }
-                  - if: "{{ states('input_text.tv_source') == 'chromecast' }}"
-                    then:
-                      - choose:
-                          - conditions: "{{ is_state('media_player.televizor', 'on') or is_state('media_player.televizor', 'playing') or is_state('media_player.televizor', 'paused') or is_state('media_player.televizor', 'idle') }}"
-                            sequence:
-                              - action: remote.turn_off
-                                target: { entity_id: remote.televizor }
-                        default:
-                          - action: remote.turn_on
-                            target: { entity_id: remote.televizor }
-
-          # Source button cycles: pc → chromecast → projector → (loop).
           - conditions: "{{ button == 'input' }}"
             sequence:
-              - choose:
-                  - conditions: "{{ states('input_text.tv_source') == 'pc' }}"
-                    sequence:
-                      - action: script.source_to_chromecast
-                  - conditions: "{{ states('input_text.tv_source') == 'chromecast' }}"
-                    sequence:
-                      - action: script.source_to_projector
-                default:
-                  # projector (or any unknown) → pc
-                  - action: script.source_to_pc
-
-          # ---- Volume / mute ----
-          - conditions: "{{ button == 'volume_up' }}"
-            sequence:
-              - action: button.press
-                target:
-                  entity_id: >-
-                    {{ 'button.projector_vol_up'
-                       if states('input_text.tv_source') == 'projector'
-                       else 'button.samsung_tv_vol' }}
-          - conditions: "{{ button == 'volume_down' }}"
-            sequence:
-              - action: button.press
-                target:
-                  entity_id: >-
-                    {{ 'button.projector_vol_down'
-                       if states('input_text.tv_source') == 'projector'
-                       else 'button.samsung_tv_vol_2' }}
-          - conditions: "{{ button == 'mute' }}"
-            sequence:
-              - action: button.press
-                target:
-                  entity_id: >-
-                    {{ 'button.projector_mute'
-                       if states('input_text.tv_source') == 'projector'
-                       else 'button.samsung_tv_mute' }}
-
-          # ---- Channel keys ----
-          # Do not route ch± to the AC. A stray channel_up from the ESPHome
-          # remote raised climate.kondei_1 repeatedly, all the way to 30°C.
+              - stop: INPUT handled by mode selector
           - conditions: "{{ button in ['channel_up', 'channel_down'] }}"
             sequence:
-              - stop: "channel keys ignored in normal mode"
-
-          # ---- Navigation ----
-          - conditions: "{{ button in ['up','down','left','right'] }}"
-            sequence:
-              - action: script.remote_nav
-                data: { direction: "{{ button }}" }
-
-          # OK. For Chromecast we wait 600ms for a possible ok_hold so we
-          # don't send short-press (launches app) before long-press (opens
-          # context menu). For other sources the distinction is unused —
-          # fire immediately for snappy UX.
-          - conditions: "{{ button == 'ok' }}"
-            sequence:
-              - action: system_log.write
-                data: { level: warning, message: "IR-DBG ok enter" }
-              - if: "{{ states('input_text.tv_source') == 'chromecast' }}"
-                then:
-                  - action: system_log.write
-                    data: { level: warning, message: "IR-DBG ok: wait start" }
-                  - wait_for_trigger:
-                      - platform: state
-                        entity_id: event.universal_remote_universal_remote
-                    timeout: "00:00:00.300"
-                    continue_on_timeout: true
-                  - action: system_log.write
-                    data:
-                      level: warning
-                      message: >-
-                        IR-DBG ok: wait done trigger={{ wait.trigger is not none }}
-                        et={{ wait.trigger.to_state.attributes.event_type if wait.trigger else 'none' }}
-                  - if: >-
-                      {{ wait.trigger is not none and
-                         wait.trigger.to_state.attributes.event_type == 'ok_hold' }}
-                    then:
-                      - action: system_log.write
-                        data: { level: warning, message: "IR-DBG ok: hold detected, stop" }
-                      - stop: "hold detected, ok short suppressed"
-              - action: system_log.write
-                data: { level: warning, message: "IR-DBG ok: fire short" }
-              - action: script.remote_nav
-                data: { direction: ok, delay_secs: 0 }
-
-          # ---- OK hold: context menu ----
-          - conditions: "{{ button == 'ok_hold' }}"
-            sequence:
-              - action: system_log.write
+              - action: script.remote_ac_temperature
                 data:
-                  level: warning
-                  message: "IR-DBG ok_hold enter"
-              - choose:
-                  - conditions: "{{ states('input_text.tv_source') in ['pc', 'projector'] }}"
-                    sequence:
-                      - action: kodi.call_method
-                        data:
-                          entity_id: media_player.home
-                          method: Input.ContextMenu
-                default:
-                  - action: system_log.write
-                    data: { level: warning, message: "IR-DBG ok_hold: sending DPAD_CENTER 2.0s" }
-                  - action: remote.send_command
-                    target: { entity_id: remote.televizor }
-                    data:
-                      command: DPAD_CENTER
-                      delay_secs: 0
-                      hold_secs: 2.0
-                  - action: system_log.write
-                    data: { level: warning, message: "IR-DBG ok_hold: DPAD_CENTER done" }
-          - conditions: "{{ button == 'back' }}"
-            sequence:
-              - action: script.remote_nav
-                data: { direction: back, delay_secs: 0 }
-          - conditions: "{{ button == 'menu' }}"
-            sequence:
-              - action: script.remote_nav
-                data: { direction: menu, delay_secs: 0 }
-          - conditions: "{{ button == 'exit' }}"
-            sequence:
-              # Exit is source-aware:
-              #   chromecast → KEYCODE_BACK (closes context menus, exits
-              #     videos/dialogs/overlays, navigates back in apps —
-              #     Samsung TV EXIT doesn't reach Google TV internals)
-              #   pc → Kodi Input.Back
-              #   otherwise → Samsung TV exit (kills TV-side overlays)
-              - choose:
-                  - conditions: "{{ states('input_text.tv_source') == 'chromecast' }}"
-                    sequence:
-                      - action: remote.send_command
-                        target: { entity_id: remote.televizor }
-                        data:
-                          command: KEYCODE_BACK
-                          delay_secs: 0
-                  - conditions: "{{ states('input_text.tv_source') in ['pc', 'projector'] }}"
-                    sequence:
-                      - action: kodi.call_method
-                        data:
-                          entity_id: media_player.home
-                          method: Input.Back
-                default:
-                  - action: button.press
-                    target: { entity_id: button.samsung_tv_exit }
-          - conditions: "{{ button == 'home' }}"
-            sequence:
-              - action: button.press
-                target: { entity_id: button.samsung_tv_home }
-
-          # ---- Media transport ----
-          - conditions: "{{ button == 'play' }}"
-            sequence:
-              - action: script.remote_media
-                data: { action: play_pause, delay_secs: 0 }
-          - conditions: "{{ button == 'prev' }}"
-            sequence:
-              - action: script.remote_media
-                data: { action: previous, delay_secs: 0 }
-          - conditions: "{{ button == 'next' }}"
-            sequence:
-              - action: script.remote_media
-                data: { action: next, delay_secs: 0 }
-
-          # ---- Colors ----
-          - conditions: "{{ button == 'red' }}"
-            sequence:
-              - action: light.turn_on
-                target: { entity_id: light.rgbw_lamp_rgbw }
-                data:
-                  rgbw_color: [255, 0, 0, 0]
-                  brightness: 255
-          - conditions: "{{ button == 'green' }}"
-            sequence:
-              - action: light.turn_on
-                target: { entity_id: light.rgbw_lamp_rgbw }
-                data:
-                  rgbw_color: [0, 255, 0, 0]
-                  brightness: 255
-          - conditions: "{{ button == 'yellow' }}"
-            sequence:
-              - action: light.turn_on
-                target: { entity_id: light.rgbw_lamp_rgbw }
-                data:
-                  rgbw_color: [255, 255, 0, 0]
-                  brightness: 255
-
-          # ---- App launchers ----
-          - conditions: "{{ button == 'netflix' }}"
-            sequence:
-              - action: script.app_launch_on_chromecast
-                data: { activity: com.netflix.ninja, delay_secs: 0 }
-          - conditions: "{{ button == 'youtube' }}"
-            sequence:
-              - action: script.app_launch_on_chromecast
-                data: { activity: com.google.android.youtube.tv, delay_secs: 0 }
-          - conditions: "{{ button == 'apple_tv' }}"
-            sequence:
-              - action: script.app_launch_on_chromecast
-                data: { activity: com.ionitech.airscreen, delay_secs: 0 }
-          # disney handled by universal_remote_disney automation (see below)
-
-          # ---- Smart / audio / info / guide ----
+                  delta: "{{ 1 if button == 'channel_up' else -1 }}"
           - conditions: "{{ button == 'smart' }}"
             sequence:
               - action: light.toggle
-                target: { entity_id: light.living_room_socket_1 }
+                target:
+                  entity_id: light.gostinaia_globus_socket_1
+          - conditions: "{{ button == 'power' }}"
+            sequence:
+              - action: ekf_appliances.remote_power
+                data:
+                  pair: "{{ route.pair }}"
+                  native: "{{ route.native }}"
+          - conditions: >-
+              {{ button in ['prime','prime_hold','disney','disney_hold'] or (button | string).startswith('samsung_ir_') }}
+            sequence:
+              - stop: Handled by a dedicated appliance automation or direct physical remote
+          - conditions: >-
+              {{ is_state('input_boolean.audio_mode', 'on') and button != 'audio' }}
+            sequence:
+              - action: script.audio_mode_dispatch
+                data:
+                  button: "{{ button }}"
+          - conditions: "{{ button in ['volume_up','volume_down','mute'] }}"
+            sequence:
+              - action: script.remote_volume
+                data:
+                  command: "{{ button }}"
+                  pair: "{{ route.pair }}"
+                  native: "{{ route.native }}"
+          - conditions: "{{ button == 'ok' }}"
+            sequence:
+              - if: "{{ route.pair == 'tv' and not route.native }}"
+                then:
+                  - wait_for_trigger:
+                      - platform: state
+                        entity_id: event.ekf_universal_remote
+                        attribute: event_type
+                        to: ok_hold
+                    timeout: '00:00:00.300'
+                    continue_on_timeout: true
+                  - if: "{{ wait.trigger is not none }}"
+                    then:
+                      - stop: Long OK owns this keypress
+              - action: script.remote_nav
+                data:
+                  direction: ok
+                  pair: "{{ route.pair }}"
+                  native: "{{ route.native }}"
+          - conditions: >-
+              {{ button in ['up','down','left','right','back','menu','exit','home','info','guide'] }}
+            sequence:
+              - action: script.remote_nav
+                data:
+                  direction: "{{ button }}"
+                  pair: "{{ route.pair }}"
+                  native: "{{ route.native }}"
+          - conditions: "{{ button == 'ok_hold' }}"
+            sequence:
+              - choose:
+                  - conditions: "{{ route.pair == 'projector' and not route.native }}"
+                    sequence:
+                      - action: script.remote_nav
+                        data:
+                          direction: menu
+                          pair: "{{ route.pair }}"
+                          native: false
+                  - conditions: "{{ route.pair == 'tv' and not route.native }}"
+                    sequence:
+                      - action: remote.send_command
+                        target:
+                          entity_id: remote.televizor
+                        data:
+                          command: DPAD_CENTER
+                          delay_secs: 0
+                          hold_secs: 2
+          - conditions: "{{ button in ['play','prev','next'] }}"
+            sequence:
+              - action: script.remote_media
+                data:
+                  action: >-
+                    {{ {'play':'play_pause','prev':'previous','next':'next'}[button] }}
+                  pair: "{{ route.pair }}"
+          - conditions: "{{ button in ['red','green','yellow'] }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: light.rgbw_lamp_rgbw
+                data:
+                  rgbw_color: >-
+                    {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
+                  brightness: 255
+          - conditions: "{{ button in ['netflix','youtube','apple_tv'] }}"
+            sequence:
+              - action: script.app_launch_on_chromecast
+                data:
+                  activity: >-
+                    {{ {'netflix':'com.netflix.ninja','youtube':'com.google.android.youtube.tv','apple_tv':'com.ionitech.airscreen'}[button] }}
           - conditions: "{{ button == 'audio' }}"
             sequence:
               - action: script.audio_mode_handle_press
-          - conditions: "{{ button == 'info' }}"
-            sequence:
-              - if: "{{ states('input_text.tv_source') in ['pc', 'projector'] }}"
-                then:
-                  - action: kodi.call_method
-                    data:
-                      entity_id: media_player.home
-                      method: Input.Info
-                else:
-                  - action: button.press
-                    target: { entity_id: button.samsung_tv_info }
-          - conditions: "{{ button == 'guide' }}"
-            sequence:
-              - action: script.guide_toggle
-
-          # ---- T9 — computed by ESP, we just dispatch to TV ----
-          - conditions: "{{ (raw_button | string).startswith('t9_add_') }}"
+          - conditions: "{{ t9_mode in ['add','cycle'] }}"
             sequence:
               - action: script.t9_send_char
                 data:
                   char: "{{ t9_char }}"
-                  mode: add
-          - conditions: "{{ (raw_button | string).startswith('t9_cycle_') }}"
-            sequence:
-              - action: script.t9_send_char
-                data:
-                  char: "{{ t9_char }}"
-                  mode: cycle
+                  digit: "{{ t9_digit }}"
+                  mode: "{{ t9_mode }}"
+                  pair: "{{ route.pair }}"
+                  native: "{{ route.native }}"
           - conditions: "{{ button == 'dash' }}"
             sequence:
               - action: script.t9_backspace
+                data:
+                  pair: "{{ route.pair }}"
+                  native: "{{ route.native }}"
         default:
           - action: system_log.write
             data:
               message: "Universal Remote: unhandled '{{ button }}'"
               level: warning
 
-  # ===== Prime: toggle AC (short) / cool↔heat (hold) =====
+  # ===== Amazon / Prime: one power toggle per initial press =====
   - alias: Universal Remote Prime AC
     id: universal_remote_prime
-    mode: parallel
-    max: 5
+    mode: single
     trigger:
       - platform: state
-        entity_id: event.universal_remote_universal_remote
+        entity_id: event.ekf_universal_remote
     condition:
+      # A fresh EKF reception may follow unknown; restored or availability-only states are rejected.
       - condition: template
         value_template: >-
-          {{ trigger.to_state is not none and
-             trigger.from_state is not none and
-             trigger.to_state.attributes.event_type is defined and
-             trigger.to_state.attributes.event_type not in ['', none, 'unknown', 'unavailable', 'undefined'] and
-             trigger.to_state.state not in ['unknown', 'unavailable'] and
-             trigger.from_state.state not in ['unknown', 'unavailable'] and
-             (trigger.to_state.state != trigger.from_state.state or
-              trigger.to_state.attributes.event_type !=
-                (trigger.from_state.attributes.event_type | default('', true))) and
-             trigger.to_state.attributes.event_type in ['prime', 'prime_hold'] }}
+          {% set current = trigger.to_state %}
+          {% set previous = trigger.from_state %}
+          {% set received = current.attributes.last_received | default(0) | float(0) if current is not none else 0 %}
+          {% set age = as_timestamp(now()) - received %}
+          {{ current is not none and previous is not none
+             and current.attributes.event_type is defined
+             and current.attributes.event_type not in ['', none, 'unknown', 'unavailable', 'undefined']
+             and current.state not in ['unknown', 'unavailable']
+             and current.attributes.receiver_enabled | default(false)
+             and 0 <= age < 5
+             and (current.state != previous.state or
+                  current.attributes.event_type !=
+                    (previous.attributes.event_type | default('', true)))
+             and (previous.state not in ['unknown', 'unavailable']
+                  or received > as_timestamp(previous.last_updated, 0))
+             and current.attributes.event_type == 'prime' }}
     action:
-      - variables:
-          ev: "{{ trigger.to_state.attributes.event_type }}"
-          ac_cooling_season: "{{ now().month in [5, 6, 7, 8, 9] }}"
-      - choose:
-          - conditions: "{{ ev == 'prime_hold' }}"
-            sequence:
-              - variables:
-                  current_mode: >-
-                    {{ states('climate.kondei_1') }}
-                  new_mode: >-
-                    {{ 'cool' if (ac_cooling_season | bool) else
-                       ('heat' if current_mode == 'cool' else 'cool') }}
-              - action: climate.set_hvac_mode
-                target: { entity_id: climate.kondei_1 }
-                data: { hvac_mode: "{{ new_mode }}" }
-          - conditions: "{{ ev == 'prime' }}"
-            sequence:
-              # Wait 300ms for a possible prime_hold. If it arrives we abort.
-              - wait_for_trigger:
-                  - platform: state
-                    entity_id: event.universal_remote_universal_remote
-                timeout: "00:00:00.300"
-                continue_on_timeout: true
-              - if: >-
-                  {{ wait.trigger is not none and
-                     (wait.trigger.to_state.attributes.event_type | default('', true)) == 'prime_hold' }}
-                then:
-                  - stop: "hold detected, prime short suppressed"
-              # Toggle: off → turn on in the LAST used mode (not a fixed
-              # default); on → turn off. Stored by the "Remember AC last
-              # mode" automation below.
-              - choose:
-                  - conditions: "{{ is_state('climate.kondei_1', 'off') }}"
-                    sequence:
-                      - action: climate.set_hvac_mode
-                        target: { entity_id: climate.kondei_1 }
-                        data:
-                          hvac_mode: >-
-                            {{ 'cool' if (ac_cooling_season | bool) else
-                               (states('input_text.ac_last_mode') | default('cool', true)) }}
-                  - conditions: "{{ states('climate.kondei_1') in ['unknown', 'unavailable'] }}"
-                    sequence:
-                      - stop: "AC state is unavailable; suppress toggle"
-                default:
-                  - action: climate.turn_off
-                    target: { entity_id: climate.kondei_1 }
+      # A held key also emits prime_hold; it must not send a second command.
+      - action: script.remote_ac_toggle
 
   # ===== Remember the AC's last non-off mode =====
-  # Whenever the Haier AC sits in any real mode, stash it so the remote's
-  # prime short-press can restore it on the next power-on.
+  # Retain the legacy helper for external callers; it does not select the
+  # mode of the Amazon power-on action.
   - alias: Remember AC last mode
     id: ac_remember_last_mode
     mode: single
@@ -1040,37 +1130,6 @@ automation:
         target: { entity_id: input_text.ac_last_mode }
         data: { value: "{{ trigger.to_state.state }}" }
 
-  # ===== Summer AC guard =====
-  # Cooling season is May through September. During that period, any accidental
-  # heat command from Alice/Yandex or another integration is corrected to cool.
-  - alias: Force AC cooling in summer
-    id: ac_force_cooling_summer
-    mode: restart
-    trigger:
-      - platform: state
-        entity_id: climate.kondei_1
-      - platform: homeassistant
-        event: start
-    condition:
-      - condition: template
-        value_template: >-
-          {% set mode = states('climate.kondei_1') %}
-          {% set from_mode =
-             trigger.from_state.state
-             if trigger is defined and trigger.from_state is defined and
-                trigger.from_state is not none
-             else none %}
-          {{ now().month in [5, 6, 7, 8, 9] and
-             mode not in ['off', 'cool', 'unknown', 'unavailable'] and
-             (mode == 'heat' or from_mode in ['off', 'unknown', 'unavailable']) }}
-    action:
-      - action: climate.set_hvac_mode
-        target: { entity_id: climate.kondei_1 }
-        data: { hvac_mode: cool }
-      - action: input_text.set_value
-        target: { entity_id: input_text.ac_last_mode }
-        data: { value: cool }
-
   # ===== Disney: open Kodi (short) / play next episode (hold) =====
   - alias: Universal Remote Disney
     id: universal_remote_disney
@@ -1078,20 +1137,27 @@ automation:
     max: 5
     trigger:
       - platform: state
-        entity_id: event.universal_remote_universal_remote
+        entity_id: event.ekf_universal_remote
     condition:
+      # A fresh EKF reception may follow unknown; restored or availability-only states are rejected.
       - condition: template
         value_template: >-
-          {{ trigger.to_state is not none and
-             trigger.from_state is not none and
-             trigger.to_state.attributes.event_type is defined and
-             trigger.to_state.attributes.event_type not in ['', none, 'unknown', 'unavailable', 'undefined'] and
-             trigger.to_state.state not in ['unknown', 'unavailable'] and
-             trigger.from_state.state not in ['unknown', 'unavailable'] and
-             (trigger.to_state.state != trigger.from_state.state or
-              trigger.to_state.attributes.event_type !=
-                (trigger.from_state.attributes.event_type | default('', true))) and
-             trigger.to_state.attributes.event_type in ['disney', 'disney_hold'] }}
+          {% set current = trigger.to_state %}
+          {% set previous = trigger.from_state %}
+          {% set received = current.attributes.last_received | default(0) | float(0) if current is not none else 0 %}
+          {% set age = as_timestamp(now()) - received %}
+          {{ current is not none and previous is not none
+             and current.attributes.event_type is defined
+             and current.attributes.event_type not in ['', none, 'unknown', 'unavailable', 'undefined']
+             and current.state not in ['unknown', 'unavailable']
+             and current.attributes.receiver_enabled | default(false)
+             and 0 <= age < 5
+             and (current.state != previous.state or
+                  current.attributes.event_type !=
+                    (previous.attributes.event_type | default('', true)))
+             and (previous.state not in ['unknown', 'unavailable']
+                  or received > as_timestamp(previous.last_updated, 0))
+             and current.attributes.event_type in ['disney', 'disney_hold'] }}
     action:
       - variables:
           ev: "{{ trigger.to_state.attributes.event_type }}"
@@ -1106,7 +1172,7 @@ automation:
               # Wait 300ms for a possible disney_hold. If it arrives we abort.
               - wait_for_trigger:
                   - platform: state
-                    entity_id: event.universal_remote_universal_remote
+                    entity_id: event.ekf_universal_remote
                 timeout: "00:00:00.300"
                 continue_on_timeout: true
               - if: >-
@@ -1161,100 +1227,38 @@ automation:
         then:
           - action: script.audio_mode_deactivate
 
-  # ===== Samsung IR passback: track source selection =====
-  - alias: Samsung IR passback source sync
-    id: samsung_ir_passback_source_sync
-    mode: restart
-    trigger:
-      - platform: state
-        entity_id: event.universal_remote_universal_remote
-    condition:
-      - condition: template
-        value_template: >-
-          {{ trigger.to_state is not none
-             and trigger.from_state is not none
-             and trigger.to_state.attributes.event_type is defined
-             and trigger.to_state.attributes.event_type not in ['', none, 'unknown', 'unavailable', 'undefined']
-             and trigger.to_state.state not in ['unknown', 'unavailable']
-             and trigger.from_state.state not in ['unknown', 'unavailable']
-             and (trigger.to_state.state != trigger.from_state.state or
-                  trigger.to_state.attributes.event_type !=
-                    (trigger.from_state.attributes.event_type | default('', true)))
-             and trigger.to_state.attributes.event_type == 'samsung_ir_source' }}
-    action:
-      # Wait for a direction (left/right) within 5s
-      - wait_for_trigger:
-          - platform: state
-            entity_id: event.universal_remote_universal_remote
-        timeout: "00:00:05"
-        continue_on_timeout: true
-      - variables:
-          dir_ev: >-
-            {{ wait.trigger.to_state.attributes.event_type | default('', true) if wait.trigger else '' }}
-      - if: "{{ dir_ev not in ['samsung_ir_left', 'samsung_ir_right'] }}"
-        then:
-          - stop: "no direction within 5s"
-      # Wait for OK (user confirmation) within 5s
-      - wait_for_trigger:
-          - platform: state
-            entity_id: event.universal_remote_universal_remote
-        timeout: "00:00:05"
-        continue_on_timeout: true
-      - variables:
-          confirm_ev: >-
-            {{ wait.trigger.to_state.attributes.event_type | default('', true) if wait.trigger else '' }}
-      - if: "{{ confirm_ev != 'samsung_ir_ok' }}"
-        then:
-          - stop: "no OK confirm"
-      - action: input_text.set_value
-        target: { entity_id: input_text.tv_source }
-        data:
-          value: >-
-            {{ 'chromecast' if dir_ev == 'samsung_ir_left' else 'pc' }}
-      - action: system_log.write
-        data:
-          message: >-
-            Samsung IR passback: tv_source synced to
-            {{ states('input_text.tv_source') }}
-          level: info
 
-  # ===== Chromecast auto source sync =====
-  # When Chromecast is turned on via its own remote (or HDMI-CEC), the TV
-  # automatically switches to the correct HDMI input. We only need to keep
-  # input_text.tv_source in sync — no IR commands required.
-  - alias: Chromecast auto source sync
-    id: chromecast_auto_source_sync
+  # Compatibility automations only refresh the canonical owner. They do not
+  # own focus deadlines, wake tasks or helper-based selection anymore.
+  - alias: Пульт — истечение фокуса
+    id: universal_remote_projector_timeout
     mode: single
     trigger:
-      - platform: state
-        entity_id: media_player.televizor
-        from:
-          - "off"
-          - "unavailable"
-          - "unknown"
-        to:
-          - "on"
-          - "playing"
-          - "paused"
-          - "idle"
-        for: "00:00:30"
-    condition:
-      - condition: template
-        value_template: "{{ states('input_text.tv_source') != 'chromecast' }}"
-      - condition: template
-        value_template: "{{ not is_state('script.vkliuchi_hromkast', 'on') }}"
-      - condition: template
-        value_template: "{{ not is_state('script.source_to_chromecast', 'on') }}"
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.universal_remote_projector
     action:
-      - action: input_text.set_value
+      - action: ekf_appliances.remote_resolve
+  - alias: Пульт — выбор по состоянию экранов
+    id: universal_remote_power_focus
+    mode: queued
+    max: 20
+    trigger:
+      - platform: state
+        entity_id:
+          - media_player.ue48j5500_ue48j5500
+          - media_player.projector
+    action:
+      - action: ekf_appliances.remote_resolve
+  - alias: Пульт — начальный режим
+    id: universal_remote_startup
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      - action: input_boolean.turn_off
         target:
-          entity_id: input_text.tv_source
-        data:
-          value: "chromecast"
-      - action: system_log.write
-        data:
-          level: info
-          message: >-
-            Chromecast auto source sync: tv_source set to chromecast
-            (media_player.televizor became {{ trigger.to_state.state }}
-            from {{ trigger.from_state.state }})
+          entity_id: input_boolean.audio_mode
+      - action: ekf_appliances.remote_resolve

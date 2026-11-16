@@ -1,5 +1,5 @@
 # Copyright 2026 Project contributors
-# ruff: noqa: INP001, PT009, S603
+# ruff: noqa: S603
 """
 End-to-end regression tests for the Bluetooth installer and host preparation.
 

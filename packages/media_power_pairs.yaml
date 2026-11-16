@@ -1,0 +1,18 @@
+# Only the process supervisor can say Kodi stopped. JSON-RPC being unreachable
+# during boot or a network failure must not turn the physical projector off.
+rest:
+  - resource: http://172.20.0.1:8787/kodi/status
+    headers:
+      X-HA-Host-Token: !secret host_actions_token
+    scan_interval: 5
+    timeout: 3
+    sensor:
+      - name: Kodi service state
+        unique_id: kodi_service_state
+        value_template: "{{ value_json.state }}"
+        json_attributes:
+          - active_state
+          - sub_state
+          - process_present
+          - unit_result
+          - exit_status

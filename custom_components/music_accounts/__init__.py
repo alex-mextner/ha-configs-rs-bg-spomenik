@@ -1,26 +1,24 @@
-"""Music accounts per person (aisis#17): play, search and like with a person's own accounts.
+"""
+Route playback, search, and likes through per-person accounts (aisis#17).
 
-The mapping (no secrets) lives next to the voice studio's guests.json and uses the same
-speaker ids as the studio: "user-<HA user id>" for household members, "guest-<slug>" for
-guests. scripts/ma_accounts.py writes it (host helpers ytm-cookie, yandex-music-token,
-music-accounts); it is read on every call here:
+The mapping contains no secrets. It lives next to the voice studio's guests.json
+and uses the same speaker IDs: user-<HA user id> for household members and
+guest-<slug> for guests. scripts/ma_accounts.py writes it through the host helpers;
+this integration reads it again on every call.
 
-  {"version": 1, "default": "user-...",
-   "people": {"user-...": {"name": "Alex", "ma_user": "ultra",
-                           "providers": {"ytmusic": "ytmusic--...", "yandex_music": "..."}},
-              "guest-...": {"name": "...", "ma_user": "guest_...", "guest": true,
-                            "expires_at": "<iso>", "providers": {...}}}}
+A mapping has version, default, and people fields. Each speaker entry contains
+name, ma_user, and providers (service domain to instance ID), plus guest and
+expires_at for temporary accounts.
 
-Each person with own accounts has a Music Assistant user whose provider filter holds their
-instances (+ the household default for services they have no account for), so MA's own
-impersonation (play_media/search `username`) searches and streams from their account.
-Likes go through the MA plugin person_likes (docker/music-assistant/person_likes), which
-changes exactly one account: MA 2.10 itself would like in every account of a service.
+Each person with their own accounts has a Music Assistant user. Its provider
+filter includes those instances and household defaults for missing services.
+MA's play_media/search username parameter then selects the intended account.
+Likes use the person_likes plugin to change exactly one account; MA 2.10's shared
+library otherwise forwards a library like to every matching service account.
 
-The caller says who is speaking (speaker recognition, aisis#8 / voice commands aisis#18):
-`speaker` (user-.../guest-...) or `person` (person.* entity). Nobody, an unknown speaker or
-an expired guest plays and searches as the household default; a like always needs the
-person's own account and is refused otherwise.
+The caller supplies speaker or a linked person entity. Unknown speakers and
+expired guests play and search as the household default. A like always requires
+the speaker's own unexpired account and is refused otherwise.
 """
 
 from __future__ import annotations
@@ -29,17 +27,23 @@ import datetime as dt
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_ENTITY_ID
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.typing import ConfigType
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.typing import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "music_accounts"
@@ -89,7 +93,8 @@ def _read_mapping() -> dict[str, Any]:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as err:
-        raise HomeAssistantError(f"Cannot read {MAPPING}: {err}") from err
+        message = f"Cannot read {MAPPING}: {err}"
+        raise HomeAssistantError(message) from err
     return data if isinstance(data, dict) else {}
 
 
@@ -102,6 +107,7 @@ class Accounts:
     """One read of the mapping plus the who-is-it resolution."""
 
     def __init__(self, hass: HomeAssistant, data: dict[str, Any]) -> None:
+        """Retain one mapping snapshot and its expiry reference time."""
         self.hass = hass
         self.people: dict[str, dict[str, Any]] = data.get("people") or {}
         self.default_speaker: str | None = data.get("default")
@@ -109,26 +115,29 @@ class Accounts:
 
     @property
     def default(self) -> dict[str, Any] | None:
+        """Return the configured household account entry, if present."""
         return self.people.get(self.default_speaker or "")
 
     def speaker_of(self, call: ServiceCall) -> str | None:
+        """Resolve the explicit speaker or linked HA person from a service call."""
         if person := call.data.get("person"):
             state = self.hass.states.get(person)
             user_id = state.attributes.get("user_id") if state else None
             if not user_id:
-                raise ServiceValidationError(f"{person} is not linked to a Home Assistant user")
+                message = f"{person} is not linked to a Home Assistant user"
+                raise ServiceValidationError(message)
             return f"user-{user_id}"
         return call.data.get("speaker") or None
 
     def own(self, speaker: str | None) -> dict[str, Any] | None:
-        """The speaker's entry if it has own accounts and has not expired."""
+        """Return the speaker's unexpired entry with its own accounts."""
         entry = self.people.get(speaker or "")
         if not entry or not entry.get("providers") or _expired(entry, self.now):
             return None
         return entry
 
     def ma_user(self, speaker: str | None) -> str | None:
-        """MA user to act as: the speaker's own, else the household default (else none)."""
+        """Resolve the speaker's MA user, falling back to the household default."""
         entry = self.own(speaker) or self.default
         return (entry or {}).get("ma_user") or None
 
@@ -141,10 +150,11 @@ def _mass_entry(hass: HomeAssistant) -> Any:
     for entry in hass.config_entries.async_entries(MA_DOMAIN):
         if entry.state is ConfigEntryState.LOADED:
             return entry
-    raise HomeAssistantError("Music Assistant is not loaded")
+    message = "Music Assistant is not loaded"
+    raise HomeAssistantError(message)
 
 
-async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # noqa: ARG001 -- HA integration setup signature.
     """Register the music_accounts services."""
 
     async def play(call: ServiceCall) -> None:
@@ -176,13 +186,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         speaker = accounts.speaker_of(call)
         entry = accounts.own(speaker)
         if entry is None:
-            raise ServiceValidationError(
-                f"{speaker or 'An unknown speaker'} has no own music account (or the guest "
-                "account expired); a like is never sent to someone else's account"
+            message = (
+                f"{speaker or 'An unknown speaker'} has no own music account "
+                "(or the guest account expired); a like is never sent "
+                "to someone else's account"
             )
+            raise ServiceValidationError(message)
         reg = er.async_get(hass).async_get(call.data[ATTR_ENTITY_ID])
         if reg is None or reg.platform != MA_DOMAIN:
-            raise ServiceValidationError(f"{call.data[ATTR_ENTITY_ID]} is not a Music Assistant player")
+            message = f"{call.data[ATTR_ENTITY_ID]} is not a Music Assistant player"
+            raise ServiceValidationError(message)
         mass = _mass_entry(hass).runtime_data.mass
         try:
             result = await mass.send_command(
@@ -192,12 +205,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 liked=call.data["liked"],
                 dry_run=call.data["dry_run"],
             )
-        except Exception as err:  # MA errors arrive as music_assistant_models exceptions
-            raise HomeAssistantError(f"Like failed: {err}") from err
+        except (
+            Exception
+        ) as err:  # MA errors arrive as music_assistant_models exceptions
+            message = f"Like failed: {err}"
+            raise HomeAssistantError(message) from err
         _LOGGER.info("%s: %s", entry.get("name") or speaker, result)
         return {"speaker": speaker, "name": entry.get("name"), **(result or {})}
 
-    async def list_accounts(call: ServiceCall) -> ServiceResponse:
+    async def list_accounts(call: ServiceCall) -> ServiceResponse:  # noqa: ARG001 -- HA service callback signature.
         accounts = await _accounts(hass)
         return {
             "default": accounts.default_speaker,
@@ -217,10 +233,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     hass.services.async_register(DOMAIN, "play", play, schema=PLAY_SCHEMA)
     hass.services.async_register(
-        DOMAIN, "search", search, schema=SEARCH_SCHEMA, supports_response=SupportsResponse.ONLY
+        DOMAIN,
+        "search",
+        search,
+        schema=SEARCH_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
-        DOMAIN, "like", like, schema=LIKE_SCHEMA, supports_response=SupportsResponse.OPTIONAL
+        DOMAIN,
+        "like",
+        like,
+        schema=LIKE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN, "accounts", list_accounts, supports_response=SupportsResponse.ONLY

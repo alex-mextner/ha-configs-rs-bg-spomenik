@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import DOMAIN, SIGNAL_RESULTS_UPDATED
 
 
 async def async_setup_platform(
     hass: HomeAssistant,
-    config: ConfigType,
+    config: ConfigType,  # noqa: ARG001 - Required HA platform setup signature.
     async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
+    discovery_info: DiscoveryInfoType | None = None,  # noqa: ARG001 - HA signature.
 ) -> None:
     """Set up the RuTracker.org results sensor."""
     async_add_entities([RuTrackerResultsSensor(hass)])
@@ -29,6 +34,7 @@ class RuTrackerResultsSensor(SensorEntity):
     _attr_icon = "mdi:movie-search"
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Retain the Home Assistant runtime used for result updates."""
         self._hass = hass
         self._attr_native_value = 0
         self._attr_extra_state_attributes = {
