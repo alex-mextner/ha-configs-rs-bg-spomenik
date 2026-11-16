@@ -99,6 +99,7 @@ jobs:
             tests/ekf_appliances/test_native_mode_observation.py \
             tests/ekf_appliances/test_paired_media.py \
             tests/ekf_appliances/test_power_pair.py \
+            tests/ekf_appliances/test_projector_power_context.py \
             tests/ekf_appliances/test_projector_shutdown_state.py \
             tests/ekf_appliances/test_protocol.py \
             tests/ekf_appliances/test_remote_control_boundary.py \
@@ -114,6 +115,7 @@ jobs:
             tests/test_remote_announcements_ha.py \
             docker/chatgpt-web/test_bridge.py \
             tests/test_rutracker_compatibility.py \
+            tests/test_health_watchdog.py \
             tests/test_legacy_helper_contracts.py
       - uses: actions/upload-artifact@v4
         if: always()
