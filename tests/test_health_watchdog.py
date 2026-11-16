@@ -237,6 +237,76 @@ class HealthMonitorTests(unittest.TestCase):
             self.module.main()
         self.assertEqual(output.getvalue(), json.dumps(result, indent=2) + "\n")
 
+    def test_completed_private_logs_have_bounded_retention(self) -> None:
+        """Repeated scheduled runs retain only the newest completed log files."""
+        created = []
+        with (
+            patch.object(tempfile, "tempdir", str(self.folder)),
+            patch.object(logging, "basicConfig") as configure,
+            patch.object(self.module, "logger"),
+            patch.object(self.module, "_LOG_RETENTION_COUNT", 3, create=True),
+        ):
+            for number in range(6):
+                with self.module._logging_context():
+                    descriptor = configure.call_args.kwargs["handlers"][
+                        0
+                    ].stream.fileno()
+                    path = Path(f"/proc/self/fd/{descriptor}").readlink()
+                    os.utime(path, (number, number))
+                    created.append(path)
+        remaining = set(self.folder.glob("ha-health-monitor-*.log"))
+        self.assertEqual(remaining, set(created[-3:]))
+        self.assertTrue(
+            all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in remaining)
+        )
+
+    def test_retention_preserves_active_and_unrecognized_files(self) -> None:
+        """A simultaneous run, legacy files and alternate links remain untouched."""
+        foreign = self.folder / "ha-health-monitor-foreign.log"
+        foreign.write_text("unmarked private file")
+        foreign.chmod(0o600)
+        sentinel = self.folder / "unrelated"
+        sentinel.write_text("untouched")
+        link = self.folder / "ha-health-monitor-link.log"
+        link.symlink_to(sentinel)
+        original = self.folder / "hardlink-origin"
+        original.write_bytes(self.module._LOG_HEADER)
+        original.chmod(0o600)
+        hardlink = self.folder / "ha-health-monitor-hardlink.log"
+        os.link(original, hardlink)
+        public = self.folder / "ha-health-monitor-public.log"
+        public.write_bytes(self.module._LOG_HEADER)
+        public.chmod(0o644)
+        completed = []
+        with (
+            patch.object(tempfile, "tempdir", str(self.folder)),
+            patch.object(logging, "basicConfig") as configure,
+            patch.object(self.module, "logger"),
+            patch.object(self.module, "_LOG_RETENTION_COUNT", 1),
+            self.module._logging_context(),
+        ):
+            descriptor = configure.call_args.kwargs["handlers"][0].stream.fileno()
+            active = Path(f"/proc/self/fd/{descriptor}").readlink()
+            os.utime(active, (0, 0))
+            for number in range(1, 4):
+                with self.module._logging_context():
+                    descriptor = configure.call_args.kwargs["handlers"][
+                        0
+                    ].stream.fileno()
+                    path = Path(f"/proc/self/fd/{descriptor}").readlink()
+                    os.utime(path, (number, number))
+                    completed.append(path)
+            self.assertTrue(active.exists())
+            self.assertEqual(
+                [path.exists() for path in completed], [False, False, True]
+            )
+        self.assertEqual(foreign.read_text(), "unmarked private file")
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(sentinel.read_text(), "untouched")
+        self.assertTrue(hardlink.exists())
+        self.assertEqual(original.stat().st_nlink, 2)
+        self.assertEqual(stat.S_IMODE(public.stat().st_mode), 0o644)
+
     def test_httpx_redirect_and_token_policy_is_preserved(self) -> None:
         """Public probes follow redirects; authenticated entity reads stay at HA."""
         requests = []

@@ -8,15 +8,17 @@ Run via cron: */5 * * * * /opt/scripts/ha_health_monitor.py
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -32,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 _HTTP_PORTS = {"http": 80, "https": 443}
 _MAX_PORT = 65535
+_LOG_HEADER = b"HA health monitor private log v1\n"
+_PRIVATE_LOG_MODE = 0o600
+# One day of completed runs at the documented five-minute cadence.
+_LOG_RETENTION_COUNT = 288
 
 
 def _http_origin(value: str) -> tuple[str, str, int]:
@@ -56,23 +62,73 @@ def _http_origin(value: str) -> tuple[str, str, int]:
 
 
 @contextmanager
+def _completed_log(path: Path) -> Iterator[os.stat_result | None]:
+    """Lock only marked, private regular logs owned by this process's user."""
+    descriptor = None
+    info = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        candidate = os.fstat(descriptor)
+        if (
+            stat.S_ISREG(candidate.st_mode)
+            and candidate.st_uid == os.geteuid()
+            and candidate.st_nlink == 1
+            and stat.S_IMODE(candidate.st_mode) == _PRIVATE_LOG_MODE
+        ):
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.read(descriptor, len(_LOG_HEADER)) == _LOG_HEADER:
+                info = candidate
+    except OSError:
+        info = None
+    try:
+        yield info
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _prune_completed_logs(folder: Path) -> None:
+    """Bound completed run history while leaving active and unmarked files alone."""
+    completed = []
+    for path in folder.glob("ha-health-monitor-*.log"):
+        with _completed_log(path) as info:
+            if info is not None:
+                completed.append((info.st_mtime_ns, path, info))
+    completed.sort(key=lambda item: item[0], reverse=True)
+    for _, path, expected in completed[_LOG_RETENTION_COUNT:]:
+        with _completed_log(path) as info:
+            if info is None or not os.path.samestat(info, expected):
+                continue
+            with suppress(OSError):
+                if os.path.samestat(info, path.lstat()):
+                    path.unlink()
+
+
+@contextmanager
 def _logging_context() -> Iterator[None]:
     """Keep one private opened log and report its path at both boundaries."""
     descriptor, name = tempfile.mkstemp(prefix="ha-health-monitor-", suffix=".log")
-    with os.fdopen(descriptor, "a") as stream:
-        handler = logging.StreamHandler(stream)
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s",
-            handlers=[handler, logging.StreamHandler()],
-        )
-        logger.info("Log: %s", name)
-        try:
-            yield
-        finally:
+    try:
+        with os.fdopen(descriptor, "a") as stream:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            stream.write(_LOG_HEADER.decode("ascii"))
+            stream.flush()
+            handler = logging.StreamHandler(stream)
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s %(levelname)s %(message)s",
+                handlers=[handler, logging.StreamHandler()],
+            )
             logger.info("Log: %s", name)
-            logging.getLogger().removeHandler(handler)
-            handler.close()
+            try:
+                yield
+            finally:
+                logger.info("Log: %s", name)
+                logging.getLogger().removeHandler(handler)
+                handler.close()
+    finally:
+        with suppress(OSError):
+            _prune_completed_logs(Path(name).parent)
 
 
 def _backup_registry(path: Path) -> Path:
