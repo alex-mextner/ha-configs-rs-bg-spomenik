@@ -92,6 +92,12 @@ The existing `tv_kodi_entity_id` key selects the projector's Kodi partner.
 The optional `tv_source_entity_id` field is retained for configuration compatibility;
 new setups can leave it empty. Remote mode is selected through the canonical target.
 
+The packaged remote uses this home's canonical wrapper IDs
+`media_player.ue48j5500_ue48j5500` and `media_player.projector`, together with
+`sensor.universal_remote_target`. Native backend and playback-source renames
+are tracked through the entity registry. Renaming a canonical wrapper or helper
+requires updating the corresponding house-package references as well.
+
 Power synchronization watches two independent observations for each pair. Samsung uses the matching passive identity endpoint; Chromecast uses Android TV Remote's pushed on/off state. Google Cast's off/idle playback state is never used as hardware power. The projector uses its matching HDMI display and Kodi uses the authenticated host bridge GET /kodi/status, which reports the actual systemd unit/process state. A loaded inactive/failed unit with a valid zero MainPID is OFF only when an independent Kodi process probe also confirms absence. Supervisor failure/result/exit status remain separate diagnostics; a normal SIGTERM shutdown can leave the wrapper at exit 143. Transitional units, inconsistent process evidence, malformed/read failures, stale polls, and network outages remain unknown.
 
 Explicit canonical power requests drive both partners. An observed external transition (TV remote, Chromecast remote, projector remote, Kodi start or quit) drives its partner. Duplicates and echoes share one request. An opposite request takes precedence over delayed confirmation from the previous request, and each physical side is attempted only once per intent. A request finishes only after both states confirm it; failure is exposed through power_sync_error without optimistically changing either entity. Projector shutdown retains the existing fresh HDMI and 30-second stable-on guards before its two POWER frames.
