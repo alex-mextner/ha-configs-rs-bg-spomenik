@@ -3,32 +3,49 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
-from dataclasses import dataclass
-from datetime import UTC, datetime
-import hashlib
 import html
 import json
 import logging
 import math
 import os
-from pathlib import Path
 import re
 import time
-from typing import Any
-from urllib.parse import parse_qs, quote_from_bytes, urlencode, urljoin, unquote, urlparse
 import urllib.request
 import xml.etree.ElementTree as ET
+from contextlib import suppress
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from http import HTTPStatus
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import (
+    parse_qs,
+    quote_from_bytes,
+    unquote,
+    urlencode,
+    urljoin,
+    urlparse,
+)
 
 import aiohttp
-import voluptuous as vol
-
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as safe_fromstring
 from homeassistant.const import CONF_HOST, CONF_PATH, CONF_PORT
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.helpers import config_validation as cv, discovery
+
+# Home Assistant installs its validation compatibility layer before voluptuous loads.
+# isort: split
+import voluptuous as vol
+from homeassistant.core import SupportsResponse
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import discovery
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.typing import ConfigType
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from homeassistant.core import HomeAssistant, ServiceCall
+    from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     DEFAULT_COOKIES_FILE,
@@ -46,8 +63,8 @@ from .const import (
     SERVICE_ADD,
     SERVICE_LOGIN,
     SERVICE_SEARCH,
-    SIGNAL_SELECTION_UPDATED,
     SIGNAL_RESULTS_UPDATED,
+    SIGNAL_SELECTION_UPDATED,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,7 +72,8 @@ _LOGGER = logging.getLogger(__name__)
 CONF_COOKIES_FILE = "cookies_file"
 CONF_RUTRACKER_URL = "rutracker_url"
 CONF_FEED_URL = "feed_url"
-CONF_HOST_ACTIONS_TOKEN = "host_actions_token"
+# This public configuration key names a credential; its value is not a secret.
+CONF_HOST_ACTIONS_TOKEN = "host_actions_token"  # noqa: S105
 CONF_HOST_LOGIN_URL = "host_login_url"
 CONF_TEST_DOWNLOAD_DIR = "test_download_dir"
 CONF_USER_AGENT = "user_agent"
@@ -66,6 +84,11 @@ VERIFY_QUICK = "quick"
 VERIFY_TRANSMISSION = "transmission"
 TRACKER_ANNOUNCE_TIMEOUT = 4
 TRACKER_ANNOUNCE_MAX_TRACKERS = 2
+_MIN_QUOTED_LENGTH = 2
+_MIN_QUERY_TOKEN_LENGTH = 2
+_NETSCAPE_COOKIE_FIELDS = 7
+_FAILURE_PREVIEW_COUNT = 3
+_REMOVE_ATTEMPTS = 3
 FALLBACK_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -75,9 +98,13 @@ CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema(
             {
-                vol.Optional(CONF_RUTRACKER_URL, default=DEFAULT_RUTRACKER_URL): cv.string,
+                vol.Optional(
+                    CONF_RUTRACKER_URL, default=DEFAULT_RUTRACKER_URL
+                ): cv.string,
                 vol.Optional(CONF_FEED_URL, default=DEFAULT_FEED_URL): cv.string,
-                vol.Optional(CONF_COOKIES_FILE, default=DEFAULT_COOKIES_FILE): cv.string,
+                vol.Optional(
+                    CONF_COOKIES_FILE, default=DEFAULT_COOKIES_FILE
+                ): cv.string,
                 vol.Optional(CONF_USER_AGENT, default=DEFAULT_USER_AGENT): cv.string,
                 vol.Optional(CONF_ENV_FILE, default="/config/.env"): cv.string,
                 vol.Optional(CONF_HOST_LOGIN_URL, default=""): cv.string,
@@ -97,16 +124,24 @@ CONFIG_SCHEMA = vol.Schema(
 SEARCH_SCHEMA = vol.Schema(
     {
         vol.Required("query"): cv.string,
-        vol.Optional("media_type", default="series"): vol.In(["series", "movies", "both"]),
-        vol.Optional("max_results", default=8): vol.All(vol.Coerce(int), vol.Range(min=1, max=30)),
+        vol.Optional("media_type", default="series"): vol.In(
+            ["series", "movies", "both"]
+        ),
+        vol.Optional("max_results", default=8): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=30)
+        ),
         vol.Optional("verify_mode", default=VERIFY_TRANSMISSION): vol.In(
             [VERIFY_NONE, VERIFY_QUICK, VERIFY_TRANSMISSION]
         ),
-        vol.Optional("verify_limit", default=5): vol.All(vol.Coerce(int), vol.Range(min=0, max=20)),
+        vol.Optional("verify_limit", default=5): vol.All(
+            vol.Coerce(int), vol.Range(min=0, max=20)
+        ),
         vol.Optional("verify_timeout", default=25): vol.All(
             vol.Coerce(int), vol.Range(min=5, max=180)
         ),
-        vol.Optional("min_seeders", default=1): vol.All(vol.Coerce(int), vol.Range(min=0)),
+        vol.Optional("min_seeders", default=1): vol.All(
+            vol.Coerce(int), vol.Range(min=0)
+        ),
         vol.Optional("forums"): vol.Any([vol.Coerce(int)], cv.string),
     }
 )
@@ -153,9 +188,11 @@ class Candidate:
 
     @property
     def result_id(self) -> str:
+        """Return the stable service-facing identifier for this topic."""
         return f"rt-{self.topic_id}"
 
-    def as_dict(self, include_magnet: bool = False) -> dict[str, Any]:
+    def as_dict(self, *, include_magnet: bool = False) -> dict[str, Any]:
+        """Serialize the candidate, including its magnet only when requested."""
         data: dict[str, Any] = {
             "id": self.result_id,
             "topic_id": self.topic_id,
@@ -179,11 +216,40 @@ class Candidate:
 
     @property
     def for_name(self) -> str:
+        """Resolve supplied forum labels and the established fallback IDs."""
         if self.forum_name:
             return self.forum_name
         if self.forum_id is None:
             return ""
         return FORUM_NAMES.get(self.forum_id, f"Forum {self.forum_id}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _SearchReport:
+    query: str
+    source: str = ""
+    results: list[dict[str, Any]] | None = None
+    notes: list[str] | None = None
+    status: str = "done"
+    message: str = ""
+    progress_current: int = 0
+    progress_total: int = 0
+    selected_result_id: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _TopicFetch:
+    min_seeders: int
+    cookie_header: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _VerificationRequest:
+    limit: int
+    duration: int
+    query: str = ""
+    source: str = ""
+    notes: list[str] | None = None
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -218,7 +284,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         response = await _handle_search(hass, call)
         runtime["last_response"] = response
         runtime["cache"] = {item["id"]: item for item in response.get("results", [])}
-        runtime["selected_result_id"] = _first_downloadable_id(response.get("results", []))
+        runtime["selected_result_id"] = _first_downloadable_id(
+            response.get("results", [])
+        )
         runtime["last_response"]["selected_result_id"] = runtime["selected_result_id"]
         async_dispatcher_send(hass, SIGNAL_RESULTS_UPDATED)
         async_dispatcher_send(hass, SIGNAL_SELECTION_UPDATED)
@@ -254,11 +322,168 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+def _append_new_candidates(
+    candidates: list[Candidate], seen: set[str], found: list[Candidate]
+) -> int:
+    added = 0
+    for item in found:
+        if item.topic_id not in seen:
+            seen.add(item.topic_id)
+            candidates.append(item)
+            added += 1
+    return added
+
+
+def _candidate_source(candidates: list[Candidate], *, searched_feed: bool) -> str:
+    sources = {item.source for item in candidates if item.source}
+    if searched_feed and "tracker" in sources and "feed" not in sources:
+        return "tracker"
+    if "tracker" in sources and "feed" in sources:
+        return "tracker+feed"
+    if "tracker" in sources:
+        return "tracker"
+    if searched_feed:
+        return "feed"
+    return "none"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _SearchContext:
+    """Retain shared mutable results for the sequential search stages."""
+
+    hass: HomeAssistant
+    session: aiohttp.ClientSession
+    cfg: dict[str, Any]
+    query: str
+    tokens: list[str]
+    forums: list[int]
+    notes: list[str]
+    candidates: list[Candidate]
+    seen: set[str]
+    cookie_header: str
+    tracker_errors: list[str]
+
+
+async def _search_tracker_forums(work: _SearchContext) -> None:
+    hass = work.hass
+    session = work.session
+    cfg = work.cfg
+    query = work.query
+    forums = work.forums
+    notes = work.notes
+    candidates = work.candidates
+    seen = work.seen
+    cookie_header = work.cookie_header
+    tracker_errors = work.tracker_errors
+    for index, forum_id in enumerate(forums, start=1):
+        _publish_progress(
+            hass,
+            _SearchReport(
+                query=query,
+                status="running",
+                message=f"Searching forum {FORUM_NAMES.get(forum_id, forum_id)}...",
+                progress_current=index,
+                progress_total=len(forums),
+                notes=notes,
+            ),
+        )
+        try:
+            found = await _search_tracker_page(
+                session, cfg, query, forum_id, cookie_header
+            )
+            _append_new_candidates(candidates, seen, found)
+        except Exception as err:  # noqa: BLE001 - service should degrade gracefully.
+            tracker_errors.append(f"forum {forum_id}: {err}")
+
+
+async def _search_tracker_global(work: _SearchContext) -> None:
+    hass = work.hass
+    session = work.session
+    cfg = work.cfg
+    query = work.query
+    forums = work.forums
+    notes = work.notes
+    candidates = work.candidates
+    seen = work.seen
+    cookie_header = work.cookie_header
+    _publish_progress(
+        hass,
+        _SearchReport(
+            query=query,
+            status="running",
+            message="Searching global RuTracker.org tracker page...",
+            progress_current=len(forums),
+            progress_total=len(forums) + 1,
+            notes=notes,
+        ),
+    )
+    try:
+        found = await _search_tracker_page(session, cfg, query, None, cookie_header)
+        added = _append_new_candidates(candidates, seen, found)
+        if added:
+            _append_note_once(
+                notes,
+                f"Global RuTracker.org search added {added} fallback candidate(s).",
+            )
+    except Exception as err:  # noqa: BLE001
+        notes.append(f"global tracker.php fallback: {err}")
+
+
+async def _search_feeds(work: _SearchContext) -> None:
+    hass = work.hass
+    session = work.session
+    cfg = work.cfg
+    query = work.query
+    tokens = work.tokens
+    forums = work.forums
+    notes = work.notes
+    candidates = work.candidates
+    seen = work.seen
+    for index, forum_id in enumerate(forums, start=1):
+        _publish_progress(
+            hass,
+            _SearchReport(
+                query=query,
+                status="running",
+                message=f"Searching Atom feed {FORUM_NAMES.get(forum_id, forum_id)}...",
+                progress_current=index,
+                progress_total=len(forums),
+                notes=notes,
+            ),
+        )
+        try:
+            found = await _search_feed(session, cfg, query, tokens, forum_id)
+            _append_new_candidates(candidates, seen, found)
+        except Exception as err:  # noqa: BLE001
+            notes.append(f"feed forum {forum_id}: {err}")
+
+
+def _rank_candidates(
+    candidates: list[Candidate], media_type: str, tokens: list[str], max_results: int
+) -> list[Candidate]:
+    candidates = [
+        item for item in candidates if _looks_like_requested_media(item, media_type)
+    ]
+    for item in candidates:
+        item.score = _score(item, tokens)
+
+    candidates.sort(key=lambda item: item.score, reverse=True)
+    return candidates[:max_results]
+
+
 async def _handle_search(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     query = call.data["query"].strip()
     tokens = _tokens(query)
     if not tokens:
-        return _response(query, "none", [], ["Empty query"], message="Empty query")
+        return _response(
+            _SearchReport(
+                query=query,
+                source="none",
+                results=[],
+                notes=["Empty query"],
+                message="Empty query",
+            )
+        )
 
     cfg = hass.data[DOMAIN]["config"]
     session = async_get_clientsession(hass)
@@ -271,128 +496,75 @@ async def _handle_search(hass: HomeAssistant, call: ServiceCall) -> dict[str, An
     cookie_header = await _async_read_cookie_header(hass, cfg)
     _publish_progress(
         hass,
-        query,
-        "running",
-        "Searching RuTracker.org tracker pages...",
-        progress_current=0,
-        progress_total=max(len(forums), 1),
+        _SearchReport(
+            query=query,
+            status="running",
+            message="Searching RuTracker.org tracker pages...",
+            progress_current=0,
+            progress_total=max(len(forums), 1),
+        ),
     )
     tracker_errors: list[str] = []
+    search = _SearchContext(
+        hass=hass,
+        session=session,
+        cfg=cfg,
+        query=query,
+        tokens=tokens,
+        forums=forums,
+        notes=notes,
+        candidates=candidates,
+        seen=seen,
+        cookie_header=cookie_header,
+        tracker_errors=tracker_errors,
+    )
+
     if cookie_header:
-        for index, forum_id in enumerate(forums, start=1):
-            _publish_progress(
-                hass,
-                query,
-                "running",
-                f"Searching forum {FORUM_NAMES.get(forum_id, forum_id)}...",
-                progress_current=index,
-                progress_total=len(forums),
-                notes=notes,
-            )
-            try:
-                found = await _search_tracker_page(session, cfg, query, forum_id, cookie_header)
-                for item in found:
-                    if item.topic_id not in seen:
-                        seen.add(item.topic_id)
-                        candidates.append(item)
-            except Exception as err:  # noqa: BLE001 - service should degrade gracefully.
-                tracker_errors.append(f"forum {forum_id}: {err}")
+        await _search_tracker_forums(search)
     else:
         notes.append(
-            "RuTracker.org cookies file is missing or empty; using public Atom feed fallback."
+            "RuTracker.org cookies file is missing or empty; "
+            "using public Atom feed fallback."
         )
 
     if tracker_errors:
         notes.append(_summarize_failures("tracker.php", tracker_errors))
 
     if cookie_header and len(candidates) < max_results:
-        _publish_progress(
-            hass,
-            query,
-            "running",
-            "Searching global RuTracker.org tracker page...",
-            progress_current=len(forums),
-            progress_total=len(forums) + 1,
-            notes=notes,
-        )
-        try:
-            found = await _search_tracker_page(session, cfg, query, None, cookie_header)
-            added = 0
-            for item in found:
-                if item.topic_id not in seen:
-                    seen.add(item.topic_id)
-                    candidates.append(item)
-                    added += 1
-            if added:
-                _append_note_once(
-                    notes,
-                    f"Global RuTracker.org search added {added} fallback candidate(s).",
-                )
-        except Exception as err:  # noqa: BLE001
-            notes.append(f"global tracker.php fallback: {err}")
+        await _search_tracker_global(search)
 
     searched_feed = False
     if len(candidates) < max_results:
         searched_feed = True
-        for index, forum_id in enumerate(forums, start=1):
-            _publish_progress(
-                hass,
-                query,
-                "running",
-                f"Searching Atom feed {FORUM_NAMES.get(forum_id, forum_id)}...",
-                progress_current=index,
-                progress_total=len(forums),
-                notes=notes,
-            )
-            try:
-                found = await _search_feed(session, cfg, query, tokens, forum_id)
-                for item in found:
-                    if item.topic_id not in seen:
-                        seen.add(item.topic_id)
-                        candidates.append(item)
-            except Exception as err:  # noqa: BLE001
-                notes.append(f"feed forum {forum_id}: {err}")
+        await _search_feeds(search)
 
-    sources = {item.source for item in candidates if item.source}
-    if searched_feed and "tracker" in sources and "feed" not in sources:
-        source = "tracker"
-    elif "tracker" in sources and "feed" in sources:
-        source = "tracker+feed"
-    elif "tracker" in sources:
-        source = "tracker"
-    elif searched_feed:
-        source = "feed"
-    else:
-        source = "none"
+    source = _candidate_source(candidates, searched_feed=searched_feed)
 
-    media_type = call.data["media_type"]
-    candidates = [
-        item for item in candidates if _looks_like_requested_media(item, media_type)
-    ]
-    for item in candidates:
-        item.score = _score(item, tokens)
-
-    candidates.sort(key=lambda item: item.score, reverse=True)
-    candidates = candidates[:max_results]
+    candidates = _rank_candidates(
+        candidates, call.data["media_type"], tokens, max_results
+    )
 
     _publish_progress(
         hass,
-        query,
-        "running",
-        f"Fetching topic details for {len(candidates)} candidates...",
-        source=source,
-        results=[item.as_dict() for item in candidates],
-        notes=notes,
-        progress_current=0,
-        progress_total=len(candidates),
+        _SearchReport(
+            query=query,
+            status="running",
+            message=f"Fetching topic details for {len(candidates)} candidates...",
+            source=source,
+            results=[item.as_dict() for item in candidates],
+            notes=notes,
+            progress_current=0,
+            progress_total=len(candidates),
+        ),
     )
     await _fetch_topic_details(
         session,
         cfg,
         candidates,
-        int(call.data["min_seeders"]),
-        notes,
-        cookie_header,
+        notes=notes,
+        options=_TopicFetch(
+            min_seeders=int(call.data["min_seeders"]), cookie_header=cookie_header
+        ),
     )
 
     verify_mode = call.data["verify_mode"]
@@ -401,35 +573,88 @@ async def _handle_search(hass: HomeAssistant, call: ServiceCall) -> dict[str, An
             hass,
             session,
             candidates,
-            limit=call.data["verify_limit"],
-            timeout=call.data["verify_timeout"],
-            query=query,
-            source=source,
-            notes=notes,
+            _VerificationRequest(
+                limit=call.data["verify_limit"],
+                query=query,
+                source=source,
+                notes=notes,
+                duration=call.data["verify_timeout"],
+            ),
         )
     elif verify_mode == VERIFY_QUICK:
         _publish_progress(
             hass,
-            query,
-            "running",
-            "Running quick verification...",
-            source=source,
-            results=[item.as_dict() for item in candidates],
-            notes=notes,
-            progress_current=0,
-            progress_total=len(candidates),
+            _SearchReport(
+                query=query,
+                status="running",
+                message="Running quick verification...",
+                source=source,
+                results=[item.as_dict() for item in candidates],
+                notes=notes,
+                progress_current=0,
+                progress_total=len(candidates),
+            ),
         )
         _quick_verify(candidates, int(call.data["min_seeders"]))
 
     results = [item.as_dict() for item in candidates]
     return _response(
-        query,
-        source,
-        results,
-        notes,
-        message=f"Found {len(results)} candidates.",
-        selected_result_id=_first_downloadable_id(results),
+        _SearchReport(
+            query=query,
+            source=source,
+            results=results,
+            notes=notes,
+            message=f"Found {len(results)} candidates.",
+            selected_result_id=_first_downloadable_id(results),
+        )
     )
+
+
+def _cached_add_item(
+    cache: dict[str, Any], result_id: str, topic_id: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    item = cache.get(result_id)
+    if not item:
+        return None, {"ok": False, "error": f"Unknown result_id: {result_id}"}
+    if item.get("downloadable") is False:
+        return None, {
+            "ok": False,
+            "error": (
+                "Selected result is disabled: "
+                f"{item.get('disabled_reason') or 'not downloadable'}"
+            ),
+            "result_id": result_id,
+            "topic_id": str(item.get("topic_id") or topic_id),
+        }
+    return item, None
+
+
+def _add_download_params(
+    call: ServiceCall, result_id: str, topic_id: str, magnet: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    params: dict[str, Any] = {"filename": magnet, "paused": bool(call.data["paused"])}
+    download_dir = call.data.get("download_dir", "").strip()
+    if download_dir in {"unknown", "unavailable", "none", "None"}:
+        download_dir = ""
+    if download_dir and not download_dir.startswith("/"):
+        return None, {
+            "ok": False,
+            "error": "download_dir must be an absolute path.",
+            "result_id": result_id,
+            "topic_id": topic_id,
+        }
+    if download_dir:
+        params["download_dir"] = download_dir
+    labels = _labels(call.data.get("labels"))
+    if labels:
+        params["labels"] = labels
+    return params, None
+
+
+def _direct_topic_id(topic_id: str, result_id: str, magnet: str) -> str:
+    if not topic_id and not result_id and magnet.startswith(("http://", "https://")):
+        return _topic_id_from_url(magnet)
+    return ""
 
 
 async def _handle_add(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
@@ -445,22 +670,14 @@ async def _handle_add(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     if not result_id and not topic_id and not magnet:
         result_id = str(hass.data[DOMAIN].get("selected_result_id") or "").strip()
 
-    if not topic_id and not result_id and magnet.startswith(("http://", "https://")):
-        if parsed_topic_id := _topic_id_from_url(magnet):
-            topic_id = parsed_topic_id
-            magnet = ""
+    if parsed_topic_id := _direct_topic_id(topic_id, result_id, magnet):
+        topic_id = parsed_topic_id
+        magnet = ""
 
     if result_id:
-        item = cache.get(result_id)
-        if not item:
-            return {"ok": False, "error": f"Unknown result_id: {result_id}"}
-        if item.get("downloadable") is False:
-            return {
-                "ok": False,
-                "error": f"Selected result is disabled: {item.get('disabled_reason') or 'not downloadable'}",
-                "result_id": result_id,
-                "topic_id": str(item.get("topic_id") or topic_id),
-            }
+        item, error = _cached_add_item(cache, result_id, topic_id)
+        if error is not None:
+            return error
         topic_id = str(item.get("topic_id") or topic_id)
         magnet = str(item.get("magnet") or magnet)
         title = str(item.get("title") or "")
@@ -476,9 +693,8 @@ async def _handle_add(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
             session,
             cfg,
             [candidate],
-            min_seeders=0,
             notes=[],
-            cookie_header=cookie_header,
+            options=_TopicFetch(min_seeders=0, cookie_header=cookie_header),
         )
         magnet = candidate.magnet
         title = candidate.title
@@ -491,22 +707,9 @@ async def _handle_add(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
             "topic_id": topic_id,
         }
 
-    params: dict[str, Any] = {"filename": magnet, "paused": bool(call.data["paused"])}
-    download_dir = call.data.get("download_dir", "").strip()
-    if download_dir in {"unknown", "unavailable", "none", "None"}:
-        download_dir = ""
-    if download_dir and not download_dir.startswith("/"):
-        return {
-            "ok": False,
-            "error": "download_dir must be an absolute path.",
-            "result_id": result_id,
-            "topic_id": topic_id,
-        }
-    if download_dir:
-        params["download_dir"] = download_dir
-    labels = _labels(call.data.get("labels"))
-    if labels:
-        params["labels"] = labels
+    params, error = _add_download_params(call, result_id, topic_id, magnet)
+    if error is not None:
+        return error
 
     rpc = await _transmission_rpc(hass, session, "torrent_add", params)
     return {
@@ -531,7 +734,11 @@ async def _handle_login(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any
     if not username or not password:
         return {
             "ok": False,
-            "error": "RuTracker.org username/password are missing. Set RUTRACKER_USERNAME and RUTRACKER_PASSWORD in /config/.env or fill the login form.",
+            "error": (
+                "RuTracker.org username/password are missing. "
+                "Set RUTRACKER_USERNAME and RUTRACKER_PASSWORD in /config/.env "
+                "or fill the login form."
+            ),
         }
     method = call.data["method"]
     attempts: list[dict[str, Any]] = []
@@ -596,7 +803,7 @@ def _sanitize_login_attempt(result: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in result.items()
-        if key not in {"cookie_header"} and value not in ("", None)
+        if key != "cookie_header" and value not in ("", None)
     }
 
 
@@ -616,7 +823,7 @@ async def _login_http(
     ) as login_session:
         async with login_session.get(login_url) as resp:
             body = await resp.read()
-            if resp.status >= 400:
+            if resp.status >= HTTPStatus.BAD_REQUEST:
                 return {
                     "ok": False,
                     "method": "http",
@@ -645,7 +852,7 @@ async def _login_http(
             content_type = resp.headers.get("Content-Type", "")
 
     response_text = _decode_http_body(body, content_type)
-    if status >= 400:
+    if status >= HTTPStatus.BAD_REQUEST:
         return {"ok": False, "method": "http", "error": f"login submit HTTP {status}"}
 
     cookie_header = _cookie_header_from_jar(cookie_jar, base_url)
@@ -698,7 +905,7 @@ async def _login_with_host_browser(
         timeout=timeout,
     ) as resp:
         text = await resp.text()
-        if resp.status >= 400:
+        if resp.status >= HTTPStatus.BAD_REQUEST:
             return {
                 "ok": False,
                 "method": "browser",
@@ -709,6 +916,10 @@ async def _login_with_host_browser(
         except json.JSONDecodeError as err:
             return {"ok": False, "method": "browser", "error": f"invalid JSON: {err}"}
 
+    return _browser_login_payload(data)
+
+
+def _browser_login_payload(data: dict[str, Any]) -> dict[str, Any]:
     if not data.get("ok"):
         return {
             "ok": False,
@@ -732,60 +943,47 @@ async def _login_with_host_browser(
         "method": "browser",
         "cookie_header": cookie_header,
         "cookies_count": _count_cookies(cookie_header),
-        "message": data.get("message", "agent-browser login saved RuTracker.org cookies"),
+        "message": data.get(
+            "message", "agent-browser login saved RuTracker.org cookies"
+        ),
         "url": data.get("url"),
         "title": data.get("title"),
     }
 
 
-def _response(
-    query: str,
-    source: str,
-    results: list[dict[str, Any]],
-    notes: list[str],
-    status: str = "done",
-    message: str = "",
-    progress_current: int = 0,
-    progress_total: int = 0,
-    selected_result_id: str = "",
-) -> dict[str, Any]:
+def _response(report: _SearchReport) -> dict[str, Any]:
     return {
-        "query": query,
-        "source": source,
+        "query": report.query,
+        "source": report.source,
         "searched_at": datetime.now(UTC).isoformat(),
-        "status": status,
-        "message": message,
-        "progress_current": progress_current,
-        "progress_total": progress_total,
-        "selected_result_id": selected_result_id,
-        "results": results,
-        "notes": notes,
+        "status": report.status,
+        "message": report.message,
+        "progress_current": report.progress_current,
+        "progress_total": report.progress_total,
+        "selected_result_id": report.selected_result_id,
+        "results": report.results,
+        "notes": report.notes,
     }
 
 
-def _publish_progress(
-    hass: HomeAssistant,
-    query: str,
-    status: str,
-    message: str,
-    source: str = "",
-    results: list[dict[str, Any]] | None = None,
-    notes: list[str] | None = None,
-    progress_current: int = 0,
-    progress_total: int = 0,
-) -> None:
+def _publish_progress(hass: HomeAssistant, report: _SearchReport) -> None:
     runtime = hass.data[DOMAIN]
     selected = runtime.get("selected_result_id", "")
     payload = _response(
-        query,
-        source,
-        results if results is not None else runtime.get("last_response", {}).get("results", []),
-        notes if notes is not None else runtime.get("last_response", {}).get("notes", []),
-        status=status,
-        message=message,
-        progress_current=progress_current,
-        progress_total=progress_total,
-        selected_result_id=selected,
+        replace(
+            report,
+            results=(
+                report.results
+                if report.results is not None
+                else runtime.get("last_response", {}).get("results", [])
+            ),
+            notes=(
+                report.notes
+                if report.notes is not None
+                else runtime.get("last_response", {}).get("notes", [])
+            ),
+            selected_result_id=selected,
+        )
     )
     runtime["last_response"] = payload
     async_dispatcher_send(hass, SIGNAL_RESULTS_UPDATED)
@@ -812,24 +1010,31 @@ async def _search_tracker_page(
     url = f"{cfg[CONF_RUTRACKER_URL].rstrip('/')}/tracker.php?{params}"
     text = await _http_get_text(session, cfg, url, cookie_header=cookie_header)
     if "login.php" in text and "password" in text.lower():
-        raise RuntimeError("search requires RuTracker.org login cookies")
+        error_message = "search requires RuTracker.org login cookies"
+        raise RuntimeError(error_message)
     return _parse_topic_rows(text, forum_id, source="tracker")
 
 
 async def _search_feed(
     session: aiohttp.ClientSession,
     cfg: dict[str, Any],
-    query: str,
+    _query: str,
     tokens: list[str],
     forum_id: int,
 ) -> list[Candidate]:
     url = cfg[CONF_FEED_URL].format(forum_id=forum_id)
     text = await _http_get_text(session, cfg, url)
-    root = ET.fromstring(text)
+    try:
+        root = safe_fromstring(text)
+    except DefusedXmlException as err:
+        error_message = f"Unsafe Atom feed: {err}"
+        raise ET.ParseError(error_message) from err
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     candidates: list[Candidate] = []
     for entry in root.findall("atom:entry", ns):
-        title = html.unescape((entry.findtext("atom:title", default="", namespaces=ns) or "").strip())
+        title = html.unescape(
+            (entry.findtext("atom:title", default="", namespaces=ns) or "").strip()
+        )
         if not _all_tokens_match(title, tokens):
             continue
         link = ""
@@ -858,18 +1063,38 @@ async def _search_feed(
     return candidates
 
 
+def _update_topic_candidate(item: Candidate, text: str, min_seeders: int) -> None:
+    if magnet := _extract_magnet(text):
+        item.magnet = magnet
+    else:
+        item.downloadable = False
+        item.disabled_reason = "Magnet link not found"
+
+    if item.seeders is None:
+        item.seeders = _extract_count(text, "Seeders")
+    if item.leechers is None:
+        item.leechers = _extract_count(text, "Leechers")
+
+    if item.seeders is not None and item.seeders < min_seeders:
+        item.downloadable = False
+        item.disabled_reason = f"Only {item.seeders} seeders"
+
+
 async def _fetch_topic_details(
     session: aiohttp.ClientSession,
     cfg: dict[str, Any],
     candidates: list[Candidate],
-    min_seeders: int,
     notes: list[str],
-    cookie_header: str = "",
+    *,
+    options: _TopicFetch,
 ) -> None:
+    min_seeders, cookie_header = options.min_seeders, options.cookie_header
     retried_without_cookies = False
     for item in candidates:
         if item.url == "":
-            item.url = f"{cfg[CONF_RUTRACKER_URL].rstrip('/')}/viewtopic.php?t={item.topic_id}"
+            item.url = (
+                f"{cfg[CONF_RUTRACKER_URL].rstrip('/')}/viewtopic.php?t={item.topic_id}"
+            )
         try:
             try:
                 text = await _http_get_text(
@@ -885,29 +1110,19 @@ async def _fetch_topic_details(
             item.disabled_reason = f"Topic page unavailable: {err}"
             continue
 
-        if magnet := _extract_magnet(text):
-            item.magnet = magnet
-        else:
-            item.downloadable = False
-            item.disabled_reason = "Magnet link not found"
-
-        if item.seeders is None:
-            item.seeders = _extract_count(text, "Seeders")
-        if item.leechers is None:
-            item.leechers = _extract_count(text, "Leechers")
-
-        if item.seeders is not None and item.seeders < min_seeders:
-            item.downloadable = False
-            item.disabled_reason = f"Only {item.seeders} seeders"
+        _update_topic_candidate(item, text, min_seeders)
 
     if retried_without_cookies:
         _append_note_once(
             notes,
-            "Some RuTracker.org topic pages failed with stored cookies and were retried without cookies.",
+            "Some RuTracker.org topic pages failed with stored cookies "
+            "and were retried without cookies.",
         )
 
     if candidates and not any(item.magnet for item in candidates):
-        notes.append("No magnet links could be extracted from the current candidate set.")
+        notes.append(
+            "No magnet links could be extracted from the current candidate set."
+        )
 
 
 def _quick_verify(candidates: Iterable[Candidate], min_seeders: int) -> None:
@@ -922,17 +1137,205 @@ def _quick_verify(candidates: Iterable[Candidate], min_seeders: int) -> None:
             item.disabled_reason = f"Only {item.seeders} seeders"
 
 
+def _apply_announce_result(item: Candidate, announce: dict[str, Any]) -> None:
+    if announce["alive"]:
+        item.downloadable = True
+        item.disabled_reason = ""
+        if announce["seeders"] is not None:
+            item.seeders = announce["seeders"]
+        if announce["leechers"] is not None:
+            item.leechers = announce["leechers"]
+    else:
+        item.downloadable = False
+        item.disabled_reason = announce["reason"]
+
+
+def _apply_torrent_poll(
+    payload: dict[str, Any], torrent_ids: dict[int, Candidate], done: set[int]
+) -> None:
+    for torrent in payload.get("torrents", []):
+        torrent_id = int(torrent["id"])
+        item = torrent_ids.get(torrent_id)
+        if item is None or torrent_id in done:
+            continue
+        if _torrent_looks_alive(torrent):
+            item.downloadable = True
+            item.disabled_reason = ""
+            done.add(torrent_id)
+        elif torrent.get("errorString"):
+            item.downloadable = False
+            item.disabled_reason = str(torrent["errorString"])
+            done.add(torrent_id)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _VerificationWork:
+    """Keep the original per-request verification and cleanup collections."""
+
+    hass: HomeAssistant
+    session: aiohttp.ClientSession
+    cfg: dict[str, Any]
+    query: str
+    source: str
+    notes: list[str]
+    candidates: list[Candidate]
+    to_check: list[Candidate]
+    torrent_ids: dict[int, Candidate]
+    remove_ids: list[int]
+    done: set[int]
+
+
+async def _stage_candidate(
+    work: _VerificationWork, index: int, item: Candidate
+) -> None:
+    hass = work.hass
+    session = work.session
+    cfg = work.cfg
+    query = work.query
+    source = work.source
+    notes = work.notes
+    candidates = work.candidates
+    to_check = work.to_check
+    torrent_ids = work.torrent_ids
+    remove_ids = work.remove_ids
+    if query:
+        _publish_progress(
+            hass,
+            _SearchReport(
+                query=query,
+                status="running",
+                message=f"Checking tracker availability {index}/{len(to_check)}...",
+                source=source,
+                results=[candidate.as_dict() for candidate in candidates],
+                notes=notes,
+                progress_current=index,
+                progress_total=len(to_check),
+            ),
+        )
+    announce = await _verify_candidate_with_tracker_announce(item)
+    if announce["checked"]:
+        _apply_announce_result(item, announce)
+        return
+
+    params = {
+        "filename": item.magnet,
+        "paused": False,
+        "download_dir": cfg.get(CONF_TEST_DOWNLOAD_DIR, DEFAULT_TEST_DOWNLOAD_DIR),
+        "labels": ["ha-rutracker-check"],
+    }
+    try:
+        payload = _rpc_payload(
+            await _transmission_rpc(hass, session, "torrent_add", params)
+        )
+    except Exception as err:  # noqa: BLE001
+        item.downloadable = False
+        item.disabled_reason = f"Transmission test add failed: {err}"
+        return
+
+    torrent = (
+        payload.get("torrent_added")
+        or payload.get("torrent-added")
+        or payload.get("torrent_duplicate")
+        or payload.get("torrent-duplicate")
+    )
+    if not torrent:
+        item.downloadable = False
+        item.disabled_reason = "Transmission did not return a torrent id"
+        return
+
+    torrent_id = int(torrent["id"])
+    if "torrent-duplicate" in payload or "torrent_duplicate" in payload:
+        item.downloadable = True
+        item.disabled_reason = ""
+        return
+    # Preserve best-effort bandwidth limits for fallback verification.
+    with suppress(Exception):
+        await _transmission_rpc(
+            hass,
+            session,
+            "torrent_set",
+            {
+                "ids": [torrent_id],
+                "downloadLimited": True,
+                "downloadLimit": 1,
+                "uploadLimited": True,
+                "uploadLimit": 1,
+            },
+        )
+    torrent_ids[torrent_id] = item
+    remove_ids.append(torrent_id)
+
+
+async def _poll_transmission_once(work: _VerificationWork) -> bool:
+    hass = work.hass
+    session = work.session
+    query = work.query
+    source = work.source
+    notes = work.notes
+    candidates = work.candidates
+    torrent_ids = work.torrent_ids
+    done = work.done
+    await asyncio.sleep(1)
+    if query:
+        _publish_progress(
+            hass,
+            _SearchReport(
+                query=query,
+                status="running",
+                message=(
+                    f"Checking {len(torrent_ids) - len(done)} "
+                    "candidate(s) in Transmission..."
+                ),
+                source=source,
+                results=[candidate.as_dict() for candidate in candidates],
+                notes=notes,
+                progress_current=len(done),
+                progress_total=len(torrent_ids),
+            ),
+        )
+    try:
+        payload = _rpc_payload(
+            await _transmission_rpc(
+                hass,
+                session,
+                "torrent_get",
+                {
+                    "ids": list(torrent_ids),
+                    "fields": [
+                        "id",
+                        "name",
+                        "hashString",
+                        "metadataPercentComplete",
+                        "peersConnected",
+                        "rateDownload",
+                        "errorString",
+                        "trackerStats",
+                    ],
+                },
+            )
+        )
+    except Exception as err:  # noqa: BLE001
+        for item in torrent_ids.values():
+            if item.downloadable:
+                item.downloadable = False
+                item.disabled_reason = f"Transmission test poll failed: {err}"
+        return False
+
+    _apply_torrent_poll(payload, torrent_ids, done)
+    return True
+
+
 async def _verify_candidates_with_transmission(
     hass: HomeAssistant,
     session: aiohttp.ClientSession,
     candidates: list[Candidate],
-    limit: int,
-    timeout: int,
-    query: str = "",
-    source: str = "",
-    notes: list[str] | None = None,
+    request: _VerificationRequest,
 ) -> None:
-    to_check = [item for item in candidates if item.downloadable and item.magnet][:limit]
+    limit, timeout = request.limit, request.duration
+    query, source, notes = request.query, request.source, request.notes
+    to_check = [item for item in candidates if item.downloadable and item.magnet][
+        :limit
+    ]
     if not to_check:
         return
 
@@ -941,142 +1344,34 @@ async def _verify_candidates_with_transmission(
     torrent_ids: dict[int, Candidate] = {}
     remove_ids: list[int] = []
     done: set[int] = set()
+    work = _VerificationWork(
+        hass=hass,
+        session=session,
+        cfg=cfg,
+        query=query,
+        source=source,
+        notes=notes,
+        candidates=candidates,
+        to_check=to_check,
+        torrent_ids=torrent_ids,
+        remove_ids=remove_ids,
+        done=done,
+    )
 
     for index, item in enumerate(to_check, start=1):
-        if query:
-            _publish_progress(
-                hass,
-                query,
-                "running",
-                f"Checking tracker availability {index}/{len(to_check)}...",
-                source=source,
-                results=[candidate.as_dict() for candidate in candidates],
-                notes=notes,
-                progress_current=index,
-                progress_total=len(to_check),
-            )
-        announce = await _verify_candidate_with_tracker_announce(item)
-        if announce["checked"]:
-            if announce["alive"]:
-                item.downloadable = True
-                item.disabled_reason = ""
-                if announce["seeders"] is not None:
-                    item.seeders = announce["seeders"]
-                if announce["leechers"] is not None:
-                    item.leechers = announce["leechers"]
-            else:
-                item.downloadable = False
-                item.disabled_reason = announce["reason"]
-            continue
-
-        params = {
-            "filename": item.magnet,
-            "paused": False,
-            "download_dir": cfg.get(CONF_TEST_DOWNLOAD_DIR, DEFAULT_TEST_DOWNLOAD_DIR),
-            "labels": ["ha-rutracker-check"],
-        }
-        try:
-            payload = _rpc_payload(await _transmission_rpc(hass, session, "torrent_add", params))
-        except Exception as err:  # noqa: BLE001
-            item.downloadable = False
-            item.disabled_reason = f"Transmission test add failed: {err}"
-            continue
-
-        torrent = (
-            payload.get("torrent_added")
-            or payload.get("torrent-added")
-            or payload.get("torrent_duplicate")
-            or payload.get("torrent-duplicate")
-        )
-        if not torrent:
-            item.downloadable = False
-            item.disabled_reason = "Transmission did not return a torrent id"
-            continue
-
-        torrent_id = int(torrent["id"])
-        if "torrent-duplicate" in payload or "torrent_duplicate" in payload:
-            item.downloadable = True
-            item.disabled_reason = ""
-            continue
-        try:
-            await _transmission_rpc(
-                hass,
-                session,
-                "torrent_set",
-                {
-                    "ids": [torrent_id],
-                    "downloadLimited": True,
-                    "downloadLimit": 1,
-                    "uploadLimited": True,
-                    "uploadLimit": 1,
-                },
-            )
-        except Exception:  # noqa: BLE001 - fallback verification can continue without limits.
-            pass
-        torrent_ids[torrent_id] = item
-        remove_ids.append(torrent_id)
+        await _stage_candidate(work, index, item)
 
     deadline = time.monotonic() + timeout
     while torrent_ids and len(done) < len(torrent_ids) and time.monotonic() < deadline:
-        await asyncio.sleep(1)
-        if query:
-            _publish_progress(
-                hass,
-                query,
-                "running",
-                f"Checking {len(torrent_ids) - len(done)} candidate(s) in Transmission...",
-                source=source,
-                results=[candidate.as_dict() for candidate in candidates],
-                notes=notes,
-                progress_current=len(done),
-                progress_total=len(torrent_ids),
-            )
-        try:
-            payload = _rpc_payload(
-                await _transmission_rpc(
-                    hass,
-                    session,
-                    "torrent_get",
-                    {
-                        "ids": list(torrent_ids),
-                        "fields": [
-                            "id",
-                            "name",
-                            "hashString",
-                            "metadataPercentComplete",
-                            "peersConnected",
-                            "rateDownload",
-                            "errorString",
-                            "trackerStats",
-                        ],
-                    },
-                )
-            )
-        except Exception as err:  # noqa: BLE001
-            for item in torrent_ids.values():
-                if item.downloadable:
-                    item.downloadable = False
-                    item.disabled_reason = f"Transmission test poll failed: {err}"
+        if not await _poll_transmission_once(work):
             break
-
-        for torrent in payload.get("torrents", []):
-            torrent_id = int(torrent["id"])
-            item = torrent_ids.get(torrent_id)
-            if item is None or torrent_id in done:
-                continue
-            if _torrent_looks_alive(torrent):
-                item.downloadable = True
-                item.disabled_reason = ""
-                done.add(torrent_id)
-            elif torrent.get("errorString"):
-                item.downloadable = False
-                item.disabled_reason = str(torrent["errorString"])
-                done.add(torrent_id)
 
     for torrent_id, item in torrent_ids.items():
         if torrent_id not in done:
             item.downloadable = False
-            item.disabled_reason = "Transmission test did not fetch metadata or peers in time"
+            item.disabled_reason = (
+                "Transmission test did not fetch metadata or peers in time"
+            )
 
     if remove_ids:
         await _remove_transmission_test_torrents(hass, session, remove_ids)
@@ -1093,6 +1388,17 @@ async def _verify_candidate_with_tracker_announce(item: Candidate) -> dict[str, 
             "leechers": None,
             "reason": f"Tracker announce failed: {err}",
         }
+
+
+def _tracker_peer_counts(
+    payload: dict[Any, Any],
+) -> tuple[bool, int | None, int | None]:
+    seeders = _bvalue_int(payload, b"complete")
+    leechers = _bvalue_int(payload, b"incomplete")
+    peers = payload.get(b"peers")
+    peers_count = _peers_count(peers)
+    alive = peers_count > 0 or (seeders is not None and seeders > 0)
+    return alive, seeders, leechers
 
 
 def _tracker_announce_sync(magnet: str) -> dict[str, Any]:
@@ -1115,15 +1421,15 @@ def _tracker_announce_sync(magnet: str) -> dict[str, Any]:
             data = _http_get_bytes(announce_url, timeout=TRACKER_ANNOUNCE_TIMEOUT)
             payload, _offset = _bdecode(data)
             if not isinstance(payload, dict):
-                return _announce_result(False, "Tracker returned an invalid response")
+                return _announce_result(
+                    alive=False, reason="Tracker returned an invalid response"
+                )
             if failure := _bvalue_text(payload, b"failure reason"):
-                return _announce_result(False, f"Tracker failure: {failure}")
+                return _announce_result(
+                    alive=False, reason=f"Tracker failure: {failure}"
+                )
 
-            seeders = _bvalue_int(payload, b"complete")
-            leechers = _bvalue_int(payload, b"incomplete")
-            peers = payload.get(b"peers")
-            peers_count = _peers_count(peers)
-            alive = peers_count > 0 or (seeders is not None and seeders > 0)
+            alive, seeders, leechers = _tracker_peer_counts(payload)
             if alive:
                 _announce_stopped_best_effort(tracker, info_hash, peer_id)
                 return {
@@ -1147,7 +1453,9 @@ def _tracker_announce_sync(magnet: str) -> dict[str, Any]:
             "reason": last_error,
         }
 
-    return _announce_result(False, last_error or "No tracker announce succeeded")
+    return _announce_result(
+        alive=False, reason=last_error or "No tracker announce succeeded"
+    )
 
 
 def _magnet_info_hash_and_trackers(magnet: str) -> tuple[bytes, list[str]]:
@@ -1169,7 +1477,9 @@ def _magnet_info_hash_and_trackers(magnet: str) -> tuple[bytes, list[str]]:
     return info_hash, trackers
 
 
-def _build_announce_url(tracker: str, info_hash: bytes, peer_id: bytes, event: str) -> str:
+def _build_announce_url(
+    tracker: str, info_hash: bytes, peer_id: bytes, event: str
+) -> str:
     separator = "&" if "?" in tracker else "?"
     params = {
         "info_hash": quote_from_bytes(info_hash),
@@ -1182,28 +1492,37 @@ def _build_announce_url(tracker: str, info_hash: bytes, peer_id: bytes, event: s
         "event": event,
         "numwant": "20",
     }
-    return tracker + separator + "&".join(f"{key}={value}" for key, value in params.items())
+    return (
+        tracker
+        + separator
+        + "&".join(f"{key}={value}" for key, value in params.items())
+    )
 
 
 def _http_get_bytes(url: str, timeout: int) -> bytes:
-    request = urllib.request.Request(
+    # Only HTTP(S) tracker URLs accepted by _magnet_info_hash_and_trackers reach here.
+    request = urllib.request.Request(  # noqa: S310
         url,
         headers={"User-Agent": "Transmission/4.1.1"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        if response.status >= 400:
-            raise RuntimeError(f"HTTP {response.status}")
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        if response.status >= HTTPStatus.BAD_REQUEST:
+            error_message = f"HTTP {response.status}"
+            raise RuntimeError(error_message)
         return response.read()
 
 
-def _announce_stopped_best_effort(tracker: str, info_hash: bytes, peer_id: bytes) -> None:
-    try:
-        _http_get_bytes(_build_announce_url(tracker, info_hash, peer_id, "stopped"), timeout=2)
-    except Exception:
-        pass
+def _announce_stopped_best_effort(
+    tracker: str, info_hash: bytes, peer_id: bytes
+) -> None:
+    # A cleanup failure must not mask an otherwise successful availability probe.
+    with suppress(Exception):
+        _http_get_bytes(
+            _build_announce_url(tracker, info_hash, peer_id, "stopped"), timeout=2
+        )
 
 
-def _announce_result(alive: bool, reason: str) -> dict[str, Any]:
+def _announce_result(*, alive: bool, reason: str) -> dict[str, Any]:
     return {
         "checked": True,
         "alive": alive,
@@ -1239,7 +1558,8 @@ def _bdecode(data: bytes, offset: int = 0) -> tuple[Any, int]:
         start = colon + 1
         end = start + length
         return data[start:end], end
-    raise ValueError("Invalid bencode response")
+    error_message = "Invalid bencode response"
+    raise ValueError(error_message)
 
 
 def _bvalue_text(payload: dict[Any, Any], key: bytes) -> str:
@@ -1265,7 +1585,7 @@ def _peers_count(peers: Any) -> int:
 async def _remove_transmission_test_torrents(
     hass: HomeAssistant, session: aiohttp.ClientSession, remove_ids: list[int]
 ) -> None:
-    for attempt in range(3):
+    for attempt in range(_REMOVE_ATTEMPTS):
         try:
             await _transmission_rpc(
                 hass,
@@ -1273,12 +1593,23 @@ async def _remove_transmission_test_torrents(
                 "torrent_remove",
                 {"ids": remove_ids, "delete_local_data": True},
             )
-            return
         except Exception as err:  # noqa: BLE001
-            if attempt == 2:
+            if attempt == _REMOVE_ATTEMPTS - 1:
                 _LOGGER.warning("Failed to remove RuTracker.org test torrents: %s", err)
                 return
             await asyncio.sleep(2)
+        else:
+            return
+
+
+def _tracker_stat_has_peers(tracker: dict[str, Any]) -> bool:
+    for key in ("seederCount", "leecherCount", "lastAnnouncePeerCount"):
+        try:
+            if int(tracker.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
 
 
 def _torrent_looks_alive(torrent: dict[str, Any]) -> bool:
@@ -1289,12 +1620,8 @@ def _torrent_looks_alive(torrent: dict[str, Any]) -> bool:
     if int(torrent.get("rateDownload") or 0) > 0:
         return True
     for tracker in torrent.get("trackerStats") or []:
-        for key in ("seederCount", "leecherCount", "lastAnnouncePeerCount"):
-            try:
-                if int(tracker.get(key) or 0) > 0:
-                    return True
-            except (TypeError, ValueError):
-                pass
+        if _tracker_stat_has_peers(tracker):
+            return True
     return False
 
 
@@ -1320,22 +1647,25 @@ async def _transmission_rpc(
 
     for _attempt in range(2):
         async with session.post(url, json=payload, headers=headers) as resp:
-            if resp.status == 409:
+            if resp.status == HTTPStatus.CONFLICT:
                 sid = resp.headers.get("X-Transmission-Session-Id", "")
                 if not sid:
-                    raise RuntimeError("Transmission RPC did not provide a session id")
+                    error_message = "Transmission RPC did not provide a session id"
+                    raise RuntimeError(error_message)
                 hass.data[DOMAIN]["transmission_session_id"] = sid
                 headers["X-Transmission-Session-Id"] = sid
                 await resp.read()
                 continue
             text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(f"Transmission RPC HTTP {resp.status}: {text[:200]}")
+            if resp.status >= HTTPStatus.BAD_REQUEST:
+                error_message = f"Transmission RPC HTTP {resp.status}: {text[:200]}"
+                raise RuntimeError(error_message)
             data = json.loads(text)
             if "error" in data:
                 raise RuntimeError(data["error"])
             return data
-    raise RuntimeError("Transmission RPC session negotiation failed")
+    error_message = "Transmission RPC session negotiation failed"
+    raise RuntimeError(error_message)
 
 
 def _rpc_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -1359,8 +1689,9 @@ async def _http_get_text(
     timeout = aiohttp.ClientTimeout(total=25)
     async with session.get(url, headers=headers, timeout=timeout) as resp:
         body = await resp.read()
-        if resp.status >= 400:
-            raise RuntimeError(f"HTTP {resp.status}")
+        if resp.status >= HTTPStatus.BAD_REQUEST:
+            error_message = f"HTTP {resp.status}"
+            raise RuntimeError(error_message)
         return _decode_http_body(body, resp.headers.get("Content-Type", ""))
 
 
@@ -1368,8 +1699,9 @@ async def _http_get_text_clean(cfg: dict[str, Any], url: str) -> str:
     return await asyncio.to_thread(_http_get_text_urllib, cfg, url)
 
 
-def _http_get_text_urllib(cfg: dict[str, Any], url: str) -> str:
-    request = urllib.request.Request(
+def _http_get_text_urllib(_cfg: dict[str, Any], url: str) -> str:
+    # This retry follows a prior aiohttp HTTP response for the same topic URL.
+    request = urllib.request.Request(  # noqa: S310
         url,
         headers={
             "User-Agent": FALLBACK_USER_AGENT,
@@ -1377,10 +1709,11 @@ def _http_get_text_urllib(cfg: dict[str, Any], url: str) -> str:
             "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
         },
     )
-    with urllib.request.urlopen(request, timeout=25) as response:
+    with urllib.request.urlopen(request, timeout=25) as response:  # noqa: S310
         body = response.read()
-        if response.status >= 400:
-            raise RuntimeError(f"HTTP {response.status}")
+        if response.status >= HTTPStatus.BAD_REQUEST:
+            error_message = f"HTTP {response.status}"
+            raise RuntimeError(error_message)
         return _decode_http_body(body, response.headers.get("Content-Type", ""))
 
 
@@ -1388,7 +1721,10 @@ def _decode_http_body(body: bytes, content_type: str) -> str:
     encoding = "utf-8"
     if "charset=" in content_type:
         encoding = content_type.rsplit("charset=", 1)[1].split(";", 1)[0].strip()
-    elif b"windows-1251" in body[:1000].lower() or b"charset=cp1251" in body[:1000].lower():
+    elif (
+        b"windows-1251" in body[:1000].lower()
+        or b"charset=cp1251" in body[:1000].lower()
+    ):
         encoding = "cp1251"
     try:
         return body.decode(encoding, errors="replace")
@@ -1410,7 +1746,9 @@ def _parse_topic_rows(text: str, forum_id: int | None, source: str) -> list[Cand
         title = _extract_title_from_row(row, topic_id)
         if not title:
             continue
-        row_forum_id = forum_id if forum_id is not None else _extract_forum_id_from_row(row)
+        row_forum_id = (
+            forum_id if forum_id is not None else _extract_forum_id_from_row(row)
+        )
         candidates.append(
             Candidate(
                 topic_id=topic_id,
@@ -1435,10 +1773,10 @@ def _parse_topic_rows(text: str, forum_id: int | None, source: str) -> list[Cand
 def _extract_forum_id_from_row(row: str) -> int | None:
     patterns = [
         r'href=["\'][^"\']*viewforum\.php\?f=(\d+)',
-        r'\bf=(\d+)\b',
+        r"\bf=(\d+)\b",
     ]
     for pattern in patterns:
-        match = re.search(pattern, row, flags=re.I)
+        match = re.search(pattern, row, flags=re.IGNORECASE)
         if match:
             return int(match.group(1))
     return None
@@ -1446,11 +1784,11 @@ def _extract_forum_id_from_row(row: str) -> int | None:
 
 def _extract_title_from_row(row: str, topic_id: str) -> str:
     patterns = [
-        rf'<a[^>]+class=["\'][^"\']*(?:topictitle|tLink|torTopic)[^"\']*["\'][^>]*>(.*?)</a>',
+        r'<a[^>]+class=["\'][^"\']*(?:topictitle|tLink|torTopic)[^"\']*["\'][^>]*>(.*?)</a>',
         rf'<a[^>]+href=["\'][^"\']*viewtopic\.php\?t={re.escape(topic_id)}[^"\']*["\'][^>]*>(.*?)</a>',
     ]
     for pattern in patterns:
-        matches = re.findall(pattern, row, flags=re.I | re.S)
+        matches = re.findall(pattern, row, flags=re.IGNORECASE | re.DOTALL)
         if matches:
             title = _strip_tags(matches[-1])
             if title:
@@ -1459,14 +1797,18 @@ def _extract_title_from_row(row: str, topic_id: str) -> str:
 
 
 def _extract_size(row: str) -> str:
-    match = re.search(r'<a[^>]+class=["\'][^"\']*dl-stub[^"\']*["\'][^>]*>(.*?)</a>', row, re.I | re.S)
+    match = re.search(
+        r'<a[^>]+class=["\'][^"\']*dl-stub[^"\']*["\'][^>]*>(.*?)</a>',
+        row,
+        re.IGNORECASE | re.DOTALL,
+    )
     if match:
         return _strip_tags(match.group(1))
     return ""
 
 
 def _extract_magnet(text: str) -> str:
-    match = re.search(r'magnet:\?xt=urn:btih:[^"\'<\s]+', text, re.I)
+    match = re.search(r'magnet:\?xt=urn:btih:[^"\'<\s]+', text, re.IGNORECASE)
     if not match:
         return ""
     return html.unescape(match.group(0)).replace("&amp;", "&")
@@ -1475,17 +1817,17 @@ def _extract_magnet(text: str) -> str:
 def _extract_count(text: str, label: str) -> int | None:
     patterns = [
         rf'title=["\']{re.escape(label)}["\'][^>]*>\s*([0-9]+)',
-        rf'class=["\'][^"\']*(?:seed|leech)[^"\']*["\'][^>]*>\s*([0-9]+)',
+        r'class=["\'][^"\']*(?:seed|leech)[^"\']*["\'][^>]*>\s*([0-9]+)',
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, flags=re.I)
+        match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             return int(match.group(1))
     return None
 
 
 def _strip_tags(value: str) -> str:
-    value = re.sub(r"<wbr\s*/?>", "", value, flags=re.I)
+    value = re.sub(r"<wbr\s*/?>", "", value, flags=re.IGNORECASE)
     value = re.sub(r"<[^>]+>", " ", value)
     value = html.unescape(value).replace("\xa0", " ")
     return re.sub(r"\s+", " ", value).strip()
@@ -1498,7 +1840,7 @@ async def _async_read_cookie_header(hass: HomeAssistant, cfg: dict[str, Any]) ->
 
 def _read_cookie_header(path: str) -> str:
     try:
-        content = open(path, encoding="utf-8").read().strip()
+        content = Path(path).read_text(encoding="utf-8").strip()
     except OSError:
         return ""
     if not content:
@@ -1510,7 +1852,7 @@ def _read_cookie_header(path: str) -> str:
         if not line or line.startswith("#"):
             continue
         fields = line.split("\t")
-        if len(fields) >= 7:
+        if len(fields) >= _NETSCAPE_COOKIE_FIELDS:
             parts.append(f"{fields[5]}={fields[6]}")
     return "; ".join(parts)
 
@@ -1521,14 +1863,18 @@ def _read_env_values(path: str) -> dict[str, str]:
     except OSError:
         return {}
     values: dict[str, str] = {}
-    for line in content.splitlines():
-        line = line.strip()
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        if (
+            len(value) >= _MIN_QUOTED_LENGTH
+            and value[0] == value[-1]
+            and value[0] in {"'", '"'}
+        ):
             value = value[1:-1]
         values[key] = value
     return values
@@ -1536,7 +1882,21 @@ def _read_env_values(path: str) -> dict[str, str]:
 
 def _should_retry_without_cookies(err: RuntimeError) -> bool:
     message = str(err)
-    retryable_statuses = {403, 429, 500, 502, 503, 520, 521, 522, 523, 524, 525, 526, 530}
+    retryable_statuses = {
+        403,
+        429,
+        500,
+        502,
+        503,
+        520,
+        521,
+        522,
+        523,
+        524,
+        525,
+        526,
+        530,
+    }
     match = re.search(r"HTTP\s+(\d+)", message)
     return bool(match and int(match.group(1)) in retryable_statuses)
 
@@ -1547,46 +1907,53 @@ def _append_note_once(notes: list[str], note: str) -> None:
 
 
 def _summarize_failures(label: str, failures: list[str]) -> str:
-    preview = "; ".join(failures[:3])
-    suffix = "" if len(failures) <= 3 else f"; +{len(failures) - 3} more"
-    return f"{label} failed for {len(failures)} forum(s); using fallback. {preview}{suffix}"
+    preview = "; ".join(failures[:_FAILURE_PREVIEW_COUNT])
+    suffix = (
+        ""
+        if len(failures) <= _FAILURE_PREVIEW_COUNT
+        else f"; +{len(failures) - _FAILURE_PREVIEW_COUNT} more"
+    )
+    return (
+        f"{label} failed for {len(failures)} forum(s); "
+        f"using fallback. {preview}{suffix}"
+    )
 
 
 def _write_cookie_header(path: str, cookie_header: str) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(cookie_header.strip() + "\n", encoding="utf-8")
-    try:
+    with suppress(OSError):
         target.chmod(0o600)
-    except OSError:
-        pass
 
 
 def _count_cookies(cookie_header: str) -> int:
-    return sum(
-        1
-        for part in cookie_header.split(";")
-        if part.strip() and "=" in part
-    )
+    return sum(1 for part in cookie_header.split(";") if part.strip() and "=" in part)
 
 
 def _html_attr(attrs: str, name: str) -> str:
     match = re.search(
         rf"\b{re.escape(name)}\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
         attrs,
-        flags=re.I,
+        flags=re.IGNORECASE,
     )
     if not match:
         return ""
     value = match.group(1).strip()
-    if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+    if (
+        len(value) >= _MIN_QUOTED_LENGTH
+        and value[0] in {"'", '"'}
+        and value[-1] == value[0]
+    ):
         value = value[1:-1]
     return html.unescape(value)
 
 
 def _form_inputs(text: str) -> dict[str, str]:
     data: dict[str, str] = {}
-    for match in re.finditer(r"<input\b(?P<attrs>[^>]*)>", text, flags=re.I | re.S):
+    for match in re.finditer(
+        r"<input\b(?P<attrs>[^>]*)>", text, flags=re.IGNORECASE | re.DOTALL
+    ):
         attrs = match.group("attrs")
         name = _html_attr(attrs, "name")
         if not name:
@@ -1599,7 +1966,7 @@ def _login_form_action(text: str, login_url: str) -> str:
     for match in re.finditer(
         r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>",
         text,
-        flags=re.I | re.S,
+        flags=re.IGNORECASE | re.DOTALL,
     ):
         body = match.group("body")
         if "login_password" not in body and 'type="password"' not in body.lower():
@@ -1681,12 +2048,15 @@ def _topic_id_from_text(value: str) -> str:
 
 def _tokens(value: str) -> list[str]:
     normalized = _norm(value)
-    return [token for token in normalized.split() if len(token) >= 2]
+    return [
+        token for token in normalized.split() if len(token) >= _MIN_QUERY_TOKEN_LENGTH
+    ]
 
 
 def _norm(value: str) -> str:
-    value = value.lower().replace("ё", "е")
-    value = re.sub(r"[^0-9a-zа-я]+", " ", value, flags=re.I)
+    # These Cyrillic characters intentionally normalize Russian search terms.
+    value = value.lower().replace("ё", "е")  # noqa: RUF001
+    value = re.sub(r"[^0-9a-zа-я]+", " ", value, flags=re.IGNORECASE)  # noqa: RUF001
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -1704,27 +2074,37 @@ def _looks_like_requested_media(item: Candidate, media_type: str) -> bool:
     return any(marker in normalized for marker in ["сезон", "серии", "сериал"])
 
 
-def _score(item: Candidate, tokens: list[str]) -> float:
-    title = _norm(item.title)
+def _query_match_score(title: str, tokens: list[str]) -> float:
     score = 0.0
     if all(token in title for token in tokens):
         score += 50
     phrase = " ".join(tokens)
     if phrase and phrase in title:
         score += 40
+    return score
+
+
+def _score(item: Candidate, tokens: list[str]) -> float:
+    title = _norm(item.title)
+    score = _query_match_score(title, tokens)
     if item.forum_id in (842, 1803, 2366):
         score += 10
     if item.approved is True:
         score += 8
     if item.seeders is not None:
         score += min(25, math.log(item.seeders + 1) * 7)
-    if "сезоны" in title or re.search(r"\bсезон\s+1\s+\d{1,2}\b", title):
+    # Existing Cyrillic season/episode markers are part of the scoring contract.
+    if "сезоны" in title or re.search(r"\bсезон\s+1\s+\d{1,2}\b", title):  # noqa: RUF001
         score += 25
-    if re.search(r"\bсерии\s+1\s+\d{3}\b", title):
+    if re.search(r"\bсерии\s+1\s+\d{3}\b", title):  # noqa: RUF001
         score += 10
-    if any(word in title for word in ["web dl", "webdl", "web dlrip", "web-dl", "hdtv"]):
+    if any(
+        word in title for word in ["web dl", "webdl", "web dlrip", "web-dl", "hdtv"]
+    ):
         score += 5
-    if any(word in title for word in ["1080", "2160", "uhd", "hdr", "blu ray", "bdrip"]):
+    if any(
+        word in title for word in ["1080", "2160", "uhd", "hdr", "blu ray", "bdrip"]
+    ):
         score += 8
     if any(word in title for word in ["camrip", "ts", "telesync", "sample", "trailer"]):
         score -= 30
