@@ -15,8 +15,8 @@
           "tv_cast_entity_id": "Chromecast media player",
           "tv_androidtv_entity_id": "Android TV Remote media player",
           "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
-          "tv_kodi_entity_id": "Kodi media player",
-          "tv_source_entity_id": "Current television source helper"
+          "tv_kodi_entity_id": "Kodi for the projector",
+          "tv_source_entity_id": "Legacy source helper"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
@@ -26,8 +26,8 @@
           "tv_cast_entity_id": "Optional. Playback status and controls for cast sessions.",
           "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
           "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
-          "tv_kodi_entity_id": "Optional. Kodi controls when the television source is pc or kodi. Selecting the separate projector does not change television playback controls.",
-          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast."
+          "tv_kodi_entity_id": "Optional. Kodi paired with the projector's power and playback controls.",
+          "tv_source_entity_id": "Retained for compatibility. Leave empty for new setups; controls follow the selected remote target."
         }
       },
       "reconfigure": {
@@ -43,8 +43,8 @@
           "tv_cast_entity_id": "Chromecast media player",
           "tv_androidtv_entity_id": "Android TV Remote media player",
           "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
-          "tv_kodi_entity_id": "Kodi media player",
-          "tv_source_entity_id": "Current television source helper"
+          "tv_kodi_entity_id": "Kodi for the projector",
+          "tv_source_entity_id": "Legacy source helper"
         },
         "data_description": {
           "projector_on_script": "Leave empty to use the existing Projector turn on script.",
@@ -54,8 +54,8 @@
           "tv_cast_entity_id": "Optional. Playback status and controls for cast sessions.",
           "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
           "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
-          "tv_kodi_entity_id": "Optional. Kodi controls when the television source is pc or kodi. Selecting the separate projector does not change television playback controls.",
-          "tv_source_entity_id": "Optional. Existing text helper with chromecast, pc, projector, kodi, or tv. Leave empty to use Chromecast."
+          "tv_kodi_entity_id": "Optional. Kodi paired with the projector's power and playback controls.",
+          "tv_source_entity_id": "Retained for compatibility. Leave empty for new setups; controls follow the selected remote target."
         }
       }
     },

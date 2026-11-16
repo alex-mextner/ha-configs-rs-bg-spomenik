@@ -41,7 +41,7 @@ Power requests share a pending task until feedback or a 75-second deadline. Repe
 
 Source, volume, mute, channel and media requests are forwarded through public HA services to the selected native backend. The supported feature mask is limited to its existing capabilities. Native ON/OFF services are never called. If passive feedback is unknown but the native backend still reports on, its non-power controls remain usable; a known passive off state takes precedence. The adapter does not improve or claim physical verification of native non-power commands.
 
-The adapter attaches to the already validated public `Entity.device_entry`, preserving the original Samsung device ID, ownership, area, name and connections. In this HA version, registering the same identifiers through another config entry would create a separate device. Its unique ID is `<ekf_entry_id>_samsung_<native_unique_id>`. Rename the native player to a technical backend first, select that backend in reconfigure, then assign the adapter the original canonical player ID through HA's entity-registry API. Keep the native remote and existing scripts. No device merge, registry-file edit, or deletion is required. The separate `packages/samsung_tv_ekf.yaml` marks the canonical TV as slow for Alice; it does not change the existing power automation.
+The adapter attaches to the already validated public `Entity.device_entry`, preserving the original Samsung device ID, ownership, area, name and connections. In this HA version, registering the same identifiers through another config entry would create a separate device. Its unique ID is `<ekf_entry_id>_samsung_<native_unique_id>`. Rename the native player to a technical backend first, select that backend in reconfigure, then assign the adapter the original canonical player ID through HA's entity-registry API. Keep the native remote and existing scripts. No device merge, registry-file edit, or deletion is required. Home-specific Alice execution metadata is configured separately from this adapter.
 
 ## Stable identities and migration
 
@@ -87,6 +87,10 @@ Health/Filter is disabled in every Haier frame, including OFF. The unsupported C
 ## Fixed media pairs
 
 The living-room TV is permanently paired with its Chromecast, and the projector with Kodi. Remote targeting is independent of these links: a temporary projector or native-menu mode cannot change the TV's playback owner. The canonical television selects only its active Music Assistant queue, Google Cast session or Android TV Remote backend. Kodi is never a TV playback or volume fallback.
+
+The existing `tv_kodi_entity_id` key selects the projector's Kodi partner.
+The optional `tv_source_entity_id` field is retained for configuration compatibility;
+new setups can leave it empty. Remote mode is selected through the canonical target.
 
 Power synchronization watches two independent observations for each pair. Samsung uses the matching passive identity endpoint; Chromecast uses Android TV Remote's pushed on/off state. Google Cast's off/idle playback state is never used as hardware power. The projector uses its matching HDMI display and Kodi uses the authenticated host bridge GET /kodi/status, which reports the actual systemd unit/process state. A loaded inactive/failed unit with a valid zero MainPID is OFF only when an independent Kodi process probe also confirms absence. Supervisor failure/result/exit status remain separate diagnostics; a normal SIGTERM shutdown can leave the wrapper at exit 143. Transitional units, inconsistent process evidence, malformed/read failures, stale polls, and network outages remain unknown.
 

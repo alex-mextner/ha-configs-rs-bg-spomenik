@@ -75,6 +75,8 @@ jobs:
           python3 -m pip install -r requirements/remote-routing-ci.txt
           mkdir -p .cache/test-results
           # Exercise the published host interfaces alongside the routing adapters.
+          # Private native T9 uses the pinned fork's ha-remote-contracts workflow.
+          # That private run is also required at this exact public candidate SHA.
           PYTHONPATH="$PWD:$PWD/scripts:$PWD/scripts/host:$PWD/tests/ekf_appliances:$PWD/docker/chatgpt-web" python3 -m pytest -q --import-mode=importlib \
             --junitxml=.cache/test-results/remote-routing.xml \
             tests/ekf_appliances/test_config_flow.py \
