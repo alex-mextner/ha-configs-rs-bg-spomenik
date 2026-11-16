@@ -35,7 +35,7 @@ def load_adapter() -> Any:
 
 
 class FakeItem:
-    """Exercise FakeItem contracts without a real Kodi process."""
+    """Record ListItem properties and call a supplied property callback."""
 
     def __init__(self, label="", path="", callback=None) -> None:
         self.label = label
@@ -101,15 +101,15 @@ class AdapterTests(unittest.TestCase):
         self.module.xbmcplugin.setResolvedUrl = self.resolved
         self.module.xbmcgui.ListItem = FakeItem
 
-    def set_generation(self, value) -> Any:
+    def set_generation(self, value) -> None:
         (self.state / "current-request.json").write_text(
             json.dumps({"request_id": value})
         )
 
-    def save_descriptor(self) -> Any:
+    def save_descriptor(self) -> None:
         (self.directory / "descriptor.json").write_text(json.dumps(self.descriptor))
 
-    def change_manifest(self, payload) -> Any:
+    def change_manifest(self, payload) -> None:
         self.manifest.write_bytes(payload)
         self.descriptor["manifest_sha256"] = hashlib.sha256(payload).hexdigest()
         self.save_descriptor()
@@ -141,7 +141,7 @@ class AdapterTests(unittest.TestCase):
         self.resolved.assert_not_called()
 
     def test_generation_change_at_last_property_cannot_resolve(self) -> None:
-        def change_generation(key) -> Any:
+        def change_generation(key) -> None:
             if key == "inputstream.adaptive.manifest_headers":
                 self.set_generation(str(uuid4()))
 

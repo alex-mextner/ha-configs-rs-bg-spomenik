@@ -328,6 +328,8 @@ class OwnedPlayback:
             return self._publish(current)
         if self._defer_absence(current, grace=grace):
             return self._publish(current)
+        # Recheck the value immediately before cleanup. This detects an external
+        # mode edit made while the first observation was in flight.
         latest = self._read(deadline)
         if latest["foreign_player"]:
             return self._publish(latest, error="foreign_player_active")
@@ -339,6 +341,8 @@ class OwnedPlayback:
         receipt = {**self._owner, "phase": "restoring"}
         self._persist(receipt)
         self._owner = receipt
+        # A durable write may block. An external mode/content change during it
+        # must win over this older cleanup intent.
         latest = self._read(deadline)
         if latest["foreign_player"]:
             return self._publish(latest, error="foreign_player_active")

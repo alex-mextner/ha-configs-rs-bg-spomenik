@@ -5,6 +5,6 @@
   "dependencies": [],
   "documentation": "https://rutracker.org/forum",
   "iot_class": "cloud_polling",
-  "requirements": [],
+  "requirements": ["defusedxml==0.7.1"],
   "version": "0.1.0"
 }

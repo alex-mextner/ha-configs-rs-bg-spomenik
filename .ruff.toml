@@ -2,6 +2,18 @@
 
 target-version = "py313"
 
+# The pinned 3D integration is maintained in its separate repository.
+# Exact aliases expose the same upstream bytes; parent policy applies to
+# first-party files. See docs/ruff-source-ownership.md.
+extend-exclude = [
+    "./3d-cli",
+    "scripts/u1_gcode_index.py",
+    "scripts/u1_ghost.py",
+    "scripts/u1_mjpeg_proxy.py",
+    "scripts/u1_print_inspector.py",
+    "scripts/u1_share.py"
+]
+
 [lint]
 select = [
     "ALL",
@@ -54,10 +66,15 @@ ignore = [
 # The installed system service executes this stable hyphenated script path.
 # Renaming it as an importable module would change the deployment interface.
 "scripts/host/ha-host-actions.py" = ["N999"]
+"scripts/host/ha-mdns-publish.py" = ["N999"]
 
 # Kodi loads this entry point by path inside its addon-ID directory,
 # rather than importing that dotted directory as a Python package.
 "scripts/host/kodi/plugin.video.hayoutube/default.py" = ["INP001"]
+
+# Pytest rewrites these assertions; this standalone module is collected by path
+# with importlib mode, without making the host-check directory a Python package.
+"tests/test_baseline_input_boundaries.py" = ["S101", "INP001"]
 
 [lint.flake8-pytest-style]
 fixture-parentheses = false

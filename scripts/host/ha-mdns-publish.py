@@ -1,25 +1,35 @@
 #!/usr/bin/env python3
-from zeroconf import Zeroconf, ServiceInfo, IPVersion
-import socket, time, signal, sys, struct
+"""Publish Home Assistant's current host address through multicast DNS."""
+
+import signal
+import socket
+import sys
+import time
+
+from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 
-def get_primary_ip():
+
+def get_primary_ip() -> str:
+    """Return the local address selected for the host's outbound route."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(1)
     try:
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        return ip
+        return s.getsockname()[0]
     finally:
         s.close()
+
 
 local_ip = get_primary_ip()
 
 zc = Zeroconf(ip_version=IPVersion.V4Only)
 
-def make_service_info(ip, port=8123):
+
+def make_service_info(ip: str, port: int = 8123) -> ServiceInfo:
+    """Describe the existing Home Assistant multicast service."""
     return ServiceInfo(
         "_home-assistant._tcp.local.",
         "Home Assistant._home-assistant._tcp.local.",
@@ -28,6 +38,7 @@ def make_service_info(ip, port=8123):
         properties={},
         server="homeassistant.local.",
     )
+
 
 info = make_service_info(local_ip)
 zc.register_service(info)

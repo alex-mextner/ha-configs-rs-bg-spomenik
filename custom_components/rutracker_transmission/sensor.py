@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import DOMAIN, SIGNAL_RESULTS_UPDATED
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 
 async def async_setup_platform(
@@ -18,6 +22,7 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up the RuTracker.org results sensor."""
+    del config, discovery_info  # Preserve the public callback parameter names.
     async_add_entities([RuTrackerResultsSensor(hass)])
 
 
@@ -29,6 +34,7 @@ class RuTrackerResultsSensor(SensorEntity):
     _attr_icon = "mdi:movie-search"
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Initialize the result count and empty search-state attributes."""
         self._hass = hass
         self._attr_native_value = 0
         self._attr_extra_state_attributes = {

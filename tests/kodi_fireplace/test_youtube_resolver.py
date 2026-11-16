@@ -100,12 +100,12 @@ class ResolverTests(unittest.TestCase):
         self.transport_patch.start()
         self.addCleanup(self.transport_patch.stop)
 
-    def set_generation(self, request_id) -> Any:
+    def set_generation(self, request_id) -> None:
         (self.state / "current-request.json").write_text(
             json.dumps({"request_id": request_id})
         )
 
-    def set_selection(self, active=None, pending=None, phase="preparing") -> Any:
+    def set_selection(self, active=None, pending=None, phase="preparing") -> None:
         records = {}
         for role, attempt_id in (("active", active), ("pending", pending)):
             identity = None
@@ -133,7 +133,7 @@ class ResolverTests(unittest.TestCase):
             )
         )
 
-    def transport(self, _request, **_kwargs: Any) -> Any:
+    def transport(self, _request, **_kwargs: Any) -> io.BytesIO:
         return io.BytesIO(
             json.dumps(
                 {
@@ -162,7 +162,7 @@ class ResolverTests(unittest.TestCase):
             "android_testsuite",
         )
 
-    def build_fixture(self, formats, *, hdr) -> Any:
+    def build_fixture(self, formats, *, hdr) -> str:
         self.assertEqual(formats, [self.video, self.audio])
         self.assertFalse(hdr)
         owner = json.loads(
@@ -263,7 +263,7 @@ class ResolverTests(unittest.TestCase):
             self.resolve()
         self.builder.manifest.assert_not_called()
 
-    def make_owned_request(self, request_id, age) -> Any:
+    def make_owned_request(self, request_id, age) -> Path:
         directory = self.state / "requests" / request_id
         directory.mkdir(parents=True)
         (directory / "owner.json").write_text(

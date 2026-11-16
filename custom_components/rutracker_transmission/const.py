@@ -16,7 +16,8 @@ DEFAULT_COOKIES_FILE = "/config/.storage/rutracker.cookies"
 DEFAULT_TRANSMISSION_HOST = "172.20.0.1"
 DEFAULT_TRANSMISSION_PORT = 9091
 DEFAULT_TRANSMISSION_PATH = "/transmission/rpc"
-DEFAULT_TEST_DOWNLOAD_DIR = "/tmp/ha-rutracker-check"
+# Configurable Transmission RPC download destination, not a local HA temp file.
+DEFAULT_TEST_DOWNLOAD_DIR = "/tmp/ha-rutracker-check"  # noqa: S108
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "

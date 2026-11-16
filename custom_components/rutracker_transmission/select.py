@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
 
 from .const import DOMAIN, SIGNAL_RESULTS_UPDATED, SIGNAL_SELECTION_UPDATED
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 NO_RESULTS = "No results"
 
@@ -23,6 +28,7 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up the RuTracker.org result selector."""
+    del config, discovery_info  # Preserve the public callback parameter names.
     async_add_entities([RuTrackerResultSelect(hass)])
 
 
@@ -34,10 +40,12 @@ class RuTrackerResultSelect(SelectEntity):
     _attr_icon = "mdi:playlist-check"
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Retain the Home Assistant instance containing search state."""
         self._hass = hass
 
     @property
     def options(self) -> list[str]:
+        """Build option labels for the current search results."""
         results = _results(self._hass)
         if not results:
             return [NO_RESULTS]
@@ -45,6 +53,7 @@ class RuTrackerResultSelect(SelectEntity):
 
     @property
     def current_option(self) -> str | None:
+        """Return the selected result label or the first available option."""
         options = self.options
         selected = str(self._hass.data.get(DOMAIN, {}).get("selected_result_id") or "")
         if selected:

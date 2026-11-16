@@ -25,7 +25,8 @@ import xbmcvfs
 MANIFEST_BASE_URL = "http://172.20.0.1:8787/kodi/youtube/manifest"
 PRIVATE_FILE_MODE = 0o600
 LOG_ACTIVE_GRACE_SECONDS = 120
-LOG_DIRECTORY = Path("/tmp")  # noqa: S108 - private owned log directory
+# Log files are uniquely named, mode 0600 and owned; /tmp itself is shared.
+LOG_DIRECTORY = Path("/tmp")  # noqa: S108
 MAX_TOKEN_BYTES = 4096
 MAX_DESCRIPTOR_BYTES = 64 * 1024
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
