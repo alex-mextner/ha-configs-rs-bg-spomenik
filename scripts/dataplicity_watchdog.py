@@ -10,6 +10,7 @@ Cron runs this script every five minutes as ultra and appends output to
 /tmp/dataplicity_watchdog.log.
 """
 
+import contextlib
 import json
 import logging
 import time
@@ -89,8 +90,7 @@ def probe(url: str) -> tuple[bool, str, float]:
             return ok, str(resp.status), time.monotonic() - started
     except urllib.error.HTTPError as exc:
         return False, str(exc.code), time.monotonic() - started
-    except Exception as exc:
-        _LOGGER.exception("External manifest probe failed")
+    except Exception as exc:  # noqa: BLE001 - probe failures are data.
         return False, type(exc).__name__, time.monotonic() - started
 
 
@@ -110,8 +110,7 @@ def _reload_outage(entry: str, url: str, code: str, record: dict) -> None:
             },
         )
         record["action"] = "reloaded"
-    except Exception as exc:
-        _LOGGER.exception("Dataplicity reload failed")
+    except Exception as exc:  # noqa: BLE001 - the failure is recorded as data.
         record["action"] = f"reload failed: {exc}"
 
 
@@ -134,10 +133,8 @@ def main() -> None:
     if ok:
         if state.get("down_since"):
             record["outage_minutes"] = round((now - state["down_since"]) / 60, 1)
-            try:
+            with contextlib.suppress(Exception):
                 ha("persistent_notification/dismiss", {"notification_id": NID})
-            except Exception:
-                _LOGGER.exception("Recovery notification dismissal failed")
         state = {"fails": 0}
     else:
         state["fails"] = state.get("fails", 0) + 1

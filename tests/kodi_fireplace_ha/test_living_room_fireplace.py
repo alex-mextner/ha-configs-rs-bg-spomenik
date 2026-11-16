@@ -83,6 +83,9 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.calls, self.scripts = [], {}
         self.completed, self.last_trace = [], []
         self.power_failure = False
+        self.projector_refresh_attributes = None
+        self.projector_refresh_error = False
+        self.projector_refresh_states = []
         self.power_release = asyncio.Event()
         self.power_release.set()
         self.power_entered = asyncio.Event()
@@ -195,7 +198,35 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             )
         return {"status": self.rest_status, "content": response}
 
+    def refresh_projector(self) -> None:
+        """Publish the existing pair without changing power or inventing support."""
+        if self.projector_refresh_error:
+            error_message = "Projector publication failed"
+            raise HomeAssistantError(error_message)
+        current = self.hass.states.get(PROJECTOR)
+        if self.projector_refresh_attributes is not None and current is not None:
+            self.hass.states.async_set(
+                PROJECTOR, current.state, self.projector_refresh_attributes
+            )
+        current = self.hass.states.get(PROJECTOR)
+        self.projector_refresh_states.append(
+            {
+                "projector": current.state if current is not None else None,
+                "revision": current.attributes.get("power_intent_revision")
+                if current is not None
+                else None,
+                "kodi": self.hass.states.get(KODI).state,
+                "hdmi": self.hass.states.get(
+                    "binary_sensor.projector_hdmi_connected"
+                ).state,
+                "kodi_service": self.hass.states.get("sensor.kodi_service_state").state,
+                "power_calls": self.counter,
+            }
+        )
+
     async def refresh_readiness(self, call) -> None:
+        if PROJECTOR in call.data.get("entity_id", []):
+            self.refresh_projector()
         if READINESS not in call.data.get("entity_id", []):
             return
         # A separate HA readback must not inherit the REST response's verdict.
@@ -310,6 +341,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.calls,
             [
+                ("homeassistant.update_entity", {"entity_id": [PROJECTOR]}),
                 ("script.source_to_pc", {}),
                 (
                     "rest_command.host_kodi_fireplace",
@@ -320,6 +352,51 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(self.completed, [True])
+
+    async def test_cold_off_pair_is_published_before_a_native_yandex_launch(
+        self,
+    ) -> None:
+        # The internal pair already exists; HA has not published its attributes.
+        attributes = dict(self.hass.states.get(PROJECTOR).attributes)
+        self.projector_refresh_attributes = attributes
+        self.hass.states.async_set(PROJECTOR, "off", dict.fromkeys(attributes))
+        self.hass.states.async_set(KODI, "off")
+        await self.launch(None)
+        self.assertEqual(self.completed, [True])
+        self.assertEqual(
+            self.projector_refresh_states,
+            [
+                {
+                    "projector": "off",
+                    "revision": "epoch:0",
+                    "kodi": "off",
+                    "hdmi": "off",
+                    "kodi_service": "off",
+                    "power_calls": 0,
+                }
+            ],
+        )
+        self.assertEqual(
+            self.calls[:2],
+            [
+                ("homeassistant.update_entity", {"entity_id": [PROJECTOR]}),
+                ("script.source_to_pc", {}),
+            ],
+        )
+        self.assertEqual(len(self.launches()), 1)
+        self.assertIsInstance(self.current_request, str)
+
+    async def test_failed_projector_refresh_never_changes_power(self) -> None:
+        self.projector_refresh_error = True
+        with self.assertRaises(HomeAssistantError):
+            await self.launch(None)
+        self.assertEqual(
+            self.calls,
+            [("homeassistant.update_entity", {"entity_id": [PROJECTOR]})],
+        )
+        self.assertFalse(self.launches())
+        self.assertEqual(self.counter, 0)
+        self.assertEqual(self.hass.states.get(PROJECTOR).state, "off")
 
     async def test_pair_failure_never_opens_media(self) -> None:
         self.power_failure = True
@@ -498,4 +575,9 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
                     self.hass.states.async_set(missing, "unavailable")
                 await self.launch("missing-power-contract")
                 self.assert_aborted()
-                self.assertEqual(self.calls, [])
+                self.assertEqual(
+                    self.calls,
+                    [("homeassistant.update_entity", {"entity_id": [PROJECTOR]})],
+                )
+                self.assertEqual(self.counter, 0)
+                self.assertFalse(self.launches())

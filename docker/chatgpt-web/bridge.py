@@ -398,8 +398,7 @@ async def visible(locator: Locator) -> bool:
         for i in range(await locator.count()):
             if await locator.nth(i).is_visible():
                 return True
-    except Exception:
-        log.exception("Page visibility probe failed")
+    except Exception:  # noqa: BLE001 - a transient page failure means not visible.
         return False
     return False
 
@@ -408,8 +407,7 @@ async def readiness(page: Page) -> str:
     """Report the page's observed sign-in, challenge, or composer state."""
     try:
         title = await page.title()
-    except Exception:
-        log.exception("Page title is not yet readable")
+    except Exception:  # noqa: BLE001 - navigation may leave the title unreadable.
         return "loading"
     if CHALLENGE.search(title) or await visible(page.get_by_text(CHALLENGE)):
         return "challenge_required"
@@ -511,8 +509,8 @@ class Browser:
                     if reload:
                         last_reload = time.monotonic()
                     await self.refresh_state(reload=reload)
-            except Exception:
-                log.exception("Browser state monitor failed")
+            except Exception as exc:  # noqa: BLE001 - keep monitoring on failure.
+                log.warning("monitor: %s", exc)
 
     def chat_url(self) -> str:
         """Build the chat URL using the configured model and temporary mode."""
@@ -626,8 +624,8 @@ class Browser:
                     if copies and copies[-1].strip():
                         return copies[-1]
                     await asyncio.sleep(0.1)
-        except Exception:
-            log.exception("Copy button unavailable; using the rendered text")
+        except Exception as exc:  # noqa: BLE001 - use the rendered-text fallback.
+            log.info("copy button unavailable (%s); using the rendered text", exc)
         return await answer.evaluate(DOM_MARKDOWN)
 
     async def complete(self, messages: list[dict], tools: list[dict] | None) -> dict:
@@ -704,8 +702,8 @@ class Notifier:
                     json=payload,
                     headers={"Authorization": f"Bearer {self.ha_token}"},
                 )
-        except Exception:
-            log.exception("HA notification failed")
+        except Exception as exc:  # noqa: BLE001 - notifications are best effort.
+            log.warning("HA notify failed: %s", exc)
 
     async def state_changed(self, state: str) -> None:
         """Create or dismiss notifications for the observed browser state."""
@@ -900,8 +898,7 @@ def make_app(browser: Browser, api_key: str) -> web.Application:
     async def chat(request: web.Request) -> web.StreamResponse:
         try:
             body = await request.json()
-        except Exception:
-            log.exception("Request JSON could not be decoded")
+        except Exception:  # noqa: BLE001 - reject invalid client input quietly.
             return error(400, "Body must be JSON.", "invalid_request_error")
         messages, tools = body.get("messages") or [], body.get("tools") or []
         if body.get("tool_choice") == "none":

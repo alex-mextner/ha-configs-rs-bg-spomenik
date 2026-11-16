@@ -53,6 +53,11 @@ script:
           # caller strings into numbers when rendering scalar templates.
           fireplace_request: >-
             {{ {'id': request_id | default(now().strftime('%Y%m%dT%H%M%S%f') ~ '-' ~ (range(100000) | random), true) | string} }}
+      # Publish an existing pair after cold startup before testing its contract.
+      # A refresh does not issue a power intent; unavailable pairs still fail below.
+      - action: homeassistant.update_entity
+        target:
+          entity_id: media_player.projector
       - if: >-
           {{ state_attr('media_player.projector', 'power_intent_revision') is none
              or states('binary_sensor.projector_hdmi_connected') in ['unknown', 'unavailable']

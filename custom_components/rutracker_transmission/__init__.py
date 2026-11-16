@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import json
 import logging
@@ -1149,7 +1150,7 @@ async def _prepare_verification_candidate(
         item.downloadable = True
         item.disabled_reason = ""
         return None
-    try:
+    with contextlib.suppress(Exception):
         await _transmission_rpc(
             hass,
             session,
@@ -1162,8 +1163,6 @@ async def _prepare_verification_candidate(
                 "uploadLimit": 1,
             },
         )
-    except Exception:
-        _LOGGER.exception("Could not limit temporary verification torrent rates")
     return torrent_id
 
 
@@ -1498,12 +1497,10 @@ def _http_get_bytes(url: str, timeout: int) -> bytes:
 def _announce_stopped_best_effort(
     tracker: str, info_hash: bytes, peer_id: bytes
 ) -> None:
-    try:
+    with contextlib.suppress(Exception):
         _http_get_bytes(
             _build_announce_url(tracker, info_hash, peer_id, "stopped"), timeout=2
         )
-    except Exception:
-        _LOGGER.exception("Best-effort tracker stop announcement failed")
 
 
 def _announce_result(*, alive: bool, reason: str) -> dict[str, Any]:

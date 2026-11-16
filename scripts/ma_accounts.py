@@ -529,10 +529,7 @@ class Tool:
         if not self.dry:
             try:
                 await self.cmd("config/providers/remove", instance_id=instance)
-            except Exception as err:
-                _LOGGER.exception(
-                    "Provider removal did not complete"
-                )  # already gone is fine
+            except Exception as err:  # noqa: BLE001 - already gone is fine.
                 print(f"  ({err})")
 
     async def _remove_ma_user(self, entry: dict[str, Any]) -> None:
