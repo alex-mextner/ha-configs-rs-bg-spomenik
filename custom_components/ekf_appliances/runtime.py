@@ -312,6 +312,12 @@ class ApplianceRuntime:
         self, *, target: bool | None, observed: bool | None
     ) -> None:
         """Run the physical sequence, then wait for confirmation without guessing."""
+        # A pair worker may still carry the earlier remote ON's context. Only an
+        # accepted OFF owns the confirmation frames needed to finish shutdown.
+        # Keep the caller context and the final guard on ON/unknown transitions.
+        token = UNIVERSAL_PROJECTOR_COMMAND.set(
+            target is not False and UNIVERSAL_PROJECTOR_COMMAND.get()
+        )
         try:
             timeout = (
                 PROJECTOR_SHUTDOWN_TIMEOUT
@@ -348,6 +354,8 @@ class ApplianceRuntime:
                 raise HomeAssistantError(error_message) from err
             # A raw press from unknown state has no inferred target. Keep the
             # guard for the whole transition window, then allow another press.
+        finally:
+            UNIVERSAL_PROJECTOR_COMMAND.reset(token)
 
     async def _async_wait_for_projector_feedback(self, *, target: bool | None) -> None:
         ready = asyncio.Event()
