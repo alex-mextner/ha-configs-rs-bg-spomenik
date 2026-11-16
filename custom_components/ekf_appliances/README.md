@@ -94,9 +94,18 @@ new setups can leave it empty. Remote mode is selected through the canonical tar
 
 The packaged remote uses this home's canonical wrapper IDs
 `media_player.ue48j5500_ue48j5500` and `media_player.projector`, together with
-`sensor.universal_remote_target`. Native backend and playback-source renames
-are tracked through the entity registry. Renaming a canonical wrapper or helper
-requires updating the corresponding house-package references as well.
+`sensor.universal_remote_target`. With the Samsung adapter configured, its
+registry listener updates the EKF config entry's own backend and playback-source
+references. This does not rewrite package service targets or rebind every active
+state subscription.
+
+`packages/universal_remote.yaml` also names `media_player.home`,
+`remote.televizor`, `remote.ue48j5500_ue48j5500`,
+`media_player.ue48j5500_ue48j5500_network`, and `button.projector_*` directly.
+Renaming these entities, a canonical wrapper, or a helper requires coordinated
+updates to the corresponding house-package references. The projector subscribes
+to its Kodi entity when the EKF entry loads; after changing that entity ID,
+reload the EKF entry once the config-entry and YAML references are updated.
 
 Power synchronization watches two independent observations for each pair. Samsung uses the matching passive identity endpoint; Chromecast uses Android TV Remote's pushed on/off state. Google Cast's off/idle playback state is never used as hardware power. The projector uses its matching HDMI display and Kodi uses the authenticated host bridge GET /kodi/status, which reports the actual systemd unit/process state. A loaded inactive/failed unit with a valid zero MainPID is OFF only when an independent Kodi process probe also confirms absence. Supervisor failure/result/exit status remain separate diagnostics; a normal SIGTERM shutdown can leave the wrapper at exit 143. Transitional units, inconsistent process evidence, malformed/read failures, stale polls, and network outages remain unknown.
 

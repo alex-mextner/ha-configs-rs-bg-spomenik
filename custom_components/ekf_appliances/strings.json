@@ -27,7 +27,7 @@
           "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
           "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
           "tv_kodi_entity_id": "Optional. Kodi paired with the projector's power and playback controls.",
-          "tv_source_entity_id": "Retained for compatibility. Leave empty for new setups; controls follow the selected remote target."
+          "tv_source_entity_id": "Unused compatibility field. Leave empty for new setups. The universal remote has its own target; this field does not change television playback controls."
         }
       },
       "reconfigure": {
@@ -55,7 +55,7 @@
           "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
           "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
           "tv_kodi_entity_id": "Optional. Kodi paired with the projector's power and playback controls.",
-          "tv_source_entity_id": "Retained for compatibility. Leave empty for new setups; controls follow the selected remote target."
+          "tv_source_entity_id": "Unused compatibility field. Leave empty for new setups. The universal remote has its own target; this field does not change television playback controls."
         }
       }
     },
