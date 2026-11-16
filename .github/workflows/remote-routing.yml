@@ -75,7 +75,7 @@ jobs:
           python3 -m pip install -r requirements/remote-routing-ci.txt
           mkdir -p .cache/test-results
           # Exercise the published host interfaces alongside the routing adapters.
-          PYTHONPATH="$PWD:$PWD/scripts:$PWD/scripts/host:$PWD/tests/ekf_appliances" python3 -m pytest -q --import-mode=importlib \
+          PYTHONPATH="$PWD:$PWD/scripts:$PWD/scripts/host:$PWD/tests/ekf_appliances:$PWD/docker/chatgpt-web" python3 -m pytest -q --import-mode=importlib \
             --junitxml=.cache/test-results/remote-routing.xml \
             tests/ekf_appliances/test_config_flow.py \
             tests/ekf_appliances/test_feedback_freshness.py \
@@ -109,7 +109,10 @@ jobs:
             tests/ekf_appliances/test_universal_remote_yaml_contract.py \
             tests/submodule_updates/test_yaml_validation.py \
             tests/test_remote_announcements.py \
-            tests/test_remote_announcements_ha.py
+            tests/test_remote_announcements_ha.py \
+            docker/chatgpt-web/test_bridge.py \
+            tests/test_rutracker_compatibility.py \
+            tests/test_legacy_helper_contracts.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
