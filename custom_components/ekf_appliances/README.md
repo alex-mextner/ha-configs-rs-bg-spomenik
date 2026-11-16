@@ -102,8 +102,10 @@ state subscription.
 `packages/universal_remote.yaml` also names `media_player.home`,
 `remote.televizor`, `remote.ue48j5500_ue48j5500`,
 `media_player.ue48j5500_ue48j5500_network`, and `button.projector_*` directly.
-Renaming these entities, a canonical wrapper, or a helper requires coordinated
-updates to the corresponding house-package references. The projector subscribes
+Renaming these backend entities requires coordinated updates to their config-entry
+and house-package references. The canonical wrapper/helper IDs are also used
+directly by the integration and must remain fixed unless those integration
+references and the house packages are updated together. The projector subscribes
 to its Kodi entity when the EKF entry loads; after changing that entity ID,
 reload the EKF entry once the config-entry and YAML references are updated.
 
