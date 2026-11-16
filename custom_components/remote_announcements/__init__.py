@@ -235,6 +235,7 @@ class Manager:
             old
             and old.state in PHRASES
             and state.state in PHRASES
+            and state.state != "speaker"
             and old.attributes.get("initialized") is True
             and state.attributes.get("initialized") is True
             and old.attributes.get("lease_until")

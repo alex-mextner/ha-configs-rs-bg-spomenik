@@ -515,6 +515,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         submit.assert_not_called()
         self.assertEqual(self.manager.generation, generation)
 
+    async def test_audio_mode_ignores_input_lease_end_and_announces_exit(self) -> None:
+        await self.track_target_lease(lease=30.0)
+        generation = self.manager.generation
+        # Hold the debounce worker while inspecting the actual pending entry.
+        with (
+            patch.object(self.manager.queue, "_run", AsyncMock()),
+            patch.object(
+                self.manager.queue, "submit", wraps=self.manager.queue.submit
+            ) as submit,
+        ):
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "speaker",
+                {"initialized": True, "lease_until": 30.0},
+            )
+            await self.hass.async_block_till_done()
+            submit.assert_called_once_with("speaker")
+            self.assertEqual(self.manager.generation, generation + 1)
+            self.assertEqual(self.manager.queue.pending, "speaker")
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "speaker",
+                {"initialized": True, "lease_until": None},
+            )
+            await self.hass.async_block_till_done()
+            submit.assert_called_once_with("speaker")
+            self.assertEqual(self.manager.generation, generation + 1)
+            self.assertEqual(self.manager.queue.pending, "speaker")
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "kodi",
+                {"initialized": True, "lease_until": None},
+            )
+            await self.hass.async_block_till_done()
+        self.assertEqual(submit.call_count, 2)
+        submit.assert_called_with("kodi")
+        self.assertEqual(self.manager.queue.pending, "kodi")
+        self.assertEqual(self.manager.generation, generation + 2)
+
     async def test_lease_startup_and_entity_creation_stay_quiet(self) -> None:
         await self.track_target_lease(lease=30.0, initialized=False)
         with patch.object(self.manager.queue, "submit") as submit:

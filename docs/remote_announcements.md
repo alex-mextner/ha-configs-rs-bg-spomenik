@@ -2,10 +2,13 @@
 
 The package follows confirmed changes of `sensor.universal_remote_target`:
 `chromecast`, `tv`, `kodi`, `projector`, `speaker`. Expiry of an initialized
-temporary mode announces the effective target once, including when that target
-stays the same as control returns to automatic mode. Renewing an active lease,
-startup, unavailable states and other repeated targets are quiet. Pending rapid
-changes coalesce; an active announcement gets its volume/queue recovery first.
+temporary input mode announces the effective target once, including when that
+target stays the same as control returns to automatic mode. While AUDIO mode
+keeps the target at `speaker`, expiry of the underlying input lease stays quiet
+and preserves any pending AUDIO-entry announcement. Leaving AUDIO mode announces
+the actual target change once. Renewing an active lease, startup, unavailable
+states and other repeated targets are quiet. Pending rapid changes coalesce; an
+active announcement gets its volume/queue recovery first.
 
 The fixed spoken labels match the requested remote names:
 
