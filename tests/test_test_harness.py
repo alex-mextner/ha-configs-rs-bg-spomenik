@@ -1,5 +1,5 @@
 # Copyright 2026 Project contributors
-# ruff: noqa: INP001, S101
+# ruff: noqa: S101
 """
 Regression checks for the repository-local test runner.
 

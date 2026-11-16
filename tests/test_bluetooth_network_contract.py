@@ -1,5 +1,4 @@
 # Copyright 2026 Project contributors
-# ruff: noqa: INP001, PT009, PT027
 """Host-network migration keeps DNS readiness and maintenance routing intact."""
 
 import importlib.util

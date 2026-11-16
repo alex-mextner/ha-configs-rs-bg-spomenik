@@ -1,5 +1,5 @@
 # Copyright 2026 Project contributors
-# ruff: noqa: INP001, PT009, PT027, FBT003
+# ruff: noqa: FBT003
 """A baseline exception cannot conceal new failures or a changed test inventory."""
 
 import importlib.util
