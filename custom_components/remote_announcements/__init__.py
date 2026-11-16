@@ -228,22 +228,37 @@ class Manager:
         state = self.hass.states.get(self.config["target_entity"])
         return state.state if state else "unknown"
 
+    @staticmethod
+    def lease_ended(old: State | None, state: State) -> bool:
+        """Recognize an initialized manual-to-automatic control transition."""
+        return bool(
+            old
+            and old.state in PHRASES
+            and state.state in PHRASES
+            and old.attributes.get("initialized") is True
+            and state.attributes.get("initialized") is True
+            and old.attributes.get("lease_until")
+            and state.attributes.get("lease_until") is None
+        )
+
     @callback
     def target_changed(self, event: Event[EventStateChangedData]) -> None:
-        """Queue confirmed route changes and invalidate older attempts."""
+        """Queue confirmed route changes or lease exits; invalidate older attempts."""
         state = event.data.get("new_state")
         old = event.data.get("old_state")
-        if self.closing:
+        if self.closing or state is None:
             return
-        if state and (old is None or state.state != old.state):
+        lease_ended = self.lease_ended(old, state)
+        if old is None or state.state != old.state or lease_ended:
             self.generation += 1
-        if state and (
-            state.attributes.get("initialized") is False
-            or (old and old.attributes.get("initialized") is False)
+        if (
+            old is None
+            or state.attributes.get("initialized") is False
+            or old.attributes.get("initialized") is False
         ):
             self.gate.changed(state.state)
             return
-        if state and self.gate.changed(state.state):
+        if self.gate.changed(state.state) or lease_ended:
             self.queue.submit(state.state)
 
     async def prepare(self) -> None:

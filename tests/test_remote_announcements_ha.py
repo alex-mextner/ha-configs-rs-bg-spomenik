@@ -467,6 +467,87 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await entity.async_added_to_hass()
         self.assertEqual(entity.current_option, "AISIS")
 
+    async def track_target_lease(
+        self, *, lease: float | None, initialized: bool = True
+    ) -> None:
+        self.hass.states.async_set(
+            CONFIG["target_entity"],
+            "chromecast",
+            {"initialized": initialized, "lease_until": lease},
+        )
+        await self.hass.async_block_till_done()
+        self.manager.gate.changed("chromecast")
+        unsubscribe = integration.async_track_state_change_event(
+            self.hass, [CONFIG["target_entity"]], self.manager.target_changed
+        )
+        self.addCleanup(unsubscribe)
+
+    async def test_lease_expiry_announces_unchanged_effective_target_once(self) -> None:
+        await self.track_target_lease(lease=30.0)
+        generation = self.manager.generation
+        with patch.object(self.manager.queue, "submit") as submit:
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "chromecast",
+                {"initialized": True, "lease_until": None},
+            )
+            await self.hass.async_block_till_done()
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "chromecast",
+                {"initialized": True, "lease_until": None, "pair": "kodi"},
+            )
+            await self.hass.async_block_till_done()
+        submit.assert_called_once_with("chromecast")
+        self.assertEqual(self.manager.generation, generation + 1)
+
+    async def test_lease_renewals_do_not_announce_or_invalidate_attempt(self) -> None:
+        await self.track_target_lease(lease=30.0)
+        generation = self.manager.generation
+        with patch.object(self.manager.queue, "submit") as submit:
+            for lease in (60.0, 90.0):
+                self.hass.states.async_set(
+                    CONFIG["target_entity"],
+                    "chromecast",
+                    {"initialized": True, "lease_until": lease},
+                )
+                await self.hass.async_block_till_done()
+        submit.assert_not_called()
+        self.assertEqual(self.manager.generation, generation)
+
+    async def test_lease_startup_and_entity_creation_stay_quiet(self) -> None:
+        await self.track_target_lease(lease=30.0, initialized=False)
+        with patch.object(self.manager.queue, "submit") as submit:
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "chromecast",
+                {"initialized": True, "lease_until": None},
+            )
+            await self.hass.async_block_till_done()
+            self.hass.states.async_remove(CONFIG["target_entity"])
+            await self.hass.async_block_till_done()
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "kodi",
+                {"initialized": True, "lease_until": None},
+            )
+            await self.hass.async_block_till_done()
+        submit.assert_not_called()
+        self.assertEqual(self.manager.gate.last, "kodi")
+
+    async def test_target_change_with_lease_expiry_queues_only_once(self) -> None:
+        await self.track_target_lease(lease=30.0)
+        generation = self.manager.generation
+        with patch.object(self.manager.queue, "submit") as submit:
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "kodi",
+                {"initialized": True, "lease_until": None},
+            )
+            await self.hass.async_block_till_done()
+        submit.assert_called_once_with("kodi")
+        self.assertEqual(self.manager.generation, generation + 1)
+
     async def test_startup_controller_reconciliation_is_quiet(self) -> None:
         self.manager.gate.changed("chromecast")
         self.manager.target_changed(
