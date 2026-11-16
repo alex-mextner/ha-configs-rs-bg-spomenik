@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 PHRASES = {
-    "chromecast": "Хромкаст.",
-    "tv": "Телевизор.",
-    "kodi": "Коди.",
-    "projector": "Проектор.",
+    "chromecast": "chrome cast.",
+    "tv": "TV.",
+    "kodi": "kodi.",
+    "projector": "проектор.",
     "speaker": "Колонка.",
 }
 VOICE_ID = "5cd1ffa5dbb4419cb5766435139c6d92"

@@ -127,6 +127,37 @@ class SelectionTests(unittest.TestCase):
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
     """Check cache persistence and announcement queue lifecycle."""
 
+    async def test_requested_labels_regenerate_only_changed_cache_entries(self) -> None:
+        """Preserve speaker audio while migrating the four exact requested labels."""
+        core = load_core()
+        calls = []
+
+        async def generate(text: str) -> tuple[bytes, float]:
+            calls.append(text)
+            return text.encode(), 0.6
+
+        old_phrases = {
+            "chromecast": "Хромкаст.",
+            "tv": "Телевизор.",
+            "kodi": "Коди.",
+            "projector": "Проектор.",
+            "speaker": "Колонка.",
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            old = core.ClipCache(
+                Path(folder), core.VOICE_ID, core.DEFAULT_TEMPO, old_phrases
+            )
+            await old.prepare(generate)
+            speaker_key = old.get("speaker").key
+            calls.clear()
+            current = core.ClipCache(Path(folder), core.VOICE_ID, core.DEFAULT_TEMPO)
+            await current.prepare(generate)
+            self.assertEqual(calls, ["chrome cast.", "TV.", "kodi.", "проектор."])
+            self.assertEqual(current.get("speaker").key, speaker_key)
+            calls.clear()
+            await current.prepare(generate)
+            self.assertEqual(calls, [])
+
     async def test_cache_generates_once_and_lookup_never_synthesizes(self) -> None:
         core = load_core()
         calls = []

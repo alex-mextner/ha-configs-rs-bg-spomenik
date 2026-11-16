@@ -5,6 +5,19 @@ The package follows confirmed changes of `sensor.universal_remote_target`:
 repeated targets are quiet. Pending rapid changes coalesce; an active announcement
 gets its volume/queue recovery first.
 
+The fixed spoken labels match the requested remote names:
+
+| Effective target | Spoken text |
+|---|---|
+| `chromecast` | `chrome cast.` |
+| `tv` | `TV.` |
+| `projector` | `проектор.` |
+| `kodi` | `kodi.` |
+| `speaker` | `Колонка.` |
+
+The text is part of the cache key. A label change prepares only that missing clip;
+unchanged labels retain their existing audio.
+
 The exact installed voice is **Брачо**, Fish reference
 `5cd1ffa5dbb4419cb5766435139c6d92`, entity `tts.bracho_bracho`. Missing or corrupt
 clips are generated at preparation/startup, then converted once to mono 48 kHz
