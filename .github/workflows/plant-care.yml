@@ -1,0 +1,52 @@
+name: Plant care
+
+on:
+  push:
+    branches: [main, feat/plant-care-yandex-main-20261118]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plant-care:
+    name: Plant care and Alice status
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+      - name: Exercise plant inference and native HA report actions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/ha-plant-care-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          trap 'rc=$?; printf "%s finished rc=%s elapsed=%ss log=%s\n" "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting commit=%s log=%s\n' "$(date -Is)" "$(git rev-parse HEAD)" "$task_log"
+          python3 -m pip install -r requirements/remote-routing-ci.txt
+          mkdir -p .cache/test-results
+          PYTHONPATH="$PWD" python3 -m pytest -q --import-mode=importlib \
+            --junitxml=.cache/test-results/plant-care.xml tests/plant_care_alerts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plant-care-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ha-plant-care-*.log
+            .cache/test-results/plant-care.xml
+          retention-days: 14

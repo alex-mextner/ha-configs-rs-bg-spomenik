@@ -1,0 +1,19 @@
+{
+  "domain": "plant_care_alerts",
+  "name": "Plant Care Alerts",
+  "after_dependencies": [
+    "adaptive_plant"
+  ],
+  "codeowners": [
+    "@alex-mextner"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "file_upload"
+  ],
+  "documentation": "https://github.com/alex-mextner/ha-configs-rs-bg-spomenik",
+  "iot_class": "local_push",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.2.0"
+}
