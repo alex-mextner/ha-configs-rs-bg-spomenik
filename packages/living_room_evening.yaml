@@ -1,0 +1,74 @@
+# Issue #65 follow-up: prepare the room with light jazz and a confirmed fireplace.
+# The installed EKF climate integration accepts mode and temperature together.
+script:
+  living_room_evening:
+    alias: Вечер
+    description: >-
+      Режим для осени и зимы: гирлянда, обогрев 22 °C, свет в гостиной,
+      лёгкий джаз на станции с громкостью 4 из 10 и камин на проекторе.
+    icon: mdi:weather-sunset
+    mode: single
+    sequence:
+      - alias: Включить гирлянду
+        continue_on_error: true
+        action: light.turn_on
+        target:
+          entity_id: light.girlianda
+      - alias: Включить обогрев 22 °C
+        continue_on_error: true
+        action: climate.set_temperature
+        target:
+          entity_id: climate.kondei_1
+        data:
+          hvac_mode: heat
+          temperature: 22
+      - alias: Включить свет в гостиной
+        continue_on_error: true
+        action: light.turn_on
+        target:
+          entity_id: light.gostinaia_globus_socket_1
+      - parallel:
+          - sequence:
+              - alias: Выбрать воспроизведение на самой станции
+                action: media_player.select_source
+                target:
+                  entity_id: media_player.yandex_station_m0011hm00z86hg
+                data:
+                  source: Станция
+              - alias: Установить громкость 4 из 10
+                action: media_player.volume_set
+                target:
+                  entity_id: media_player.yandex_station_m0011hm00z86hg
+                data:
+                  volume_level: 0.4
+              - alias: Включить спокойный лёгкий джаз
+                action: media_player.play_media
+                target:
+                  entity_id: media_player.yandex_station_m0011hm00z86hg
+                data:
+                  media_content_type: command
+                  media_content_id: Включи спокойный лёгкий джаз
+          - sequence:
+              - variables:
+                  evening_fireplace_request: >-
+                    {{ {'id': 'evening-' ~ now().strftime('%Y%m%dT%H%M%S%f') ~ '-' ~ (range(100000) | random)} }}
+              - alias: Включить камин на проекторе
+                action: script.living_room_fireplace
+                data:
+                  request_id: "{{ evening_fireplace_request.id }}"
+                response_variable: fireplace_response
+              - if: >-
+                  {{ fireplace_response is not mapping
+                     or fireplace_response.get('ok') is not true
+                     or fireplace_response.get('request_id') != evening_fireplace_request.id
+                     or not is_state('sensor.living_room_fireplace', 'playing')
+                     or state_attr('sensor.living_room_fireplace', 'request_id') != evening_fireplace_request.id }}
+                then:
+                  - stop: Камин не подтвердил успешное воспроизведение для этого запуска Вечера.
+                    error: true
+
+yandex_smart_home:
+  entity_config:
+    script.living_room_evening:
+      name: Вечер
+      room: Гостиная

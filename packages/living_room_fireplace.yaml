@@ -9,7 +9,7 @@ rest_command:
     content_type: application/json
     payload: >-
       {{ {'action': 'start', 'request_id': fireplace_request.id} | to_json }}
-    timeout: 60
+    timeout: 120
 
 rest:
   - resource: http://172.20.0.1:8787/kodi/fireplace
@@ -164,6 +164,11 @@ script:
         then:
           - stop: Kodi не подтвердил воспроизведение камина или команда питания изменилась.
             error: true
+      - variables:
+          fireplace_success: >-
+            {{ {'ok': true, 'request_id': fireplace_request.id} }}
+      - stop: Камин подтверждён.
+        response_variable: fireplace_success
 
 yandex_smart_home:
   entity_config:

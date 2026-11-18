@@ -267,14 +267,13 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
     def register_script(self, name, config) -> None:
         # Keep the real YAML and Script engine; only physical services are faked.
         sequence = short_timeouts(config["sequence"])
-        if name == "living_room_fireplace":
-            sequence.append({"action": "test.completed"})
         script = Script(
             self.hass,
             cv.SCRIPT_SCHEMA(sequence),
             name,
             "script",
             script_mode=config.get("mode", "single"),
+            max_runs=config.get("max", 10),
         )
         self.scripts[name] = script
 
@@ -282,7 +281,15 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             if stack := script_stack_cv.get():
                 script_stack_cv.set(stack.copy())
             result = await script.async_run(dict(call.data), context=call.context)
-            return result.service_response if result else None
+            response = result.service_response if result else None
+            if (
+                name == "living_room_fireplace"
+                and isinstance(response, dict)
+                and response.get("ok") is True
+                and response.get("request_id") == self.current_request
+            ):
+                self.completed.append(True)
+            return (response or {}) if call.return_response else None
 
         self.hass.services.async_register(
             "script", name, run, supports_response=SupportsResponse.OPTIONAL
@@ -502,6 +509,34 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         await self.launch()
         self.assert_aborted()
         self.assertEqual(len(self.launches()), 1)
+
+    async def test_success_response_preserves_numeric_looking_request_id(self) -> None:
+        response = await self.hass.services.async_call(
+            "script",
+            "living_room_fireplace",
+            {"request_id": "00001234"},
+            blocking=True,
+            return_response=True,
+            context=Context(),
+        )
+        self.assertEqual(response, {"ok": True, "request_id": "00001234"})
+        self.assertEqual(self.completed, [True])
+
+    async def test_final_guard_failure_has_no_success_response(self) -> None:
+        self.native_title = "a-different-video"
+        response = await self.hass.services.async_call(
+            "script",
+            "living_room_fireplace",
+            {"request_id": "final-guard-failure"},
+            blocking=True,
+            return_response=True,
+            context=Context(),
+        )
+        self.assertEqual(response, {})
+        self.assertEqual(self.completed, [])
+        sensor = self.hass.states.get(READINESS)
+        self.assertEqual(sensor.state, "playing")
+        self.assertEqual(sensor.attributes["request_id"], "final-guard-failure")
 
     async def test_yandex_name_is_projector_specific(self) -> None:
         entity = self.package["yandex_smart_home"]["entity_config"][

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 if TYPE_CHECKING:
     from types import FrameType, ModuleType
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import UUID
@@ -323,13 +324,39 @@ def smarttube_modules(home: Path) -> tuple[ModuleType, ...]:
     )
 
 
-def bounded_player_response(
-    video_id: str, url: str, data: bytes, headers: Any, timeout: float
+def log_player_request(
+    log: SafeLog | None, stage: str, started: float, error: Exception | None = None
+) -> None:
+    """Record only fixed stages, duration and exception type/status."""
+    if log is None:
+        return
+    message = f"{stage} elapsed_ms={round((time.monotonic() - started) * 1000)}"
+    if error is not None:
+        status = error.code if isinstance(error, HTTPError) else None
+        message += f" type={type(error).__name__} status={status}"
+    log.write(message)
+
+
+def bounded_player_response(  # noqa: PLR0913 - upstream callback plus optional diagnostics
+    video_id: str,
+    url: str,
+    data: bytes,
+    headers: Any,
+    timeout: float,
+    *,
+    log: SafeLog | None = None,
 ) -> bytes:
     """Bound upstream HTTP and verify identity before its parser drops videoId."""
-    request = Request(url, data=data, headers=headers, method="POST")  # noqa: S310 - pinned client owns HTTPS endpoints
-    with urlopen(request, timeout=min(timeout, PLAYER_TIMEOUT_SECONDS)) as response:  # noqa: S310 - pinned client owns HTTPS endpoints
-        raw = response.read(MAX_PLAYER_BYTES + 1)
+    started = time.monotonic()
+    log_player_request(log, "player_request_started", started)
+    try:
+        request = Request(url, data=data, headers=headers, method="POST")  # noqa: S310 - pinned client owns HTTPS endpoints
+        with urlopen(request, timeout=min(timeout, PLAYER_TIMEOUT_SECONDS)) as response:  # noqa: S310 - pinned client owns HTTPS endpoints
+            raw = response.read(MAX_PLAYER_BYTES + 1)
+    except (OSError, ValueError) as error:
+        log_player_request(log, "player_request_failed", started, error)
+        raise
+    log_player_request(log, "player_request_received", started)
     if len(raw) > MAX_PLAYER_BYTES:
         msg = "player_response_oversize"
         raise ResolveError(msg)
@@ -423,7 +450,7 @@ def prepare_smarttube(video_id: str, home: Path, log: SafeLog) -> dict[str, Any]
     """Use the maintained public client and MPD builder within caller cancellation."""
     inner, builder = smarttube_modules(home)
     log.write(f"runtime smarttube={SMARTTUBE_VERSION}")
-    opener = partial(bounded_player_response, video_id)
+    opener = partial(bounded_player_response, video_id, log=log)
     for info, client in inner.player_responses(video_id, opener=opener):
         prepared = build_smarttube_response(info, client, inner, builder)
         if prepared is not None:

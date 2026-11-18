@@ -29,6 +29,8 @@ VIRTUAL_FILE = "/__ha_verified_fireplace__"
 MINIMUM_CATALOG_SOURCES = 2
 OBSERVATION_MAX_AGE_SECONDS = 5.0
 PROGRESS_MAX_AGE_SECONDS = 5.0
+SOURCE_PREPARATION_TIMEOUT = 45.0
+LAUNCH_TIMEOUT = 100.0
 
 
 def utc() -> str:
@@ -104,6 +106,10 @@ class SourceUnavailableError(Exception):
     """Preparation failed without sending a playback command."""
 
 
+class SourceResolutionTimeoutError(SourceUnavailableError):
+    """Preparation exhausted its allowance before any playback command."""
+
+
 # Keep the public exception import used by existing callers.
 SourceUnavailable = SourceUnavailableError
 
@@ -135,9 +141,12 @@ def resolver_output(
     """Collect one resolver result while observing the shared deadline."""
     while True:
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or cancelled.is_set():
+        if cancelled.is_set():
             error_message = "youtube_deadline_or_cancelled"
             raise SourceUnavailable(error_message)
+        if remaining <= 0:
+            error_message = "source_resolution_timeout"
+            raise SourceResolutionTimeoutError(error_message)
         try:
             output, _ = process.communicate(timeout=min(0.2, remaining))
         except subprocess.TimeoutExpired:
@@ -194,7 +203,11 @@ def resolve_source(
             start_new_session=True,
         )
         target = json.loads(
-            resolver_output(process, min(deadline, time.monotonic() + 20), cancelled)
+            resolver_output(
+                process,
+                min(deadline, time.monotonic() + SOURCE_PREPARATION_TIMEOUT),
+                cancelled,
+            )
         )
         if not isinstance(target, dict) or not isinstance(target.get("file"), str):
             error_message = "youtube_invalid_result"
@@ -231,7 +244,7 @@ class RotatingFireplaceController:
         media_path: Path | str | None = None,
         expected_sha256: str | None = None,
         auto_monitor: bool = True,
-        operation_timeout: float = 50.0,
+        operation_timeout: float = LAUNCH_TIMEOUT,
         poll_interval: float = 0.1,
         progress_interval: float = 0.25,
         chooser: Callable[[list[dict[str, Any]]], None] | None = None,
@@ -657,6 +670,30 @@ class RotatingFireplaceController:
         self._publish(value)
         self.start_monitor()
 
+    def _preparation_diagnostic(
+        self,
+        stage: str,
+        started: float,
+        deadline: float,
+        *,
+        error_code: str | None = None,
+    ) -> None:
+        """Log fixed stages and IDs without media URLs, headers or stderr."""
+        pending = self._pending or {}
+        now = time.monotonic()
+        value = {
+            "at": utc(),
+            "stage": stage,
+            "request_id": pending.get("request_id"),
+            "attempt_id": pending.get("attempt_id"),
+            "source_id": pending.get("source_id"),
+            "source_kind": pending.get("source_kind"),
+            "elapsed_ms": round((now - started) * 1000),
+            "remaining_ms": round(max(0.0, deadline - now) * 1000),
+            "error": error_code,
+        }
+        print(json.dumps(value, sort_keys=True), file=sys.stderr, flush=True)  # noqa: T201
+
     def _prepare(
         self, source: dict[str, Any], request: dict[str, Any], deadline: float
     ) -> None:
@@ -673,17 +710,40 @@ class RotatingFireplaceController:
         self._store()
         self._set_generation(attempt_id)
         resolve_deadline = min(
-            deadline - min(3.0, self._timeout / 3), time.monotonic() + 20
+            deadline - min(3.0, self._timeout / 3),
+            time.monotonic() + SOURCE_PREPARATION_TIMEOUT,
         )
-        target = (
-            self._resolver(source, resolve_deadline)
-            if self._resolver
-            else resolve_source(source, resolve_deadline, attempt_id, self._cancelled)
+        started = time.monotonic()
+        self._preparation_diagnostic(
+            "source_preparation_started", started, resolve_deadline
         )
+        try:
+            target = (
+                self._resolver(source, resolve_deadline)
+                if self._resolver
+                else resolve_source(
+                    source, resolve_deadline, attempt_id, self._cancelled
+                )
+            )
+        except SourceUnavailable as error:
+            code = (
+                "source_resolution_timeout"
+                if isinstance(error, SourceResolutionTimeoutError)
+                else "source_resolution_cancelled"
+                if self._cancelled.is_set()
+                else "source_unavailable"
+            )
+            self._preparation_diagnostic(
+                "source_preparation_failed", started, resolve_deadline, error_code=code
+            )
+            raise
         self._check_deadline(deadline)
         if not isinstance(target, dict) or not isinstance(target.get("file"), str):
             error_message = "invalid_target"
             raise self.Error(error_message)
+        self._preparation_diagnostic(
+            "source_preparation_ready", started, resolve_deadline
+        )
         self._target = target
         self._pending.update(
             file_hash=file_hash(target["file"]),
@@ -794,6 +854,7 @@ class RotatingFireplaceController:
         starting: dict[str, Any],
         deadline: float,
     ) -> dict[str, Any]:
+        resolution_timed_out = opened_source = False
         for index, source in enumerate(candidates):
             self._check_cancelled()
             if time.monotonic() >= deadline:
@@ -801,9 +862,11 @@ class RotatingFireplaceController:
             try:
                 self._prepare(source, request, deadline)
                 opened = self._open_owned(deadline)
-            except SourceUnavailable:
+            except SourceUnavailable as error:
+                resolution_timed_out |= isinstance(error, SourceResolutionTimeoutError)
                 self._cancel_attempt()
                 continue
+            opened_source = True
             value = self._await_progress(
                 opened, deadline, final=index == len(candidates) - 1
             )
@@ -811,7 +874,11 @@ class RotatingFireplaceController:
                 return value
             self._publish(starting)
         self._check_cancelled()
-        error_message = "sources_unavailable"
+        error_message = (
+            "source_resolution_timeout"
+            if resolution_timed_out and not opened_source
+            else "sources_unavailable"
+        )
         raise self.Error(error_message)
 
     def start(self, request_id: str | None = None) -> dict[str, Any]:
