@@ -14,7 +14,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.tts import async_get_media_source_audio
 from homeassistant.components.tts.media_source import generate_media_source_id
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import callback
+from homeassistant.core import SupportsResponse, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry, discovery, entity_registry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -35,9 +35,11 @@ from .core import (
 )
 from .providers import (
     ProviderNotReadyError,
+    dialogs_command,
     dialogs_tag,
     load_settings,
     prepare_dialogs,
+    validate_native_response,
 )
 from .service_calls import ServiceCalls
 
@@ -406,8 +408,7 @@ class Manager:
     ) -> bool:
         """Call a media service within the remaining acknowledgement budget."""
         return await self.services.call(
-            "media_player",
-            service,
+            ("media_player", service),
             {"entity_id": entity, **data},
             deadline=deadline,
             guard=guard,
@@ -599,6 +600,17 @@ class Manager:
             and generation == self.generation
         )
 
+    def yandex_command(self, clip: Clip) -> dict[str, Any]:
+        """Require native response support before changing music or volume."""
+        if (
+            not self.hass.services.has_service("yandex_station", "send_command")
+            or self.hass.services.supports_response("yandex_station", "send_command")
+            is SupportsResponse.NONE
+        ):
+            message = "yandex_native_response_service_unavailable"
+            raise ProviderNotReadyError(message)
+        return dialogs_command(self.settings, clip.key)
+
     async def announce(self, target: str) -> None:
         """Dispatch the latest cached label and always attempt guarded recovery."""
         # Never queue stale speech after a later confirmed target has superseded it.
@@ -614,7 +626,7 @@ class Manager:
             raise ProviderNotReadyError(message)
         backend, entity = self.speaker()
         if backend == "yandex":
-            payload = dialogs_tag(self.settings, clip.key)
+            payload = self.yandex_command(clip)
         elif not self.aisis_ready():
             message = "needs_aisis_cache_install"
             raise ProviderNotReadyError(message)
@@ -628,18 +640,16 @@ class Manager:
                 self.update("superseded", target=target)
                 return
             if backend == "yandex":
-                sent = await self.call(
-                    "play_media",
-                    entity,
-                    media_content_type="text",
-                    media_content_id=payload,
+                sent = await self.services.call(
+                    ("yandex_station", "send_command"),
+                    {"entity_id": entity, **payload},
                     deadline=playback.work_deadline,
                     guard=lambda: self.is_current(target, generation),
+                    response_validator=validate_native_response,
                 )
             else:
                 sent = await self.services.call(
-                    "aisis_speaker",
-                    "speak",
+                    ("aisis_speaker", "speak"),
                     {
                         "duid": entity.removeprefix(
                             "media_player.aisis_speaker_"

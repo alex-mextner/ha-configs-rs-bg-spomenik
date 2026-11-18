@@ -20,7 +20,13 @@ from unittest.mock import patch
 import yaml
 from homeassistant import loader
 from homeassistant.config_entries import ConfigEntries
-from homeassistant.core import Context, HomeAssistant, State, SupportsResponse
+from homeassistant.core import (
+    Context,
+    HomeAssistant,
+    ServiceCall,
+    State,
+    SupportsResponse,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -1574,8 +1580,8 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             "dialogs": {
                 "skill_id": "11111111-1111-1111-1111-111111111111",
                 "sounds": {
-                    clip.key: "22222222-2222-2222-2222-222222222222"
-                    for clip in manager.cache.clips.values()
+                    clip.key: f"22222222-2222-2222-2222-{index:012d}"
+                    for index, clip in enumerate(manager.cache.clips.values())
                 },
             }
         }
@@ -1586,8 +1592,9 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             manager.target_changed,
         )
 
-        async def speak(call) -> None:
-            self.calls.append(("media_player.play_media", dict(call.data)))
+        async def speak(call: ServiceCall) -> dict[str, str]:
+            self.assertTrue(call.return_response)
+            self.calls.append(("yandex_station.send_command", dict(call.data)))
             entity = call.data["entity_id"]
             state = self.hass.states.get(entity)
             attrs = dict(state.attributes)
@@ -1598,8 +1605,14 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(
                 entity, state.state, {**attrs, "alice_state": "IDLE"}
             )
+            return {"status": "SUCCESS"}
 
-        self.hass.services.async_register("media_player", "play_media", speak)
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            speak,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
         return manager, component, unsubscribe
 
     async def test_audio_transitions_only_announce_the_committed_target(self) -> None:
@@ -1620,10 +1633,30 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 speech = [
                     data
                     for name, data in self.calls
-                    if name == "media_player.play_media"
+                    if name == "yandex_station.send_command"
                 ]
                 self.assertEqual(len(speech), 1)
-                self.assertIn("dialogs-upload/", speech[0]["media_content_id"])
+                sound = manager.settings["dialogs"]["sounds"][
+                    manager.cache.get(target).key
+                ]
+                expected_tag = (
+                    '<speaker audio="dialogs-upload/'
+                    f'11111111-1111-1111-1111-111111111111/{sound}.opus">'
+                )
+                self.assertEqual(speech[0]["command"], "serverAction")
+                slots = speech[0]["serverActionEventPayload"]["payload"]["form_update"][
+                    "slots"
+                ]
+                self.assertEqual(
+                    slots,
+                    [
+                        {
+                            "type": "string",
+                            "name": "phrase_to_repeat",
+                            "value": expected_tag,
+                        }
+                    ],
+                )
                 self.assertEqual(manager.status, "ready")
                 self.assertEqual(
                     [

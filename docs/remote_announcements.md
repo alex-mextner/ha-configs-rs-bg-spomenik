@@ -47,8 +47,14 @@ queue. Firmware controls music attenuation; a ducking level is not yet measured.
 then resume only unchanged original content if still paused.
 Both modes use a two-second controller budget, including preparation commands,
 speech completion and recovery. The controller reserves 0.6 seconds for recovery
-and limits each service acknowledgement to 0.4 seconds or the remaining budget.
-Speech completion waits use the cached duration plus 0.2 seconds. Music recovery
+and limits ordinary control acknowledgements to 0.4 seconds or the remaining
+budget. Yandex speech may wait for its native acknowledgement until the remaining
+work deadline; it cannot consume the recovery reserve or extend the total budget.
+The native response must contain `status: SUCCESS` and no error. Rejected,
+malformed or timed-out responses produce a fixed, nonprivate failure reason.
+Speech completion waits use the cached duration plus 0.2 seconds, also bounded by
+the remaining work deadline. A successful acknowledgement without an observed
+speech-completion event remains `sent_unconfirmed`. Music recovery
 runs independently of volume recovery, so a stalled volume acknowledgement does
 not hold the original music paused indefinitely. Every recovery call rechecks
 the original content or current volume before dispatch.
@@ -95,11 +101,19 @@ Token entry is hidden, with no token in shell history, chat or logs. The helper
 checks access and skill ownership, writes mode-0600 ignored `providers.json`, then
 calls `remote_announcements.prepare`. Add `--no-prepare` before component install.
 Preparation reuses matching resources, uploads missing clips once and waits for
-processing. Native playback uses `media_player.play_media`, type `text`:
+processing. Native playback uses the installed response-bearing
+`yandex_station.send_command` service and the same `repeat_phrase` form payload
+used by YandexStation's local text mode. The command contains only this verified
+cached tag:
 
 ```text
 <speaker audio="dialogs-upload/SKILL_UUID/SOUND_UUID.opus">
 ```
+
+The service must exist and support responses before the controller changes volume
+or pauses music. There is no alternate voice or generic-text fallback. A native
+`SUCCESS` response confirms command acknowledgement, not audible playback or
+physical latency; those require separate runtime evidence.
 
 Ordinary audio URLs are excluded: installed YandexStation uses `audio_play`,
 replaces selected media, and can replay the announcement when asked to resume.

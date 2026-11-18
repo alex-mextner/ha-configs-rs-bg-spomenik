@@ -113,6 +113,7 @@ jobs:
             tests/submodule_updates/test_yaml_validation.py \
             tests/test_remote_announcements.py \
             tests/test_remote_announcements_ha.py \
+            tests/test_remote_announcements_speech_ack.py \
             docker/chatgpt-web/test_bridge.py \
             tests/test_rutracker_compatibility.py \
             tests/test_health_watchdog.py \
