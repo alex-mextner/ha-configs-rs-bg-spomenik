@@ -120,13 +120,15 @@ actions:
                             tag: "{{ notification_tag }}"
                             url: "{{ dashboard_url }}"
                             clickAction: "{{ dashboard_url }}"
-                  - if: "{{ change_status == 'sensor_error' and notify_target != '' }}"
+                  - if: "{{ change_status == 'sensor_error' }}"
                     then:
-                      - action: "notify.{{ notify_target }}"
-                        data:
-                          message: clear_notification
-                          data:
-                            tag: "{{ notification_tag }}"
+                      - if: "{{ notify_target != '' }}"
+                        then:
+                          - action: "notify.{{ notify_target }}"
+                            data:
+                              message: clear_notification
+                              data:
+                                tag: "{{ notification_tag }}"
                       - action: plant_care_alerts.acknowledge
                         data:
                           entity_id: "{{ change_entity }}"
@@ -143,14 +145,20 @@ actions:
                     data:
                       notification_id: "{{ notification_tag }}"
                   - if: >-
-                      {{ notify_target != ''
-                         and trigger.event.data.get('previous') in ['due','overdue','sensor_error'] }}
+                      {{ trigger.event.data.get('clear', false)
+                         or trigger.event.data.get('previous') in ['due','overdue','sensor_error'] }}
                     then:
-                      - action: "notify.{{ notify_target }}"
+                      - if: "{{ notify_target != '' }}"
+                        then:
+                          - action: "notify.{{ notify_target }}"
+                            data:
+                              message: clear_notification
+                              data:
+                                tag: "{{ notification_tag }}"
+                      - action: plant_care_alerts.acknowledge
                         data:
-                          message: clear_notification
-                          data:
-                            tag: "{{ notification_tag }}"
+                          entity_id: "{{ change_entity }}"
+                          status: sensor_error
       - conditions:
           - condition: template
             value_template: >-

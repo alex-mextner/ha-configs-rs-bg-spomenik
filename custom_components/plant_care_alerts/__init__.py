@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 DOMAIN = "plant_care_alerts"
 RETRY_DELAYS = (60, 300, 900, 3600)
+CLEAR_STATUSES = {"sensor_error", "ok", "checking", "snoozed"}
 HISTORY_RETRY_SECONDS = 900
 HISTORY_DAYS = 14
 VOICE_START_HOUR = 8
@@ -112,8 +113,8 @@ def needs_notification(record: Any) -> bool:
 
 
 def needs_clear(record: dict[str, Any]) -> bool:
-    """Retry a failed phone clear while the plant remains in a sensor fault."""
-    return record.get("status") == "sensor_error" and bool(record.get("clear_pending"))
+    """Retry a pending phone clear while no current watering warning applies."""
+    return record.get("status") in CLEAR_STATUSES and bool(record.get("clear_pending"))
 
 
 def acknowledge_delivery(record: dict[str, Any], status: str) -> None:
@@ -496,18 +497,20 @@ class CareManager:
         """Publish a change; delivery remains pending until acknowledged."""
         current = self.records[entry_id]
         status = current["status"]
-        if status == "sensor_error" and (
+        if status in CLEAR_STATUSES and (
             previous in {"due", "overdue"}
             or current.get("notified_status") in {"due", "overdue"}
         ):
             current["clear_pending"] = True
         notify = needs_notification(current)
-        if notify or needs_clear(current):
+        clear = needs_clear(current)
+        if notify or clear:
             self.last_attempt[entry_id] = dt_util.utcnow().timestamp()
             current["delivery_attempts"] = current.get("delivery_attempts", 0) + 1
         if status == "ok" and current.get("due_since") is None:
             current["notified_status"] = None
-            current["delivery_attempts"] = 0
+            if not clear:
+                current["delivery_attempts"] = 0
         self.hass.bus.async_fire(
             "plant_care_status_changed",
             {
@@ -516,6 +519,7 @@ class CareManager:
                 "status": status,
                 "previous": previous,
                 "notify": notify,
+                "clear": clear,
             },
         )
         self.store.async_delay_save(lambda: self.records, 10)

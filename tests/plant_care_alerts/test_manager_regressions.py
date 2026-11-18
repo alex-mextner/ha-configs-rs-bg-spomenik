@@ -147,6 +147,69 @@ class TestManagerRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["status"], "due")
         self.assertTrue(event["notify"])
 
+    def test_failed_clear_after_recovery_retries_until_acknowledged(self) -> None:
+        fault = self.manager.records["a"]
+        fault["status"] = "sensor_error"
+        with patch(f"{MODULE}.dt_util.utcnow", return_value=self.now) as clock:
+            self.manager.emit_transition("a", "due")
+            self.assertTrue(fault["clear_pending"])
+
+            # The first clear failed; watering and a valid sample recover to ok.
+            clock.return_value = self.now + timedelta(seconds=1)
+            recovered_at = clock.return_value.timestamp()
+            current = evaluate(
+                fault,
+                {
+                    "has_sensor": True,
+                    "moisture": 80,
+                    "sample_at": recovered_at,
+                    "watered_at": recovered_at,
+                },
+                recovered_at,
+            )
+            self.manager.records["a"] = current
+            self.assertEqual(current["status"], "ok")
+            self.manager._publish_existing("a", fault, recovered_at, write_state=False)
+            self.assertTrue(current["clear_pending"])
+            self.assertEqual(current["delivery_attempts"], 2)
+
+            # The recovery clear also failed; unchanged ok still retries it.
+            self.manager._publish_existing(
+                "a", dict(current), recovered_at + 299, write_state=False
+            )
+            self.assertEqual(self.hass.bus.async_fire.call_count, 2)
+            clock.return_value += timedelta(seconds=300)
+            self.manager._publish_existing(
+                "a", dict(current), clock.return_value.timestamp(), write_state=False
+            )
+            self.assertEqual(self.hass.bus.async_fire.call_count, 3)
+            event = self.hass.bus.async_fire.call_args.args[1]
+            self.assertEqual(event["status"], "ok")
+            self.assertEqual(event["previous"], "ok")
+            self.assertTrue(event["clear"])
+            self.assertFalse(event["notify"])
+            self.assertEqual(current["delivery_attempts"], 3)
+
+            acknowledge_delivery(current, "sensor_error")
+            self.assertNotIn("clear_pending", current)
+            self.assertEqual(current["delivery_attempts"], 0)
+            self.manager._publish_existing(
+                "a", dict(current), recovered_at + 3600, write_state=False
+            )
+            self.assertEqual(self.hass.bus.async_fire.call_count, 3)
+
+            for status in ("ok", "checking", "snoozed"):
+                with self.subTest(direct_recovery=status):
+                    self.manager.records["a"] = {
+                        "status": status,
+                        "notified_status": None,
+                    }
+                    self.manager.emit_transition("a", "due")
+                    self.assertTrue(self.manager.records["a"]["clear_pending"])
+                    event = self.hass.bus.async_fire.call_args.args[1]
+                    self.assertTrue(event["clear"])
+                    self.assertFalse(event["notify"])
+
     async def test_explicit_reports_wait_for_a_coalesced_watering_refresh(self) -> None:
         callbacks = await self._register_callbacks()
         self.hass.data["adaptive_plant"] = {
