@@ -11,7 +11,13 @@ import yaml
 from homeassistant import auth, loader
 from homeassistant.components.input_select import InputSelect
 from homeassistant.config_entries import ConfigEntries
-from homeassistant.core import EVENT_STATE_CHANGED, Event, HomeAssistant, State
+from homeassistant.core import (
+    EVENT_STATE_CHANGED,
+    Event,
+    HomeAssistant,
+    State,
+    SupportsResponse,
+)
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame, restore_state
@@ -98,6 +104,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "play_media",
         ):
             self.hass.services.async_register("media_player", service, self.media)
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            self.native,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
 
     def apply_volume(self, attrs, volume) -> None:
         attrs["volume_level"] = volume
@@ -166,6 +178,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(entity, value, attrs)
         await self.acknowledge(call)
 
+    async def native(self, call) -> dict[str, str]:
+        self.calls.append((call.service, dict(call.data)))
+        entity = call.data["entity_id"]
+        state = self.hass.states.get(entity)
+        attrs, value = dict(state.attributes), state.state
+        if await self.simulate_speech(entity, value, attrs):
+            self.hass.states.async_set(entity, value, attrs)
+        await self.acknowledge(call)
+        return {"status": "SUCCESS"}
+
     async def asyncTearDown(self) -> None:
         await self.manager.queue.stop()
         await self.hass.async_stop(force=True)
@@ -175,11 +197,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.announce("tv")
         self.assertEqual(
             [name for name, data in self.calls],
-            ["volume_set", "play_media", "volume_set"],
+            ["volume_set", "send_command", "volume_set"],
         )
         data = self.calls[1][1]
-        self.assertEqual(data["media_content_type"], "text")
-        self.assertIn("dialogs-upload/", data["media_content_id"])
+        self.assertEqual(data["command"], "serverAction")
+        slot = data["serverActionEventPayload"]["payload"]["form_update"]["slots"][0]
+        self.assertIn("dialogs-upload/", slot["value"])
         state = self.hass.states.get(self.entity)
         self.assertEqual(state.attributes["media_content_id"], "original-track")
         self.assertEqual(state.attributes["volume_level"], 0.2)
@@ -302,7 +325,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lost_speech_ack_cannot_delay_volume_or_music_recovery(self) -> None:
         self.manager.config["music_mode"] = "pause"
-        hold = self.hold_ack["play_media"] = asyncio.Event()
+        hold = self.hold_ack["send_command"] = asyncio.Event()
         with (
             patch.object(integration, "ATTEMPT_BUDGET", 0.2),
             patch.object(integration, "RECOVERY_RESERVE", 0.08),
@@ -352,7 +375,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.ignore_cancellation = True
-        hold = self.hold_ack["play_media"] = asyncio.Event()
+        hold = self.hold_ack["send_command"] = asyncio.Event()
         try:
             with (
                 patch.object(integration, "ATTEMPT_BUDGET", 0.2),
@@ -407,6 +430,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.manager.config["music_mode"] = "pause"
         self.speech_gate = asyncio.Event()
         with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.2),
+            patch.object(integration, "RECOVERY_RESERVE", 0.08),
             patch.object(self.manager.services, "limit", 0.03),
             self.assertRaises(TimeoutError),
         ):
