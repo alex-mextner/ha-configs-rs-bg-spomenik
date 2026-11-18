@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.select import SelectEntity
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.core import callback
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import DOMAIN, SIGNAL_RESULTS_UPDATED, SIGNAL_SELECTION_UPDATED
 
@@ -18,9 +24,9 @@ NO_RESULTS = "No results"
 
 async def async_setup_platform(
     hass: HomeAssistant,
-    config: ConfigType,
+    config: ConfigType,  # noqa: ARG001 - Required HA platform setup signature.
     async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
+    discovery_info: DiscoveryInfoType | None = None,  # noqa: ARG001 - HA signature.
 ) -> None:
     """Set up the RuTracker.org result selector."""
     async_add_entities([RuTrackerResultSelect(hass)])
@@ -34,10 +40,12 @@ class RuTrackerResultSelect(SelectEntity):
     _attr_icon = "mdi:playlist-check"
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Retain the Home Assistant runtime used for result updates."""
         self._hass = hass
 
     @property
     def options(self) -> list[str]:
+        """Return current result labels or the established empty label."""
         results = _results(self._hass)
         if not results:
             return [NO_RESULTS]
@@ -45,6 +53,7 @@ class RuTrackerResultSelect(SelectEntity):
 
     @property
     def current_option(self) -> str | None:
+        """Resolve the selected result, falling back to the first available label."""
         options = self.options
         selected = str(self._hass.data.get(DOMAIN, {}).get("selected_result_id") or "")
         if selected:

@@ -11,7 +11,7 @@ on:
 jobs:
   ruff:
     name: "Ruff"
-    runs-on: "ubuntu-latest"
+    runs-on: "ubuntu-24.04"
     steps:
         - name: "Checkout the repository"
           uses: "actions/checkout@v6.0.2"
@@ -26,8 +26,37 @@ jobs:
         - name: "Install requirements"
           run: python3 -m pip install -r requirements/dev.txt
 
+        - name: "List owned Python files"
+          run: |
+            python3 - <<'PYTHON'
+            import os
+            from pathlib import Path
+            import subprocess
+
+            records = subprocess.check_output(["git", "ls-files", "--stage", "-z"])
+            paths = []
+            for record in records.split(b"\0"):
+                if not record:
+                    continue
+                metadata, _, name = record.partition(b"\t")
+                mode, _, stage = metadata.split()
+                if stage != b"0":
+                    raise SystemExit("Cannot lint an unmerged index")
+                if mode in {b"100644", b"100755"} and name.endswith(b".py"):
+                    path = Path(os.fsdecode(name))
+                    if path.is_symlink() or not path.is_file():
+                        raise SystemExit("An owned Python file is missing or has changed type")
+                    paths.append(name)
+            if not paths:
+                raise SystemExit("No owned Python files were found")
+            # Symlinks and gitlinks belong to their separately maintained repos.
+            destination = Path(os.environ["RUNNER_TEMP"]) / "owned-python-files"
+            destination.write_bytes(b"\0".join(paths) + b"\0")
+            print(f"Checking all {len(paths)} owned, tracked Python files")
+            PYTHON
+
         - name: "Lint"
-          run: python3 -m ruff check .
+          run: xargs -0 -r python3 -m ruff check -- < "$RUNNER_TEMP/owned-python-files"
 
         - name: "Format"
-          run: python3 -m ruff format . --check
+          run: xargs -0 -r python3 -m ruff format --check -- < "$RUNNER_TEMP/owned-python-files"

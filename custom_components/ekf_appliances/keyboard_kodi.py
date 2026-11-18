@@ -1,0 +1,468 @@
+"""
+Private Kodi keyboard provider using the existing native WS connection.
+
+Input.OnInputRequested.type is the only automatic field classification. Titles
+and initial values never enter HA events, service calls, states or logs here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import logging
+from contextlib import suppress
+from datetime import timedelta
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
+
+import aiohttp
+from homeassistant.core import callback
+from homeassistant.helpers import entity_registry
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+    from datetime import datetime
+
+    from homeassistant.core import HomeAssistant
+
+_LOGGER = logging.getLogger(__name__)
+_MAX_RESPONSE_BYTES = 131072
+_MAX_TEXT_UTF16_UNITS = 16_384
+_SAFE_ERRORS = {
+    "stale_revision",
+    "session_changed",
+    "not_focused",
+    "sensitive",
+    "unsupported",
+    "unconfirmed",
+    "conflict",
+    "unavailable",
+    "invalid_input",
+    "busy",
+}
+
+
+_ERROR_INVALID_INPUT = "invalid_input"
+_ERROR_UNAVAILABLE = "unavailable"
+_ERROR_NOT_FOCUSED = "not_focused"
+_ERROR_UNCONFIRMED = "unconfirmed"
+_ERROR_SESSION_CHANGED = "session_changed"
+_ERROR_UNSUPPORTED = "unsupported"
+
+
+class KodiKeyboardError(Exception):
+    """Expose only a fixed text-free error code from the host bridge."""
+
+    def __init__(self, code: str) -> None:
+        """Normalize host errors to the public safe error vocabulary."""
+        self.code = code if code in _SAFE_ERRORS else "unavailable"
+        super().__init__(self.code)
+
+
+def _text(value: Any) -> str:
+    if not isinstance(value, str) or "\x00" in value:
+        raise KodiKeyboardError(_ERROR_INVALID_INPUT)
+    try:
+        if len(value.encode("utf-16-le")) // 2 > _MAX_TEXT_UTF16_UNITS:
+            raise KodiKeyboardError(_ERROR_INVALID_INPUT)
+    except UnicodeError as exc:
+        raise KodiKeyboardError(_ERROR_INVALID_INPUT) from exc
+    return value
+
+
+def _validated_reply(reply: Any, status: int) -> dict:
+    if not isinstance(reply, dict):
+        raise KodiKeyboardError(_ERROR_UNAVAILABLE)
+    if status != HTTPStatus.OK or reply.get("ok") is not True:
+        raise KodiKeyboardError(reply.get("error", "unavailable"))
+    return reply
+
+
+def _blank(status: str = "idle") -> dict:
+    return {
+        "session_id": uuid4().hex,
+        "revision": 0,
+        "focused": status == "sensitive",
+        "sensitive": status == "sensitive",
+        "selection": None,
+        "capabilities": {
+            "edit": False,
+            "commit": False,
+            "close": False,
+            "selection": False,
+        },
+        "status": status,
+        "fresh_at": None,
+    }
+
+
+async def _read_response(stream: aiohttp.StreamReader) -> bytes:
+    """Read fragmented JSON through EOF without accepting an oversized body."""
+    raw = bytearray()
+    while chunk := await stream.read(_MAX_RESPONSE_BYTES + 1 - len(raw)):
+        raw.extend(chunk)
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise KodiKeyboardError(_ERROR_UNAVAILABLE)
+    return bytes(raw)
+
+
+class KodiKeyboardProvider:
+    """Bridge private Kodi input events to the existing host keyboard API."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        native_entity_id: str,
+        host_origin: str,
+        host_token: str,
+        *,
+        command_allowed: Callable[[], bool] | None = None,
+    ) -> None:
+        """Bind one native Kodi entity to the configured authenticated bridge."""
+        self.hass, self.native_entity_id = hass, native_entity_id
+        self._url, self._token = host_origin.rstrip("/") + "/kodi/keyboard", host_token
+        self._state = _blank("unavailable")
+        self._kind, self._epoch = "unknown", 0
+        self._lock = asyncio.Lock()
+        self._listeners: set[Callable] = set()
+        self._connection = self._server = None
+        self._hooks: dict[str, tuple[Any, Any]] = {}
+        self._binding_generation = 0
+        self._remove_timer = None
+        self._tasks: set[asyncio.Task] = set()
+        self._poll_task = None
+        self._connected = self._stopped = False
+        self.command_allowed = command_allowed or (lambda: True)
+
+    def subscribe(self, callback: Callable[[dict], None]) -> Callable[[], None]:
+        """Register a private snapshot observer and return its removal callback."""
+        self._listeners.add(callback)
+        return lambda: self._listeners.discard(callback)
+
+    async def async_snapshot(self) -> dict:
+        """Copy the current field snapshot and its mutable capabilities."""
+        return {**self._state, "capabilities": dict(self._state["capabilities"])}
+
+    def _publish(self) -> None:
+        for listener in tuple(self._listeners):
+            try:
+                listener(
+                    {**self._state, "capabilities": dict(self._state["capabilities"])}
+                )
+            except Exception as exc:  # noqa: BLE001 -- Isolate arbitrary subscriber callbacks.
+                _LOGGER.warning(
+                    "Kodi keyboard subscriber failed (%s)", type(exc).__name__
+                )
+
+    def _spawn(self, coroutine: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+        task = self.hass.async_create_task(coroutine)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    def _resolve_connection(self) -> Any | None:
+        registration = entity_registry.async_get(self.hass).async_get(
+            self.native_entity_id
+        )
+        if registration is None or registration.config_entry_id is None:
+            return None
+        entry = self.hass.config_entries.async_get_entry(registration.config_entry_id)
+        runtime = getattr(entry, "runtime_data", None) if entry else None
+        return getattr(runtime, "connection", None)
+
+    def _remove_hooks(self) -> None:
+        self._binding_generation += 1
+        if self._server is not None:
+            handlers = getattr(self._server, "_server_request_handlers", {})
+            for name, (own, previous) in self._hooks.items():
+                # jsonrpc_base exposes registration through attribute assignment
+                # but no public unregister API. Restore only our own bindings.
+                if handlers.get(name) is own:
+                    if previous is None:
+                        handlers.pop(name, None)
+                    else:
+                        setattr(self._server, name, previous)
+        self._hooks.clear()
+        self._server = None
+
+    def _attach(self, connection: Any) -> None:
+        self._remove_hooks()
+        self._connection, self._server = connection, connection.server
+        handlers = getattr(self._server, "_server_request_handlers", {})
+        generation, server = self._binding_generation, self._server
+        for name, handler in (
+            ("Input.OnInputRequested", self._requested),
+            ("Input.OnInputFinished", self._finished),
+        ):
+            previous = handlers.get(name)
+
+            def chained(
+                *args: Any,
+                own: Callable[..., Any] = handler,
+                previous: Callable[..., Any] | None = previous,
+                **kwargs: Any,
+            ) -> None:
+                if (
+                    self._stopped
+                    or self._binding_generation != generation
+                    or self._connection is not connection
+                    or self._server is not server
+                    or not self._connected
+                    or not connection.connected
+                ):
+                    return
+                own(*args, **kwargs)
+                if previous is not None:
+                    try:
+                        result = previous(*args, **kwargs)
+                        if inspect.isawaitable(result):
+                            self._spawn(result)
+                    except Exception as exc:  # noqa: BLE001 -- Preserve native callback isolation.
+                        _LOGGER.warning(
+                            "Existing Kodi input callback failed (%s)",
+                            type(exc).__name__,
+                        )
+
+            self._hooks[name] = (chained, previous)
+            setattr(self._server, name, chained)
+
+    def _ensure_connection(self) -> bool:
+        connection = self._resolve_connection()
+        usable = connection is not None and connection.can_subscribe
+        rebound = usable and (
+            self._connection is not connection or self._server is not connection.server
+        )
+        if rebound:
+            self._attach(connection)
+        connected = bool(usable and connection.connected)
+        if rebound or connected != self._connected:
+            self._connected = connected
+            self._kind, self._epoch = "unknown", self._epoch + 1
+            self._state = _blank("idle" if connected else "unavailable")
+            self._publish()
+        return connected
+
+    async def async_start(self) -> None:
+        """Attach native input hooks and the existing refresh interval."""
+        self._ensure_connection()
+        self._remove_timer = async_track_time_interval(
+            self.hass, self._tick, timedelta(seconds=0.4)
+        )
+
+    def _requested(self, sender: Any = None, data: Any = None, **kwargs: Any) -> None:  # noqa: ARG002 -- Native JSON-RPC keyword signature.
+        kind = data.get("type") if isinstance(data, dict) else None
+        self._begin_context(kind if kind in {"keyboard", "password"} else "unknown")
+
+    def _finished(self, sender: Any = None, data: Any = None, **kwargs: Any) -> None:  # noqa: ARG002 -- Native JSON-RPC keyword signature.
+        self._begin_context("closed")
+
+    def _begin_context(self, kind: str) -> None:
+        if self._stopped:
+            return
+        self._kind, self._epoch = kind, self._epoch + 1
+        epoch = self._epoch
+        self._state = _blank("sensitive" if kind == "password" else "idle")
+        self._publish()
+        self._spawn(self._context(kind, epoch))
+
+    async def _context(self, kind: str, epoch: int) -> None:
+        async with self._lock:
+            if epoch != self._epoch or self._stopped:
+                return
+            try:
+                response = await self._post({"action": "context", "kind": kind})
+                if epoch == self._epoch:
+                    self._apply(response["snapshot"])
+            except (KodiKeyboardError, KeyError):
+                if epoch == self._epoch:
+                    self._state = _blank("unavailable")
+                    self._publish()
+
+    def _apply(self, snapshot: dict) -> None:
+        # The native Input event is the independent privacy gate. Even a bad
+        # host response cannot expose a password/control field to subscribers.
+        if self._kind != "keyboard":
+            self._state = _blank("sensitive" if self._kind == "password" else "idle")
+        elif not isinstance(snapshot, dict) or snapshot.get("status") != "ready":
+            status = (
+                snapshot.get("status", "unavailable")
+                if isinstance(snapshot, dict)
+                else "unavailable"
+            )
+            self._state = _blank(
+                status
+                if status in {"idle", "unavailable", "stale", "unsupported"}
+                else "unavailable"
+            )
+        else:
+            self._state = self._ready_snapshot(snapshot)
+        self._publish()
+
+    @staticmethod
+    def _ready_snapshot(snapshot: dict) -> dict:
+        if (
+            snapshot.get("sensitive") is not False
+            or snapshot.get("focused") is not True
+        ):
+            raise KodiKeyboardError(_ERROR_UNAVAILABLE)
+        value = _text(snapshot.get("text"))
+        session_id, revision = snapshot.get("session_id"), snapshot.get("revision")
+        if not isinstance(session_id, str) or type(revision) is not int:
+            raise KodiKeyboardError(_ERROR_UNAVAILABLE)
+        return {
+            "session_id": session_id,
+            "revision": revision,
+            "focused": True,
+            "sensitive": False,
+            "text": value,
+            "selection": None,
+            "capabilities": {
+                "edit": True,
+                "commit": True,
+                "close": True,
+                "selection": False,
+            },
+            "status": "ready",
+            "fresh_at": snapshot.get("fresh_at"),
+        }
+
+    @callback
+    def _tick(self, now: datetime | None = None) -> None:  # noqa: ARG002 -- HA interval callback signature.
+        if self._stopped or not self._ensure_connection() or self._kind != "keyboard":
+            return
+        if self._poll_task is None or self._poll_task.done():
+            self._poll_task = self._spawn(self._refresh(self._epoch))
+
+    async def _refresh(self, epoch: int) -> None:
+        async with self._lock:
+            if epoch != self._epoch or self._stopped:
+                return
+            try:
+                response = await self._post({"action": "snapshot"})
+                if epoch == self._epoch:
+                    self._apply(response["snapshot"])
+                    if self._state["status"] != "ready":
+                        self._kind = "unknown"
+            except (KodiKeyboardError, KeyError):
+                if epoch == self._epoch:
+                    self._kind = "unknown"
+                    self._state = _blank("unavailable")
+                    self._publish()
+
+    async def _post(self, payload: dict) -> dict:
+        if (
+            payload.get("action") in {"edit", "commit", "close"}
+            and not self.command_allowed()
+        ):
+            raise KodiKeyboardError(_ERROR_UNAVAILABLE)
+        try:
+            session = async_get_clientsession(self.hass)
+            async with session.post(
+                self._url,
+                json=payload,
+                headers={"X-HA-Host-Token": self._token},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as response:
+                raw = await _read_response(response.content)
+                reply = json.loads(raw)
+                return _validated_reply(reply, response.status)
+        except KodiKeyboardError:
+            raise
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            raise KodiKeyboardError(_ERROR_UNAVAILABLE) from exc
+
+    async def _operate(
+        self,
+        action: str,
+        session_id: str,
+        expected_revision: int,
+        text: str | None = None,
+    ) -> dict:
+        async with self._lock:
+            if not self.command_allowed():
+                raise KodiKeyboardError(_ERROR_UNAVAILABLE)
+            if (
+                self._stopped
+                or self._kind != "keyboard"
+                or self._state["status"] != "ready"
+            ):
+                raise KodiKeyboardError(_ERROR_NOT_FOCUSED)
+            payload = {
+                "action": action,
+                "session_id": session_id,
+                "expected_revision": expected_revision,
+            }
+            if action == "edit":
+                payload["text"] = _text(text)
+            epoch = self._epoch
+            try:
+                response = await self._post(payload)
+                if self._terminal_ack(response, action, epoch):
+                    return _blank("idle")
+                self._apply(response["snapshot"])
+                return await self.async_snapshot()
+            except KodiKeyboardError:
+                # Observe current field after a conflict, without replaying input.
+                if epoch == self._epoch:
+                    self._spawn(self._refresh(epoch))
+                raise
+
+    def _terminal_ack(self, response: dict, action: str, epoch: int) -> bool:
+        if response.get("verified") is not True:
+            raise KodiKeyboardError(_ERROR_UNCONFIRMED)
+        if epoch == self._epoch:
+            return False
+        # A confirmed terminal acknowledgement must not replace a newer field.
+        terminal = response.get("snapshot")
+        if (
+            action in {"commit", "close"}
+            and isinstance(terminal, dict)
+            and terminal.get("status") == "idle"
+        ):
+            return True
+        raise KodiKeyboardError(_ERROR_SESSION_CHANGED)
+
+    async def async_edit(
+        self,
+        session_id: str,
+        expected_revision: int,
+        text: str,
+        selection: dict[str, int] | None = None,
+    ) -> dict:
+        """Replace text while preserving native field and revision guards."""
+        if selection is not None:
+            raise KodiKeyboardError(_ERROR_UNSUPPORTED)
+        return await self._operate("edit", session_id, expected_revision, text)
+
+    async def async_commit(self, session_id: str, expected_revision: int) -> dict:
+        """Submit the current field through the guarded host operation."""
+        return await self._operate("commit", session_id, expected_revision)
+
+    async def async_close(self, session_id: str, expected_revision: int) -> dict:
+        """Close the current field through the guarded host operation."""
+        return await self._operate("close", session_id, expected_revision)
+
+    async def async_shutdown(self) -> None:
+        """Remove owned hooks, cancel tasks, and close the host context."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._epoch += 1
+        if self._remove_timer is not None:
+            self._remove_timer()
+            self._remove_timer = None
+        self._remove_hooks()
+        for task in tuple(self._tasks):
+            task.cancel()
+        await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+        self._tasks.clear()
+        self._kind = "closed"
+        self._state = _blank("unavailable")
+        self._publish()
+        self._listeners.clear()
+        with suppress(KodiKeyboardError):
+            await self._post({"action": "context", "kind": "closed"})

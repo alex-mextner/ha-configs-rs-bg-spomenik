@@ -1,6 +1,5 @@
 * * * * * /home/ultra/homeassistant/scripts/ha_codex_watchdog.sh
 * * * * * cd /home/ultra/dev/wakeword && ./pipeline_status.py >> /tmp/pipeline_status.log 2>&1
 */5 * * * * /home/ultra/homeassistant/scripts/ha_fail_safe_cron.sh
-*/5 * * * * cd /home/ultra/homeassistant && scripts/wakeword_noise_watchdog.py check >> /tmp/wakeword_noise_watchdog.log 2>&1
 30 3 * * * /home/ultra/dev/wakeword/nightly_transcribe.sh >> /tmp/wakeword_nightly_transcribe.log 2>&1
 */5 * * * * /home/ultra/homeassistant/scripts/dataplicity_watchdog.py >> /tmp/dataplicity_watchdog.log 2>&1

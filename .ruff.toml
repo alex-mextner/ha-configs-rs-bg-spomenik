@@ -24,8 +24,21 @@ ignore = [
     "D107",   # Test helper initializers do not require docstrings
     "E501",   # Allow long assertion/import lines in tests
     "PLR2004", # Magic values in assertions are acceptable in tests
+    "PT009", # The maintained suites intentionally use unittest assertions
+    "PT027", # Keep unittest exception assertions alongside pytest-style tests
     "SLF001", # Tests can access private members for white-box behavior checks
 ]
+
+# These files run standalone; packaging them changes their sibling imports.
+"tests/test_*.py" = ["INP001"]
+"tests/ekf_appliances/test_*.py" = ["INP001", "S101"]
+"tests/test_remote_announcements*.py" = ["S101"]
+# This existing pytest module deliberately imports its sibling bridge directly.
+"docker/chatgpt-web/test_bridge.py" = ["S101", "INP001"]
+
+[lint.isort]
+# The HACS-managed namespace may be absent in a source-only checkout.
+known-first-party = ["custom_components"]
 
 [lint.flake8-pytest-style]
 fixture-parentheses = false

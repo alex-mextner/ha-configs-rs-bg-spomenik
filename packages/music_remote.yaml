@@ -1,0 +1,398 @@
+# Music mode controls an active Music Assistant queue on any output.
+# With no active MA context, the current living-room speaker is the default.
+# AISIS/RAJG remains in the studio and is not a native-speaker fallback.
+input_select:
+  music_remote_speaker_backend:
+    name: "Колонка пульта: подключение"
+    icon: mdi:speaker-wireless
+    options:
+      - "Автоматически"
+      - "Яндекс"
+      - "AISIS"
+
+input_text:
+  music_remote_ma_selected:
+    name: "Музыкальный пульт: выбранный плеер MA"
+    icon: mdi:playlist-music
+    max: 255
+  music_remote_ma_last:
+    name: "Музыкальный пульт: последний плеер MA"
+    icon: mdi:history
+    max: 255
+
+script:
+  music_remote_select_ma_player:
+    alias: "Пульт музыки — выбрать плеер MA"
+    description: "Приоритет, если играет несколько плееров MA. Пустое значение возвращает автоматический выбор."
+    mode: single
+    fields:
+      player:
+        name: "Плеер Music Assistant"
+        description: "Оставь пустым для автоматического выбора."
+        selector:
+          entity:
+            domain: media_player
+            integration: music_assistant
+    sequence:
+      - variables:
+          selected: "{{ player | default('', true) | string }}"
+      - if: >-
+          {{ selected != '' and
+             (not selected.startswith('media_player.') or
+              selected not in integration_entities('music_assistant')) }}
+        then:
+          - stop: "Выбери плеер интеграции Music Assistant."
+            error: true
+      - action: input_text.set_value
+        data:
+          entity_id: input_text.music_remote_ma_selected
+          value: "{{ selected }}"
+      - if: "{{ selected == '' }}"
+        then:
+          - action: input_text.set_value
+            data:
+              entity_id: input_text.music_remote_ma_last
+              value: ""
+      - variables:
+          result:
+            ma_player: "{{ selected }}"
+            automatic: "{{ selected == '' }}"
+      - stop: "Выбор сохранён."
+        response_variable: result
+
+  music_remote_resolve:
+    alias: "Пульт музыки — определить маршрут"
+    description: "Возвращает текущего владельца воспроизведения без команд устройствам."
+    mode: parallel
+    max: 20
+    sequence:
+      - variables:
+          stock_entity: media_player.yandex_station_m0011hm00z86hg
+          aisis_entity: media_player.aisis_speaker_m00zrw3008rajg
+          backend_choice: "{{ states('input_select.music_remote_speaker_backend') }}"
+          preferred_ma: "{{ states('input_text.music_remote_ma_selected') }}"
+          last_ma: "{{ states('input_text.music_remote_ma_last') }}"
+      - variables:
+          stock_ready: >-
+            {{ has_value(stock_entity) and
+               state_attr(stock_entity, 'restored') != true and
+               area_id(stock_entity) == 'gostinaia' }}
+          aisis_ready: >-
+            {{ has_value(aisis_entity) and
+               state_attr(aisis_entity, 'restored') != true and
+               area_id(aisis_entity) == 'gostinaia' and
+               is_state('sensor.aisis_speaker_m00zrw3008rajg_connected', 'on') }}
+      - variables:
+          speaker_entity: >-
+            {% if backend_choice == 'Яндекс' %}
+              {{ stock_entity if stock_ready else '' }}
+            {% elif backend_choice == 'AISIS' %}
+              {{ aisis_entity if aisis_ready else '' }}
+            {% elif aisis_ready and is_state(aisis_entity, 'playing') %}
+              {{ aisis_entity }}
+            {% elif stock_ready and is_state(stock_entity, 'playing') %}
+              {{ stock_entity }}
+            {% elif stock_ready %}
+              {{ stock_entity }}
+            {% elif aisis_ready %}
+              {{ aisis_entity }}
+            {% else %}
+              {{ '' }}
+            {% endif %}
+      - variables:
+          # Discover actual MA integration entities, never synthetic TV wrappers.
+          # A remembered active_queue on idle/external/restored state is not ownership.
+          ma_candidates: >-
+            {% set ns = namespace(items=[]) %}
+            {% for entity in integration_entities('music_assistant') | sort %}
+              {% if entity.startswith('media_player.') and has_value(entity)
+                    and state_attr(entity, 'restored') != true
+                    and state_attr(entity, 'app_id') == 'music_assistant'
+                    and state_attr(entity, 'source') == 'Music Assistant Queue'
+                    and state_attr(entity, 'active_queue') not in
+                        [none, '', 'unknown', 'unavailable']
+                    and states(entity) in ['playing', 'buffering', 'paused'] %}
+                {% set queue = state_attr(entity, 'active_queue') %}
+                {% set owner = namespace(value=false) %}
+                {% for identifier in device_attr(entity, 'identifiers') or [] %}
+                  {% if identifier[0] == 'music_assistant' and identifier[1] == queue %}
+                    {% set owner.value = true %}
+                  {% endif %}
+                {% endfor %}
+                {% set ns.items = ns.items + [dict(
+                    entity_id=entity, queue=queue, queue_owner=owner.value,
+                    active=states(entity) in ['playing', 'buffering'],
+                    changed=as_timestamp(states[entity].last_changed, 0))] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+      - variables:
+          # Count each active queue once. Prefer its controller unless the user
+          # explicitly selected a member or that member is the current context.
+          active_queues: >-
+            {% set ns = namespace(items=[]) %}
+            {% for queue, members in ma_candidates | selectattr('active', 'eq', true)
+                  | groupby('queue', case_sensitive=true) %}
+              {% set ids = members | map(attribute='entity_id') | list %}
+              {% set owners = members | selectattr('queue_owner', 'eq', true)
+                    | map(attribute='entity_id') | list %}
+              {% set target = preferred_ma if preferred_ma in ids
+                    else last_ma if last_ma in ids
+                    else owners[0] if owners else ids[0] %}
+              {% set ns.items = ns.items + [dict(
+                  entity_id=target, queue=queue,
+                  changed=members | map(attribute='changed') | max)] %}
+            {% endfor %}
+            {{ ns.items | sort(attribute='entity_id')
+                        | sort(attribute='changed', reverse=true) }}
+      - variables:
+          ma_entity: >-
+            {% set active = active_queues | map(attribute='entity_id') | list %}
+            {% set paused = ma_candidates | selectattr('active', 'eq', false)
+                  | map(attribute='entity_id') | list %}
+            {% if preferred_ma in active %}
+              {{ preferred_ma }}
+            {% elif last_ma in active %}
+              {{ last_ma }}
+            {% elif active %}
+              {{ active[0] }}
+            {% elif speaker_entity and is_state(speaker_entity, 'playing') %}
+              {{ '' }}
+            {% elif preferred_ma in paused %}
+              {{ preferred_ma }}
+            {% elif last_ma in paused %}
+              {{ last_ma }}
+            {% else %}
+              {{ '' }}
+            {% endif %}
+      - variables:
+          owner: "{{ 'ma' if ma_entity else 'speaker' }}"
+          ma_selection: >-
+            {% if not ma_entity %}
+              none
+            {% elif is_state(ma_entity, 'paused') %}
+              {{ 'explicit_paused' if ma_entity == preferred_ma else 'last_paused' }}
+            {% elif ma_entity == preferred_ma %}
+              explicit
+            {% elif ma_entity == last_ma %}
+              last_controlled
+            {% else %}
+              latest_active
+            {% endif %}
+          reason: >-
+            {% if ma_entity %}
+              {{ 'ma_' ~ states(ma_entity) }}
+            {% elif speaker_entity and is_state(speaker_entity, 'playing') %}
+              speaker_playing
+            {% else %}
+              default_speaker
+            {% endif %}
+      - variables:
+          result:
+            entity_id: "{{ ma_entity if owner == 'ma' else speaker_entity }}"
+            owner: "{{ owner }}"
+            reason: "{{ reason }}"
+            speaker_entity_id: "{{ speaker_entity }}"
+            speaker_backend: >-
+              {{ 'aisis' if speaker_entity == aisis_entity
+                 else 'yandex' if speaker_entity == stock_entity else 'none' }}
+            ma_owned: "{{ ma_entity != '' }}"
+            ma_entity_id: "{{ ma_entity }}"
+            ma_selection: "{{ ma_selection }}"
+            ma_active_queues: "{{ active_queues | length }}"
+      - stop: "Маршрут определён."
+        response_variable: result
+
+  music_remote_command:
+    alias: "Пульт музыки — выполнить команду"
+    description: "Активная очередь MA на любом выходе; иначе колонка в гостиной."
+    mode: queued
+    max: 20
+    fields:
+      command:
+        name: "Команда"
+        required: true
+        selector:
+          select:
+            options:
+              - play_pause
+              - next
+              - previous
+              - volume_up
+              - volume_down
+              - volume_set
+              - mute_toggle
+              - stop
+              - info
+              - bluetooth_enable
+              - beep_on
+              - beep_off
+      volume_level:
+        name: "Громкость"
+        description: "Только для volume_set, от 0 до 1. AISIS принимает от 0.1."
+        selector:
+          number:
+            min: 0
+            max: 1
+            step: 0.01
+    sequence:
+      - variables:
+          cmd: "{{ command | default('', true) | string }}"
+      - if: >-
+          {{ cmd not in ['play_pause', 'next', 'previous', 'volume_up',
+             'volume_down', 'volume_set', 'mute_toggle', 'stop', 'info',
+             'bluetooth_enable', 'beep_on', 'beep_off'] }}
+        then:
+          - stop: "Неизвестная команда музыкального пульта."
+            error: true
+      - action: script.music_remote_resolve
+        response_variable: route
+      - variables:
+          target_entity: >-
+            {{ route.speaker_entity_id
+               if cmd in ['info', 'bluetooth_enable', 'beep_on', 'beep_off']
+               else route.entity_id }}
+      - if: "{{ not target_entity or not has_value(target_entity) }}"
+        then:
+          - stop: "Нет доступного плеера для этой команды. Проверь устройство и колонку по умолчанию."
+            error: true
+      - variables:
+          features: "{{ state_attr(target_entity, 'supported_features') | int(0) }}"
+          result: "{{ dict(route, command=cmd, status='accepted') }}"
+      - choose:
+          - conditions: "{{ cmd == 'info' }}"
+            sequence:
+              - variables:
+                  active: "{{ states(route.entity_id) in ['playing', 'buffering', 'paused'] }}"
+                  title: >-
+                    {{ (state_attr(route.entity_id, 'media_title') or '') | string | trim
+                       if active else '' }}
+                  artist: >-
+                    {{ (state_attr(route.entity_id, 'media_artist') or '') | string | trim
+                       if active else '' }}
+              - variables:
+                  announcement: >-
+                    {% if not active %}
+                      Сейчас музыка не играет.
+                    {% elif not title %}
+                      Название текущей композиции недоступно.
+                    {% else %}
+                      {{ 'На паузе' if is_state(route.entity_id, 'paused')
+                         else 'Сейчас играет' }} {{ (artist ~ ' — ') if artist else '' }}{{ title }}.
+                    {% endif %}
+              - choose:
+                  - conditions: "{{ route.speaker_backend == 'aisis' }}"
+                    sequence:
+                      - action: notify.send_message
+                        data:
+                          entity_id: notify.aisis_speaker_m00zrw3008rajg_notify
+                          message: "{{ announcement }}"
+                default:
+                  - if: "{{ (features | bitwise_and(512)) == 0 }}"
+                    then:
+                      - stop: "Штатная колонка не поддерживает озвучивание через media_player."
+                        error: true
+                  - action: media_player.play_media
+                    data:
+                      entity_id: "{{ target_entity }}"
+                      media_content_type: text
+                      media_content_id: "{{ announcement }}"
+              - stop: "Озвучивание передано колонке."
+                response_variable: result
+          - conditions: "{{ cmd == 'bluetooth_enable' }}"
+            sequence:
+              - choose:
+                  - conditions: "{{ route.speaker_backend == 'aisis' }}"
+                    sequence:
+                      - action: aisis_speaker.send_directive
+                        data:
+                          duid: M00ZRW3008RAJG
+                          name: smart_speaker_bluetooth
+                          arguments:
+                            enable: true
+                default:
+                  - if: "{{ (features | bitwise_and(512)) == 0 }}"
+                    then:
+                      - stop: "Штатная колонка не поддерживает команды через media_player."
+                        error: true
+                  - action: media_player.play_media
+                    data:
+                      entity_id: "{{ target_entity }}"
+                      media_content_type: command
+                      media_content_id: "Включи Bluetooth"
+              - stop: "Команда включения Bluetooth передана колонке."
+                response_variable: result
+          - conditions: "{{ cmd in ['beep_on', 'beep_off'] }}"
+            sequence:
+              - if: "{{ route.speaker_backend != 'aisis' }}"
+                then:
+                  - variables:
+                      result: "{{ dict(route, command=cmd, status='skipped', reason='native_beep_unavailable') }}"
+                  - stop: "Для штатной колонки короткий сигнал не настроен; воспроизведение сохранено."
+                    response_variable: result
+              - action: aisis_speaker.send_directive
+                data:
+                  duid: M00ZRW3008RAJG
+                  name: smart_speaker_play_iot_sound
+                  arguments:
+                    isPowerOn: "{{ cmd == 'beep_on' }}"
+              - stop: "Короткий сигнал передан колонке."
+                response_variable: result
+      - variables:
+          service_name: >-
+            {% if cmd == 'play_pause' %}
+              {{ 'media_pause' if states(target_entity) in ['playing', 'buffering'] else 'media_play' }}
+            {% else %}
+              {{ {'next':'media_next_track', 'previous':'media_previous_track',
+                  'volume_up':'volume_up', 'volume_down':'volume_down',
+                  'volume_set':'volume_set', 'mute_toggle':'volume_mute',
+                  'stop':'media_stop'}[cmd] }}
+            {% endif %}
+      - variables:
+          required_feature: >-
+            {{ {'media_play':16384, 'media_pause':1, 'media_next_track':32,
+                'media_previous_track':16, 'volume_up':1024, 'volume_down':1024,
+                'volume_set':4, 'volume_mute':8, 'media_stop':4096}[service_name] }}
+      - if: "{{ (features | bitwise_and(required_feature | int)) == 0 }}"
+        then:
+          - stop: "{{ 'Текущий владелец воспроизведения не поддерживает команду ' ~ cmd ~ '.' }}"
+            error: true
+      - if: "{{ cmd == 'volume_set' }}"
+        then:
+          - if: >-
+              {{ volume_level is not defined or volume_level is none
+                 or not is_number(volume_level)
+                 or volume_level | float(-1) < 0 or volume_level | float(-1) > 1 }}
+            then:
+              - stop: "Громкость должна быть числом от 0 до 1."
+                error: true
+          - if: >-
+              {{ target_entity == 'media_player.aisis_speaker_m00zrw3008rajg'
+                 and volume_level | float < 0.1 }}
+            then:
+              - stop: "AISIS принимает громкость от 0.1; нулевой уровень не является поддерживаемым mute."
+                error: true
+      - if: >-
+          {{ cmd == 'mute_toggle'
+             and state_attr(target_entity, 'is_volume_muted') not in [true, false] }}
+        then:
+          - stop: "У владельца воспроизведения нет достоверного состояния mute."
+            error: true
+      - action: "{{ 'media_player.' ~ service_name }}"
+        data: >-
+          {% if cmd == 'volume_set' %}
+            {{ dict(entity_id=target_entity, volume_level=volume_level | float) }}
+          {% elif cmd == 'mute_toggle' %}
+            {{ dict(entity_id=target_entity,
+                    is_volume_muted=not state_attr(target_entity, 'is_volume_muted')) }}
+          {% else %}
+            {{ dict(entity_id=target_entity) }}
+          {% endif %}
+      - if: "{{ route.owner == 'ma' }}"
+        then:
+          - action: input_text.set_value
+            data:
+              entity_id: input_text.music_remote_ma_last
+              value: "{{ target_entity }}"
+      - stop: "Команда передана текущему владельцу воспроизведения."
+        response_variable: result

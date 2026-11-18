@@ -1,6 +1,5 @@
 # Copyright 2026 Project contributors
 # Standalone host checks intentionally use unittest without a tests package.
-# ruff: noqa: INP001, PT009
 """Regression checks for local Bluetooth and portable Compose startup."""
 
 import ipaddress

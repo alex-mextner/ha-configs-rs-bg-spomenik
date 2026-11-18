@@ -1,0 +1,85 @@
+{
+  "title": "EKF Appliances",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect EKF appliances",
+        "description": "Create controls for the Haier air conditioner and Toshiba projector using an existing EKF remote. Optionally select a Samsung TV.",
+        "data": {
+          "remote_entity_id": "Infrared remote",
+          "temperature_entity_id": "Room temperature sensor",
+          "projector_power_entity_id": "Projector status sensor",
+          "projector_on_script": "Projector startup script",
+          "projector_off_script": "Projector shutdown script",
+          "tv_entity_id": "Samsung TV",
+          "tv_cast_entity_id": "Chromecast media player",
+          "tv_androidtv_entity_id": "Android TV Remote media player",
+          "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
+          "tv_kodi_entity_id": "Kodi for the projector",
+          "tv_source_entity_id": "Legacy source helper"
+        },
+        "data_description": {
+          "projector_on_script": "Leave empty to use the existing Projector turn on script.",
+          "projector_off_script": "Leave empty to use the existing Projector turn off script.",
+          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection.",
+          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls.",
+          "tv_cast_entity_id": "Optional. Playback status and controls for cast sessions.",
+          "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
+          "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
+          "tv_kodi_entity_id": "Optional. Kodi paired with the projector's power and playback controls.",
+          "tv_source_entity_id": "Unused compatibility field. Leave empty for new setups. The universal remote has its own target; this field does not change television playback controls."
+        }
+      },
+      "reconfigure": {
+        "title": "Change appliance connections",
+        "description": "Choose the remote, room temperature sensor, projector status sensor, and scripts used by these appliances. Optionally select a Samsung TV.",
+        "data": {
+          "remote_entity_id": "Infrared remote",
+          "temperature_entity_id": "Room temperature sensor",
+          "projector_power_entity_id": "Projector status sensor",
+          "projector_on_script": "Projector startup script",
+          "projector_off_script": "Projector shutdown script",
+          "tv_entity_id": "Samsung TV",
+          "tv_cast_entity_id": "Chromecast media player",
+          "tv_androidtv_entity_id": "Android TV Remote media player",
+          "tv_music_assistant_entity_id": "Music Assistant player for this Chromecast",
+          "tv_kodi_entity_id": "Kodi for the projector",
+          "tv_source_entity_id": "Legacy source helper"
+        },
+        "data_description": {
+          "projector_on_script": "Leave empty to use the existing Projector turn on script.",
+          "projector_off_script": "Leave empty to use the existing Projector turn off script.",
+          "projector_power_entity_id": "Select a sensor that measures the projector state, such as its HDMI connection.",
+          "tv_entity_id": "Select a TV from the Samsung Smart TV integration. Leave empty if you do not want to add TV controls.",
+          "tv_cast_entity_id": "Optional. Playback status and controls for cast sessions.",
+          "tv_androidtv_entity_id": "Optional. Controls for Android apps that do not expose Cast playback.",
+          "tv_music_assistant_entity_id": "Optional. Select the same physical Chromecast in Music Assistant. Its queue controls are used only while Music Assistant owns the Cast session.",
+          "tv_kodi_entity_id": "Optional. Kodi paired with the projector's power and playback controls.",
+          "tv_source_entity_id": "Unused compatibility field. Leave empty for new setups. The universal remote has its own target; this field does not change television playback controls."
+        }
+      }
+    },
+    "error": {
+      "invalid_entity": "Select an existing entity of the requested type.",
+      "invalid_tv_entity": "Select an existing TV from the Samsung Smart TV integration.",
+      "different_cast_player": "Select the same Chromecast in Music Assistant."
+    },
+    "abort": {
+      "already_configured": "This infrared remote is already configured.",
+      "already_in_progress": "This infrared remote is already being configured.",
+      "reconfigure_successful": "The appliance connections have been updated."
+    }
+  },
+  "services": {
+    "wake_if_current": {
+      "name": "Wake if the request is still current",
+      "description": "Start the display and its player only if no newer power request has superseded the queued wake.",
+      "fields": {
+        "expected_revision": {
+          "name": "Expected power intent revision",
+          "description": "The canonical media entity's power_intent_revision captured when the wake was requested."
+        }
+      }
+    }
+  }
+}

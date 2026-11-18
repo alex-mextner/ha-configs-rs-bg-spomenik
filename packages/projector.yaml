@@ -1,123 +1,112 @@
-# Projector — single media device on top of the ESP IR buttons.
-#
-# The ESP exposes 12 raw IR buttons (button.projector_*). This package
-# wraps the media-ish subset (power / play-pause / volume / mute) into one
-# `universal` media_player so it reads as a single device, and models the
-# power quirk: the projector turns ON with one press but needs TWO presses
-# ~1s apart to turn OFF. State is ASSUMED (fire-and-forget IR has no
-# feedback) — the physical projector remote can desync input_boolean below.
+# Projector power is observed through the matching MStar HDMI display on the ODROID.
+# Unknown reads never trigger another lifecycle action. Shutdown waits for a stable
+# display after boot and confirms POWER only while that display is still present.
+
+command_line:
+  - binary_sensor:
+      name: Projector HDMI connected
+      unique_id: projector_hdmi_connected
+      device_class: connectivity
+      # Keep polling lightweight while the media host is under I/O pressure.
+      command: >-
+        read -r link_status < /sys/class/drm/card0-HDMI-A-1/status || exit 1;
+        case "$link_status" in
+        disconnected) printf disconnected ;;
+        connected) edid_id=$(od -An -tx1 -N16 /sys/class/drm/card0-HDMI-A-1/edid) || exit 1;
+        set -- $edid_id;
+        if [ "$*" = "00 ff ff ff ff ff ff 00 36 74 30 00 01 00 00 00" ];
+        then printf connected; else printf unknown; fi ;;
+        *) printf unknown ;;
+        esac
+      payload_on: connected
+      payload_off: disconnected
+      scan_interval: 2
+      command_timeout: 5
 
 input_boolean:
+  # Compatibility mirror for older source routing. Never used as power feedback.
   projector_power:
-    name: Projector power (assumed)
+    name: Projector power (HDMI observed)
     icon: mdi:projector
 
 script:
-  # One power frame = turn on. Mark assumed-on.
+  # Keep these sequence hooks for existing callers and the EKF config entry.
+  # No helper is changed until the HDMI sensor observes the physical transition.
   projector_turn_on:
     alias: Projector turn on
     mode: single
     sequence:
+      - condition: state
+        entity_id: binary_sensor.projector_hdmi_connected
+        state: "off"
       - action: button.press
         target: { entity_id: button.projector_power }
-      - action: input_boolean.turn_on
-        target: { entity_id: input_boolean.projector_power }
+      - wait_template: "{{ is_state('binary_sensor.projector_hdmi_connected', 'on') }}"
+        timeout: "00:00:35"
+        continue_on_timeout: false
 
-  # The projector requires a double power press ~3s apart to power off
-  # (single press just shows the "press again to power off" OSD). Mirror
-  # that here so a single media_player.turn_off actually powers it down.
   projector_turn_off:
     alias: Projector turn off
     mode: single
     sequence:
+      - condition: state
+        entity_id: binary_sensor.projector_hdmi_connected
+        state: "on"
+      # HDMI appears before the projector accepts another power command.
+      # One delayed request is held until the matching display has been stable.
+      - delay:
+          seconds: >-
+            {{ [0, 30 - (now() - states.binary_sensor.projector_hdmi_connected.last_changed).total_seconds()] | max | round(0, 'ceil') }}
+      - action: homeassistant.update_entity
+        target: { entity_id: binary_sensor.projector_hdmi_connected }
+      - condition: template
+        value_template: >-
+          {{ is_state('binary_sensor.projector_hdmi_connected', 'on')
+             and (now() - states.binary_sensor.projector_hdmi_connected.last_changed).total_seconds() >= 30 }}
       - action: button.press
         target: { entity_id: button.projector_power }
       - delay: "00:00:03"
+      - action: homeassistant.update_entity
+        target: { entity_id: binary_sensor.projector_hdmi_connected }
+      - condition: state
+        entity_id: binary_sensor.projector_hdmi_connected
+        state: "on"
       - action: button.press
         target: { entity_id: button.projector_power }
-      - action: input_boolean.turn_off
-        target: { entity_id: input_boolean.projector_power }
+      - wait_template: "{{ is_state('binary_sensor.projector_hdmi_connected', 'off') }}"
+        timeout: "00:00:35"
+        continue_on_timeout: false
 
   projector_toggle:
-    alias: Projector toggle
+    alias: Projector power
     mode: single
     sequence:
-      - choose:
-          - conditions: "{{ is_state('input_boolean.projector_power', 'on') }}"
-            sequence:
-              - action: script.projector_turn_off
-        default:
-          - action: script.projector_turn_on
+      - action: media_player.toggle
+        target: { entity_id: media_player.projector }
 
 automation:
-  # Projector power drives the PC display/Kodi helper and the active source.
-  # Turning the projector on wakes/unlocks the desktop and starts Kodi, then
-  # marks the source as projector. Turning it off stops Kodi and locks the
-  # desktop. Only reverts TV source to chromecast if projector was actually
-  # active, so a background power correction does not hijack pc/chromecast.
-  # tv_source + source_to_chromecast live in universal_remote; packages merge.
-  - alias: Projector power follows source
+  # Compatibility mirror only. The independent paired-power controller follows
+  # both actual HDMI and Kodi process state; remote modes never choose lifecycle.
+  - alias: Projector power follows HDMI
     id: projector_power_follows_source
     mode: queued
     trigger:
       - platform: state
-        entity_id: input_boolean.projector_power
-        from: "off"
+        entity_id: binary_sensor.projector_hdmi_connected
         to: "on"
-        id: "on"
       - platform: state
-        entity_id: input_boolean.projector_power
-        from: "on"
+        entity_id: binary_sensor.projector_hdmi_connected
         to: "off"
-        id: "off"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: template
+        value_template: "{{ states('binary_sensor.projector_hdmi_connected') in ['on', 'off'] }}"
     action:
-      - choose:
-          - conditions: "{{ trigger.id == 'on' }}"
-            sequence:
-              - action: rest_command.host_projector_on
-              - action: input_text.set_value
-                target: { entity_id: input_text.tv_source }
-                data: { value: projector }
-          - conditions: "{{ trigger.id == 'off' }}"
-            sequence:
-              - action: rest_command.host_projector_off
-              - if: "{{ is_state('input_text.tv_source', 'projector') }}"
-                then:
-                  - action: script.source_to_chromecast
-
-media_player:
-  # Commands-only universal player (no children) — state comes from the
-  # assumed-power input_boolean. Volume is relative (vol±/mute buttons),
-  # so no slider/level is exposed. Source cycling stays a raw button —
-  # the projector can only step inputs, not jump to a named one.
-  - platform: universal
-    name: Projector
-    unique_id: projector_ir
-    device_class: tv
-    commands:
-      turn_on:
-        action: script.projector_turn_on
-      turn_off:
-        action: script.projector_turn_off
-      toggle:
-        action: script.projector_toggle
-      volume_up:
-        action: button.press
-        target: { entity_id: button.projector_vol_up }
-      volume_down:
-        action: button.press
-        target: { entity_id: button.projector_vol_down }
-      volume_mute:
-        action: button.press
-        target: { entity_id: button.projector_mute }
-      media_play:
-        action: button.press
-        target: { entity_id: button.projector_play_pause }
-      media_pause:
-        action: button.press
-        target: { entity_id: button.projector_play_pause }
-      media_play_pause:
-        action: button.press
-        target: { entity_id: button.projector_play_pause }
-    attributes:
-      state: input_boolean.projector_power
+      - action: "input_boolean.turn_{{ states('binary_sensor.projector_hdmi_connected') }}"
+        target: { entity_id: input_boolean.projector_power }
+# Alice can acknowledge the request while HDMI confirms the slow transition.
+yandex_smart_home:
+  entity_config:
+    media_player.projector:
+      slow: true
