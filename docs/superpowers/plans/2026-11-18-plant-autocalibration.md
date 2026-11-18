@@ -35,7 +35,7 @@
 
 ### Task 1: Deterministic calibration engine
 
-**Files:** `custom_components/plant_care_alerts/calibration.py`; `tests/plant_care/test_calibration.py`.
+**Files:** `custom_components/plant_care_alerts/calibration.py`, `calibration_policy.py`; `tests/plant_care/test_calibration.py`.
 
 **Interfaces:** `evaluate_calibration(samples: Sequence[PhysicalSample], references: Sequence[QualifiedWetReference], state: CalibrationState, now: float) -> CalibrationDecision`. Frozen dataclasses carry source identity, explicit reference index, immutable baseline and persisted revision/cooldown/evidence IDs. Decisions use `observe`, `propose` or `rollback`; only the latter two may supply a writable endpoint.
 
@@ -54,7 +54,7 @@
 
 - [ ] Test reference ingestion against the configured allowlist, source identity and explicit protocol/index; caller-supplied arbitrary evidence and a plain user watering report cannot qualify.
 - [ ] Test unchanged defaults in the no-reference deployment, bounded raw-history persistence beyond the analytics/Recorder window and deduplicated qualified cycles.
-- [ ] Persist immutable baseline, revision, pending operation and actual-change journal. Test save/write failure, restart reconciliation and competing manual changes without duplicate application or lost history.
+- [ ] Persist immutable baseline, revision, pending operation and actual-change journal. Before effects, independently reload and compare the validated detached snapshot using a new native Store; preserve the prior care witness when either write or readback fails. Test a swallowed native WriteError, restart reconciliation and competing manual changes without duplicate application or lost history.
 - [ ] Register an own-domain admin action through the documented `async_register_admin_service`, with explicit helper `POLICY_CONTROL`, preserved caller context and a fresh in-handler compare after all authorization awaits. Do not call the internal entity-service registration helper or replace native `set_value`. Prove pending-save, queued-after and synchronous call-event competition with real HA services; fail closed outside the tested native runtime contract.
 - [ ] Distinguish first initialization from a missing or malformed record in an existing Store; explicit original bounds, cooldown and used evidence must never be silently reset.
 - [ ] Test two rapid manual changes221→222→223: two journal entries before refresh coalescing. Test external/manual changes: journal old/new values, revision increment, 30-minute barrier and seven-day cooldown; no rebase of the original span. A new source stays quarantined until separate commissioning.
@@ -63,7 +63,7 @@
 
 ### Task 3: Visible history and release evidence
 
-**Files:** `www/plant-care/plant-care-card.js`; `tests/plant_care/card_autocalibration.test.cjs`; `docs/plant-autocalibration.md`, `docs/plant-care/README.md`; `.github/workflows/plant-care.yml`; `tests/plant_care/render_component.cjs`, `tests/plant_care/fixtures/autocalibration-before.json`, `tests/plant_care/fixtures/live-reading.json`.
+**Files:** `www/plant-care/plant-care-card.js`; `tests/plant_care/test_autocalibration_card.cjs`; `docs/plant-autocalibration.md`, `docs/plant-care/README.md`; `.github/workflows/plant-care.yml`; `tests/plant_care/render_component.cjs`, `tests/plant_care/fixtures/autocalibration-before.json`, `tests/plant_care/fixtures/live-reading.json`.
 
 **Interfaces:** Care attributes expose current calibration status/reason and actual-change history from `CalibrationRuntime.attributes()`. The renderer accepts a sanitized real API snapshot, freezes the clock at `observed_at` and records card/source/snapshot hashes. Its optional `--card-revision` uses an immutable historical commit for the before image.
 

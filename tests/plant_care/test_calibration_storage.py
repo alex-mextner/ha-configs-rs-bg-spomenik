@@ -6,6 +6,8 @@ import copy
 import hashlib
 import importlib.util
 import json
+import sys
+import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "custom_components/plant_care_alerts/calibration_storage.py"
 SOURCE = "sensor.soil"
+RECORD_PATH = f"records[{SOURCE}]"
 CREATED = 1_000_000.0
 APPLIED = CREATED + 16 * 86400
 CONFIGURED = {SOURCE: {"original_dry": 67.0, "original_wet": 221.0}}
@@ -39,6 +42,27 @@ def references() -> list[dict]:
         }
         for index, day in enumerate((0, 7, 14, 15))
     ]
+
+
+def raw_sample(
+    *, raw: float = 200.0, at: float = CREATED, trusted: bool = False
+) -> dict:
+    """Create independent raw and burst observations for a single source epoch."""
+    return {
+        "sampled_at": at,
+        "raw": raw,
+        "burst": [raw] * 11,
+        "source_fingerprint": fingerprint("probe-A", 0),
+        "reliable": trusted,
+        "rollback_eligible": trusted,
+    }
+
+
+def without_reference_snapshots(event: dict) -> dict:
+    """Keep the native minimal event shape, with no qualified reference metadata."""
+    for field in ("reference_ids", "references", "diagnostics"):
+        del event[field]
+    return event
 
 
 def initial_record() -> dict:
@@ -87,49 +111,55 @@ def envelope(record: dict | None = None) -> dict:
     }
 
 
+def qualified_state(event: dict, previous_wet: float | None) -> dict:
+    """Keep the state fields of qualified fixtures consistent with their fact."""
+    return {
+        "current": [event["new_dry"], event["new_wet"]],
+        "previous": [event["old_dry"], event["old_wet"]],
+        "revision": event["revision"],
+        "verified_revision": event["revision"],
+        "previous_wet": previous_wet,
+        "last_applied_at": event["at"],
+        "effective_at": event["at"],
+        "barrier_until": event["at"] + 1800,
+        "last_evidence_id": event["evidence_id"],
+    }
+
+
 def changed_record() -> dict:
     """Record one actual, qualified, bounded wet change."""
     record = initial_record()
     qualified = references()
+    event = {
+        "event_id": "actual-change-1",
+        "source": SOURCE,
+        "at": APPLIED,
+        "detected_at": APPLIED,
+        "kind": "automatic",
+        "old_dry": 67.0,
+        "old_wet": 221.0,
+        "new_dry": 67.0,
+        "new_wet": 222.0,
+        "revision": 1,
+        "source_fingerprint": fingerprint("probe-A", 0),
+        "reason": "qualified_drift",
+        "evidence_id": "accepted-evidence",
+        "reference_ids": [value["reference_id"] for value in qualified],
+        "references": qualified,
+        "diagnostics": {},
+    }
     record.update(
-        current=[67.0, 222.0],
-        previous=[67.0, 221.0],
-        revision=1,
-        verified_revision=1,
-        previous_wet=221.0,
-        last_applied_at=APPLIED,
-        effective_at=APPLIED,
-        barrier_until=APPLIED + 1800,
-        last_evidence_id="accepted-evidence",
-        references=qualified,
+        **qualified_state(event, 221.0),
+        references=copy.deepcopy(qualified),
         applied_without_incident=True,
         status="applied",
-        history=[
-            {
-                "event_id": "actual-change-1",
-                "source": SOURCE,
-                "at": APPLIED,
-                "detected_at": APPLIED,
-                "kind": "automatic",
-                "old_dry": 67.0,
-                "old_wet": 221.0,
-                "new_dry": 67.0,
-                "new_wet": 222.0,
-                "revision": 1,
-                "source_fingerprint": fingerprint("probe-A", 0),
-                "reason": "qualified_drift",
-                "evidence_id": "accepted-evidence",
-                "reference_ids": [value["reference_id"] for value in qualified],
-                "references": qualified,
-                "diagnostics": {},
-            }
-        ],
+        history=[event],
     )
     return record
 
 
-def rollback_record() -> dict:
-    """Record a qualified protective return using a new reference cycle."""
+def rollback_record(*, pending: bool = False) -> dict:
+    """Use one protective return fixture as a persisted intent or actual effect."""
     record = changed_record()
     reference = references()[-1]
     reference.update(
@@ -154,17 +184,23 @@ def rollback_record() -> dict:
         references=[reference],
         diagnostics={"block_evidence_ids": list(blocked)},
     )
+    if pending:
+        intent = pending_record()["pending"]
+        intent.update(
+            expected=[67.0, 222.0],
+            target=[67.0, 221.0],
+            expected_revision=1,
+            started_at=event["at"],
+            **{
+                field: copy.deepcopy(event[field])
+                for field in intent.keys() & event.keys()
+            },
+        )
+        record["pending"] = intent
+        return record
     record["history"].append(event)
     record.update(
-        current=[67.0, 221.0],
-        previous=[67.0, 222.0],
-        revision=2,
-        verified_revision=2,
-        previous_wet=None,
-        last_applied_at=APPLIED + 86400,
-        effective_at=APPLIED + 86400,
-        barrier_until=APPLIED + 86400 + 1800,
-        last_evidence_id="rollback-evidence",
+        **qualified_state(event, None),
         blocked_evidence_ids=blocked,
     )
     return record
@@ -216,7 +252,7 @@ def pending_record() -> dict:
     """Represent persisted intent with no claimed helper effect."""
     record = initial_record()
     qualified = references()
-    record["references"] = qualified
+    record["references"] = copy.deepcopy(qualified)
     record["pending"] = {
         "expected": [67.0, 221.0],
         "target": [67.0, 222.0],
@@ -298,22 +334,12 @@ def following_record(*, pending: bool, at: float = APPLIED + 8 * 86400) -> dict:
             **common,
         )
         record["history"].append(event)
-        record.update(
-            current=[67.0, 223.0],
-            previous=[67.0, 222.0],
-            revision=2,
-            verified_revision=2,
-            previous_wet=222.0,
-            last_applied_at=at,
-            effective_at=at,
-            barrier_until=at + 1800,
-            last_evidence_id="following-evidence",
-        )
+        record.update(qualified_state(event, 222.0))
     return record
 
 
 def decision(record: dict, *, pending: bool) -> dict:
-    """Select the new pending intent or completed fact without aliasing fixtures."""
+    """Return the mutable decision within this independently created fixture."""
     return record["pending"] if pending else record["history"][-1]
 
 
@@ -322,7 +348,13 @@ class StorageIntegrityTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.assertTrue(MODULE.is_file(), "The strict storage validator is missing")
-        spec = importlib.util.spec_from_file_location("_calibration_storage", MODULE)
+        package_name = "_plant_calibration_storage_test"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(MODULE.parent)]
+        sys.modules[package_name] = package
+        spec = importlib.util.spec_from_file_location(
+            f"{package_name}.calibration_storage", MODULE
+        )
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
         module = importlib.util.module_from_spec(spec)
@@ -330,16 +362,31 @@ class StorageIntegrityTests(unittest.TestCase):
         self.validate = module.validate_storage
         self.error = module.StorageIntegrityError
         self.fingerprint = module.source_fingerprint
+        self.decision_fence = getattr(module, "decision_fence", None)
+
+    def accept(self, record: dict) -> dict:
+        data = envelope(record)
+        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        return data
 
     def reject(
-        self, data: Any, witnesses: dict | None = None, *, path: str | None = None
+        self,
+        data: Any,
+        witnesses: dict | None = None,
+        *,
+        path: str | None = None,
+        reason: str | None = None,
     ) -> None:
         before = copy.deepcopy(data)
         with self.assertRaises(self.error) as caught:
             self.validate(data, CONFIGURED, witnesses or {})
         self.assertEqual(data, before, "Rejected evidence must remain intact")
         if path is not None:
-            self.assertIn(path, str(caught.exception))
+            self.assertTrue(
+                str(caught.exception).startswith(f"{path}:"), caught.exception
+            )
+        if reason is not None:
+            self.assertEqual(str(caught.exception), f"{path}: {reason}")
 
     def test_only_absent_store_without_witness_allows_initial_enrollment(self) -> None:
         self.assertEqual(
@@ -353,15 +400,12 @@ class StorageIntegrityTests(unittest.TestCase):
     def test_missing_store_with_existing_witness_is_rejected(self) -> None:
         self.reject(None, {SOURCE: witness(initial_record())})
 
-    def test_manifest_cannot_lose_an_enrolled_record(self) -> None:
-        data = envelope()
-        data["records"].clear()
-        self.reject(data)
-
-    def test_record_cannot_lose_its_manifest_entry(self) -> None:
-        data = envelope()
-        data["initialized_sources"].clear()
-        self.reject(data)
+    def test_manifest_and_records_must_preserve_enrollment(self) -> None:
+        for field in ("records", "initialized_sources"):
+            with self.subTest(missing=field):
+                data = envelope()
+                data[field].clear()
+                self.reject(data)
 
     def test_witness_detects_removal_of_both_manifest_and_record(self) -> None:
         self.reject(
@@ -381,16 +425,7 @@ class StorageIntegrityTests(unittest.TestCase):
         self,
     ) -> None:
         data = envelope()
-        data["records"][SOURCE]["samples"] = [
-            {
-                "sampled_at": CREATED,
-                "raw": 1400.0,
-                "burst": [1400.0] * 11,
-                "source_fingerprint": fingerprint("probe-A", 0),
-                "reliable": False,
-                "rollback_eligible": False,
-            }
-        ]
+        data["records"][SOURCE]["samples"] = [raw_sample(raw=1400.0)]
         self.assertIs(self.validate(data, CONFIGURED, {}), data)
 
     def test_configured_originals_cannot_be_rebased_to_current_helpers(self) -> None:
@@ -429,11 +464,24 @@ class StorageIntegrityTests(unittest.TestCase):
                 self.reject(data)
 
     def test_journal_requires_contiguous_revision_and_original_start(self) -> None:
-        for field, value in (("revision", 2), ("old_wet", 220.0)):
+        cases = (
+            (
+                "revision",
+                2,
+                "journal revision or event identifier is duplicated or missing",
+            ),
+            (
+                "old_wet",
+                221.5,
+                "journal old values do not continue the prior actual state",
+            ),
+        )
+        for field, value, reason in cases:
             with self.subTest(field=field):
                 data = envelope(changed_record())
+                self.assertIs(self.validate(data, CONFIGURED, {}), data)
                 data["records"][SOURCE]["history"][0][field] = value
-                self.reject(data)
+                self.reject(data, path=f"{RECORD_PATH}.history[0]", reason=reason)
 
     def test_initial_record_cannot_claim_an_unjournaled_change(self) -> None:
         data = envelope()
@@ -486,24 +534,8 @@ class StorageIntegrityTests(unittest.TestCase):
                 self.reject(envelope(changed_record()), {SOURCE: observed})
 
     def test_epoch_fence_preserves_an_a_b_a_transition(self) -> None:
-        record = initial_record()
-        for epoch, identity in ((1, "probe-B"), (2, "probe-A")):
-            record["source_fences"].append(
-                {
-                    "epoch": epoch,
-                    "identity": identity,
-                    "fingerprint": fingerprint(identity, epoch),
-                    "at": CREATED + epoch * 100,
-                }
-            )
-        record.update(
-            source_epoch=2,
-            identity_fingerprint="probe-A",
-            source_fingerprint=fingerprint("probe-A", 2),
-            barrier_until=CREATED + 200 + 1800,
-        )
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        record = returned_source(initial_record())
+        data = self.accept(record)
         self.assertNotEqual(
             record["source_fingerprint"], record["baseline"]["source_fingerprint"]
         )
@@ -574,8 +606,7 @@ class StorageIntegrityTests(unittest.TestCase):
             effective_at=APPLIED + 100,
             barrier_until=APPLIED + 1900,
         )
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        self.accept(record)
 
     def test_unverified_native_effect_cannot_claim_qualified_evidence(self) -> None:
         record = changed_record()
@@ -586,42 +617,30 @@ class StorageIntegrityTests(unittest.TestCase):
             verified_revision=None,
             blocked_evidence_ids=["accepted-evidence"],
         )
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        data = self.accept(record)
         record["verified_revision"] = 1
         self.reject(data)
 
     def test_malformed_field_types_fail_through_integrity_error(self) -> None:
-        for location in ("kind", "reference_fingerprint"):
-            with self.subTest(location=location):
-                data = envelope(changed_record())
-                if location == "kind":
-                    data["records"][SOURCE]["history"][0]["kind"] = []
-                else:
-                    data["records"][SOURCE]["references"][0]["source_fingerprint"] = {}
-                try:
-                    self.validate(data, CONFIGURED, {})
-                except (TypeError, ValueError, OverflowError) as error:
-                    self.assertIsInstance(error, self.error)
-                else:
-                    self.fail("Malformed data was accepted")
+        record = changed_record()
+        record["history"][0]["kind"] = []
+        self.reject(envelope(record), path=f"{RECORD_PATH}.history[0].kind")
+        record = changed_record()
+        record["references"][0]["source_fingerprint"] = {}
+        self.reject(
+            envelope(record), path=f"{RECORD_PATH}.references[0].source_fingerprint"
+        )
 
     def test_unrepresentable_timestamp_fails_through_integrity_error(self) -> None:
         data = envelope()
         data["records"][SOURCE]["last_saved_at"] = 10**400
-        try:
-            self.validate(data, CONFIGURED, {})
-        except (TypeError, ValueError, OverflowError) as error:
-            self.assertIsInstance(error, self.error)
-        else:
-            self.fail("Unrepresentable timestamp was accepted")
+        self.reject(data, path=f"{RECORD_PATH}.last_saved_at")
 
     def test_rollback_cannot_lose_both_persistent_exclusions(self) -> None:
         for missing in ("accepted-evidence", "rollback-evidence"):
             with self.subTest(missing=missing):
                 record = rollback_record()
-                data = envelope(record)
-                self.assertIs(self.validate(data, CONFIGURED, {}), data)
+                data = self.accept(record)
                 record["blocked_evidence_ids"].remove(missing)
                 self.assertEqual(
                     record["history"][-1]["diagnostics"]["block_evidence_ids"],
@@ -629,53 +648,25 @@ class StorageIntegrityTests(unittest.TestCase):
                 )
                 self.reject(data)
 
-    def test_pending_rollback_requires_both_future_exclusions(self) -> None:
-        record = changed_record()
-        pending = pending_record()["pending"]
-        reference = references()[-1]
-        reference.update(
-            reference_id="rollback-reference",
-            cycle_id="rollback-cycle",
-            start_at=APPLIED + 100,
-            end_at=APPLIED + 3700,
-        )
-        pending.update(
-            expected=[67.0, 222.0],
-            target=[67.0, 221.0],
-            expected_revision=1,
-            kind="rollback",
-            reason="contradiction",
-            started_at=APPLIED + 86400,
-            evidence_id="rollback-evidence",
-            reference_ids=[reference["reference_id"]],
-            references=[reference],
-            diagnostics={
-                "block_evidence_ids": ["accepted-evidence", "rollback-evidence"]
-            },
-        )
-        record["pending"] = pending
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
-        pending["diagnostics"] = {}
-        self.reject(data)
+    def test_rollback_diagnostics_require_each_excluded_id(self) -> None:
+        for pending in (False, True):
+            for missing in ("accepted-evidence", "rollback-evidence"):
+                with self.subTest(pending=pending, missing=missing):
+                    record = rollback_record(pending=pending)
+                    data = self.accept(record)
+                    decision(record, pending=pending)["diagnostics"][
+                        "block_evidence_ids"
+                    ].remove(missing)
+                    suffix = "pending" if pending else "history[1]"
+                    self.reject(
+                        data,
+                        path=f"{RECORD_PATH}.{suffix}.diagnostics.block_evidence_ids",
+                        reason="rollback must exclude its prior and contradictory evidence",
+                    )
 
     def test_uncertain_attempt_is_preserved_without_inventing_a_change(self) -> None:
-        record = initial_record()
-        record["blocked_evidence_ids"] = ["uncertain-evidence"]
-        record["attempts"] = [
-            {
-                "attempt_id": "unconfirmed-context",
-                "started_at": APPLIED,
-                "resolved_at": APPLIED + 1,
-                "outcome": "interrupted_unknown",
-                "expected": [67.0, 221.0],
-                "target": [67.0, 222.0],
-                "observed": [67.0, 221.0],
-                "evidence_id": "uncertain-evidence",
-            }
-        ]
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        record = uncertain_record(initial_record(), APPLIED + 1)
+        data = self.accept(record)
         self.assertEqual(record["revision"], 0)
         self.assertEqual(record["history"], [])
         record["blocked_evidence_ids"] = []
@@ -686,45 +677,37 @@ class StorageIntegrityTests(unittest.TestCase):
         record["attempts"][0]["outcome"] = "applied"
         self.reject(data)
 
-    def test_completed_history_rejects_evidence_blocked_by_earlier_uncertainty(
-        self,
-    ) -> None:
+    def test_history_cannot_reuse_earlier_uncertain_evidence(self) -> None:
+        uncertain = uncertain_record(initial_record(), APPLIED + 1)
         record = changed_record()
-        effect = APPLIED + 8 * 86400
-        record["history"][0].update(
-            at=effect, detected_at=effect, evidence_id="uncertain-evidence"
-        )
+        effect = APPLIED + 16 * 86400
+        event = record["history"][0]
+        for reference in event["references"]:
+            reference["start_at"] += APPLIED + 2 - CREATED
+            reference["end_at"] += APPLIED + 2 - CREATED
+        event.update(at=effect, detected_at=effect)
         record.update(
             last_applied_at=effect,
             effective_at=effect,
             barrier_until=effect + 1800,
-            last_evidence_id="uncertain-evidence",
-            blocked_evidence_ids=["uncertain-evidence"],
-            attempts=[
-                {
-                    "attempt_id": "earlier-uncertain-context",
-                    "started_at": APPLIED,
-                    "resolved_at": APPLIED + 1,
-                    "outcome": "interrupted_unknown",
-                    "expected": [67.0, 221.0],
-                    "target": [67.0, 222.0],
-                    "observed": [67.0, 221.0],
-                    "evidence_id": "uncertain-evidence",
-                }
-            ],
+            blocked_evidence_ids=uncertain["blocked_evidence_ids"],
+            attempts=uncertain["attempts"],
         )
-        self.reject(envelope(record))
+        data = self.accept(record)
+        event["evidence_id"] = record["last_evidence_id"] = "unknown-evidence"
+        self.reject(
+            data,
+            path=f"{RECORD_PATH}.history[0]",
+            reason="completed effect reuses evidence already excluded at that time",
+        )
 
-    def test_pending_references_cannot_be_relabelled_before_returned_epoch(
-        self,
-    ) -> None:
+    def test_reference_relabelling_cannot_cross_source_epoch(self) -> None:
         record = returned_source(pending_record())
         pending = record["pending"]
         pending.update(
             source_epoch=2,
             source_fingerprint=record["source_fingerprint"],
             started_at=APPLIED + 2000,
-            references=copy.deepcopy(pending["references"]),
         )
         for reference in pending["references"]:
             reference["source_fingerprint"] = record["source_fingerprint"]
@@ -748,8 +731,7 @@ class StorageIntegrityTests(unittest.TestCase):
 
     def test_completed_rollback_restores_the_preceding_verified_wet(self) -> None:
         record = rollback_record()
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        data = self.accept(record)
         record["history"][-1]["new_wet"] = 223.0
         record["current"][1] = 223.0
         self.reject(data)
@@ -757,10 +739,8 @@ class StorageIntegrityTests(unittest.TestCase):
     def test_completed_effect_cannot_use_a_future_reference(self) -> None:
         record = changed_record()
         event = record["history"][0]
-        event["references"] = copy.deepcopy(event["references"])
         event["references"][-1].update(start_at=APPLIED - 3600, end_at=APPLIED)
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        data = self.accept(record)
         event["references"][-1]["end_at"] = APPLIED + 1
         self.reject(data)
 
@@ -813,8 +793,7 @@ class StorageIntegrityTests(unittest.TestCase):
             for field in ("reference_id", "cycle_id"):
                 with self.subTest(pending=pending, field=field):
                     record = following_record(pending=pending)
-                    data = envelope(record)
-                    self.assertIs(self.validate(data, CONFIGURED, {}), data)
+                    data = self.accept(record)
                     value = decision(record, pending=pending)
                     value["references"][0][field] = record["history"][0]["references"][
                         0
@@ -828,8 +807,7 @@ class StorageIntegrityTests(unittest.TestCase):
         for pending in (False, True):
             with self.subTest(pending=pending):
                 record = following_record(pending=pending, at=APPLIED + 7 * 86400)
-                data = envelope(record)
-                self.assertIs(self.validate(data, CONFIGURED, {}), data)
+                data = self.accept(record)
                 value = decision(record, pending=pending)
                 if pending:
                     value["started_at"] -= 1
@@ -844,21 +822,18 @@ class StorageIntegrityTests(unittest.TestCase):
         for pending in (False, True):
             with self.subTest(pending=pending):
                 record = following_record(pending=pending)
-                record["blocked_evidence_ids"] = ["unknown-evidence"]
-                record["attempts"] = [
-                    {
-                        "attempt_id": "unknown-context",
-                        "started_at": APPLIED + 1,
-                        "resolved_at": APPLIED + 2,
-                        "outcome": "interrupted_unknown",
-                        "expected": [67.0, 222.0],
-                        "target": [67.0, 223.0],
-                        "observed": [67.0, 222.0],
-                        "evidence_id": "unknown-evidence",
-                    }
-                ]
+                unknown = uncertain_record(changed_record(), APPLIED + 2)
+                record.update(
+                    attempts=unknown["attempts"],
+                    blocked_evidence_ids=unknown["blocked_evidence_ids"],
+                )
                 data = envelope(record)
-                self.reject(data)
+                suffix = "pending" if pending else "history[1]"
+                self.reject(
+                    data,
+                    path=f"{RECORD_PATH}.{suffix}",
+                    reason="qualified decision reuses a pre-change reference window",
+                )
                 for reference in decision(record, pending=pending)["references"]:
                     reference["start_at"] += 2
                     reference["end_at"] += 2
@@ -894,22 +869,13 @@ class StorageIntegrityTests(unittest.TestCase):
                         verified_revision=None,
                         blocked_evidence_ids=["accepted-evidence"],
                     )
-                    data = envelope(record)
-                    self.assertIs(self.validate(data, CONFIGURED, {}), data)
+                    self.accept(record)
 
     def test_samples_belong_to_their_complete_epoch_interval(self) -> None:
         record = returned_source(initial_record())
-        sample = {
-            "sampled_at": APPLIED,
-            "raw": 200.0,
-            "burst": [200.0] * 11,
-            "source_fingerprint": fingerprint("probe-A", 0),
-            "reliable": True,
-            "rollback_eligible": True,
-        }
+        sample = raw_sample(at=APPLIED, trusted=True)
         record["samples"] = [sample]
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        data = self.accept(record)
         sample["sampled_at"] = APPLIED + 1
         self.reject(data)
         sample.update(
@@ -924,8 +890,7 @@ class StorageIntegrityTests(unittest.TestCase):
         reference = references()[-1]
         record["references"] = [reference]
         reference.update(start_at=APPLIED - 3600, end_at=APPLIED)
-        data = envelope(record)
-        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+        data = self.accept(record)
         reference["end_at"] = APPLIED + 1
         self.reject(data)
         reference.update(start_at=APPLIED + 3, end_at=APPLIED + 3603)
@@ -937,18 +902,10 @@ class StorageIntegrityTests(unittest.TestCase):
                 for trusted in ("reliable", "rollback_eligible"):
                     with self.subTest(value=value, field=field, trusted=trusted):
                         record = initial_record()
-                        sample = {
-                            "sampled_at": CREATED,
-                            "raw": 200.0,
-                            "burst": [200.0] * 11,
-                            "source_fingerprint": record["source_fingerprint"],
-                            "reliable": False,
-                            "rollback_eligible": False,
-                        }
+                        sample = raw_sample()
                         sample[field] = value if field == "raw" else [value] * 11
                         record["samples"] = [sample]
-                        data = envelope(record)
-                        self.assertIs(self.validate(data, CONFIGURED, {}), data)
+                        data = self.accept(record)
                         sample[trusted] = True
                         self.reject(data)
 
@@ -1010,8 +967,7 @@ class StorageIntegrityTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 record = changed_record()
                 event = record["history"][0]
-                for field in ("reference_ids", "references", "diagnostics"):
-                    del event[field]
+                without_reference_snapshots(event)
                 manual = dict(event)
                 manual.update(
                     event_id="manual-change-1",
@@ -1051,16 +1007,16 @@ class StorageIntegrityTests(unittest.TestCase):
                             record[field] = None
                     self.reject(envelope(record), observed)
 
-    def test_unknown_event_reasons_cannot_discard_evidence_exclusions(self) -> None:
+    def test_event_reason_must_belong_to_its_declared_kind(self) -> None:
         for reason in ("unknown_effect", "contradiction"):
             with self.subTest(reason=reason):
-                record = following_record(pending=True)
+                record = changed_record()
                 record["history"][0]["reason"] = reason
-                record.update(
-                    last_evidence_id=None, verified_revision=None, previous_wet=None
+                self.reject(
+                    envelope(record),
+                    path=f"{RECORD_PATH}.history[0].reason",
+                    reason="reason does not describe a supported event kind",
                 )
-                record["pending"]["evidence_id"] = "accepted-evidence"
-                self.reject(envelope(record))
 
     def test_reconciled_external_effect_keeps_its_exclusion_without_attempts(
         self,
@@ -1074,8 +1030,7 @@ class StorageIntegrityTests(unittest.TestCase):
                     at=None,
                     reason="pending_effect_reconciled",
                 )
-                for field in ("reference_ids", "references", "diagnostics"):
-                    del event[field]
+                without_reference_snapshots(event)
                 record.update(
                     last_evidence_id=None, verified_revision=None, previous_wet=None
                 )
@@ -1107,52 +1062,39 @@ class StorageIntegrityTests(unittest.TestCase):
                 record = following_record(pending=False)
                 record["history"][index]["new_wet"] = "invalid"
                 self.reject(
-                    envelope(record), path=f"records[{SOURCE}].history[{index}].new_wet"
+                    envelope(record), path=f"{RECORD_PATH}.history[{index}].new_wet"
                 )
         for field, suffix in (("raw", "raw"), ("burst", "burst[2]")):
             with self.subTest(sample=field):
                 record = initial_record()
-                sample = {
-                    "sampled_at": CREATED,
-                    "raw": 200.0,
-                    "burst": [200.0] * 11,
-                    "source_fingerprint": record["source_fingerprint"],
-                    "reliable": False,
-                    "rollback_eligible": False,
-                }
+                sample = raw_sample()
                 record["samples"] = [copy.deepcopy(sample), sample]
                 if field == "raw":
                     sample["raw"] = "invalid"
                 else:
                     sample["burst"][2] = "invalid"
-                self.reject(
-                    envelope(record), path=f"records[{SOURCE}].samples[1].{suffix}"
-                )
+                self.reject(envelope(record), path=f"{RECORD_PATH}.samples[1].{suffix}")
         record = uncertain_record(initial_record())
         attempt = copy.deepcopy(record["attempts"][0])
         attempt["attempt_id"] = "second-attempt"
         attempt["target"][1] = "invalid"
         record["attempts"].append(attempt)
-        self.reject(envelope(record), path=f"records[{SOURCE}].attempts[1].target[1]")
+        self.reject(envelope(record), path=f"{RECORD_PATH}.attempts[1].target[1]")
         for field in ("expected", "target"):
             with self.subTest(pending=field):
                 record = pending_record()
                 record["pending"][field][1] = "invalid"
-                self.reject(
-                    envelope(record), path=f"records[{SOURCE}].pending.{field}[1]"
-                )
+                self.reject(envelope(record), path=f"{RECORD_PATH}.pending.{field}[1]")
 
-    def test_qualified_decision_rejects_duplicate_reference_or_cycle_identity(
-        self,
-    ) -> None:
+    def test_qualified_reference_and_cycle_ids_must_be_unique(self) -> None:
         for factory in (pending_record, changed_record):
             for field in ("reference_id", "cycle_id"):
                 with self.subTest(factory=factory.__name__, field=field):
                     record = factory()
                     value = record["pending"] or record["history"][-1]
-                    duplicate = copy.deepcopy(value["references"][0])
-                    duplicate["cycle_id"] = "different-cycle"
                     if field == "reference_id":
+                        duplicate = copy.deepcopy(value["references"][0])
+                        duplicate["cycle_id"] = "different-cycle"
                         value["references"].append(duplicate)
                     else:
                         for reference in value["references"]:
@@ -1168,11 +1110,83 @@ class StorageIntegrityTests(unittest.TestCase):
                 "broken-clock",
                 None,
                 False,
+                0,
+                -1,
             ):
                 with self.subTest(factory=factory.__name__, barrier=invalid):
                     record = factory()
                     record["barrier_until"] = invalid
                     self.reject(envelope(record), {SOURCE: witness(record)})
+
+    def test_decision_fence_filters_only_uncertainty_resolutions(self) -> None:
+        self.assertTrue(callable(self.decision_fence))
+        self.assertIsNone(self.decision_fence(initial_record()))
+        record = uncertain_record(changed_record(), APPLIED + 10)
+        record["attempts"].append(
+            record["attempts"][0]
+            | {
+                "attempt_id": "aborted-context",
+                "outcome": "aborted",
+                "resolved_at": APPLIED + 20,
+            }
+        )
+        self.validate(envelope(record), CONFIGURED, {})
+        self.assertEqual(self.decision_fence(record), APPLIED + 10)
+        self.assertEqual(self.decision_fence(record, before=APPLIED + 9), APPLIED)
+        self.assertEqual(self.decision_fence(record, before=APPLIED + 10), APPLIED + 10)
+        replay = record | {"last_applied_at": None}
+        self.assertIsNone(self.decision_fence(replay, before=APPLIED + 9))
+        self.assertEqual(self.decision_fence(record, before=CREATED), APPLIED)
+
+    def test_nested_identifier_and_fence_errors_name_the_exact_field(self) -> None:
+        record = pending_record()
+        record["pending"]["diagnostics"]["block_evidence_ids"] = ["valid", {}]
+        self.reject(
+            envelope(record),
+            path=f"{RECORD_PATH}.pending.diagnostics.block_evidence_ids[1]",
+        )
+        record = pending_record()
+        record["pending"]["reference_ids"][1] = {}
+        self.reject(envelope(record), path=f"{RECORD_PATH}.pending.reference_ids[1]")
+        record = returned_source(initial_record())
+        record["source_fences"][1]["at"] = "invalid"
+        self.reject(envelope(record), path=f"{RECORD_PATH}.source_fences[1].at")
+
+    def test_unbound_helper_observations_are_structural_facts_only(self) -> None:
+        record = initial_record()
+        observation = {
+            "endpoint": "wet",
+            "before": 221.0,
+            "after": 223.0,
+            "at": CREATED - 10,
+            "context_id": None,
+            "event_id": "early-helper",
+            "detected_at": CREATED,
+            "source_fingerprint": None,
+            "reason": "pre_enrollment",
+        }
+        record["helper_observations"] = [observation]
+        for reason in ("pre_enrollment", "ambiguous_order", "invalid_time"):
+            observation.update(
+                reason=reason, at=APPLIED if reason == "invalid_time" else CREATED - 10
+            )
+            data = self.accept(record)
+        self.assertEqual(record["history"], [])
+        self.assertIsNone(self.decision_fence(record))
+        for field, invalid in (
+            ("endpoint", "raw"),
+            ("before", "221"),
+            ("at", 0),
+            ("context_id", 1),
+            ("source_fingerprint", fingerprint("probe-A", 0)),
+            ("reason", "qualified_drift"),
+        ):
+            with self.subTest(field=field):
+                corrupted = copy.deepcopy(data)
+                corrupted["records"][SOURCE]["helper_observations"][0][field] = invalid
+                self.reject(
+                    corrupted, path=f"{RECORD_PATH}.helper_observations[0].{field}"
+                )
 
     def test_fingerprint_includes_the_persisted_epoch(self) -> None:
         self.assertEqual(self.fingerprint("probe-A", 0), fingerprint("probe-A", 0))

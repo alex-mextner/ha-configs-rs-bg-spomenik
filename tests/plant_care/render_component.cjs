@@ -134,27 +134,29 @@ async function verifyFault(page, snapshot) {
 }
 async function verifyCalibrationView(page, snapshot) {
   const attributes = snapshot.plant.attributes;
-  if (typeof attributes.calibration_enabled !== 'boolean') return false;
+  if (typeof attributes.calibration_enabled !== 'boolean') return {opened: false, preservedAfterUpdate: false};
   assert.ok(await page.locator('plant-care-card .calibration-status').isVisible());
   await page.locator('plant-care-card .calibration-details summary').click();
-  assert.ok(await page.locator('plant-care-card .calibration-details').evaluate(details => details.open));
+  const opened = await page.locator('plant-care-card .calibration-details').evaluate(details => details.open);
+  assert.ok(opened);
   await page.evaluate(() => {
     const card = document.querySelector('plant-care-card');
     card.hass = card._hass;
   });
-  assert.ok(await page.locator('plant-care-card .calibration-details').evaluate(details => details.open), 'An ordinary HA update closed the calibration history');
+  const preservedAfterUpdate = await page.locator('plant-care-card .calibration-details').evaluate(details => details.open);
+  assert.ok(preservedAfterUpdate, 'An ordinary HA update closed the calibration history');
   assert.ok(await page.locator('plant-care-card .calibration-scale').isVisible());
   if (!attributes.calibration_history_available) {
     assert.equal(await page.locator('plant-care-card .calibration-event').count(), 0);
     assert.equal(await page.locator('plant-care-card .calibration-unavailable').innerText(), 'История калибровки временно недоступна');
     assert.equal(await page.locator('plant-care-card .calibration-empty').count(), 0);
-    return true;
+    return {opened, preservedAfterUpdate};
   }
   assert.equal(await page.locator('plant-care-card .calibration-event').count(), attributes.calibration_history.length);
   if (!attributes.calibration_history.length) {
     assert.equal(await page.locator('plant-care-card .calibration-empty').innerText(), 'Записанных изменений калибровки пока нет');
   }
-  return true;
+  return {opened, preservedAfterUpdate};
 }
 async function renderViews(browser, snapshot, cardPath, cardHash, output) {
   const screenshots = [];
@@ -164,11 +166,16 @@ async function renderViews(browser, snapshot, cardPath, cardHash, output) {
     try {
       await mount(page, snapshot, cardPath, cardHash);
       await verifyFault(page, snapshot);
-      const calibrationDetailsOpened = await verifyCalibrationView(page, snapshot);
+      const calibrationDetails = await verifyCalibrationView(page, snapshot);
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Component has horizontal overflow');
       const file = viewport.name + '.png';
       await page.screenshot({path: path.join(output, file), fullPage: true});
-      screenshots.push({file, sha256: sha256(fs.readFileSync(path.join(output, file))), calibration_details_opened: calibrationDetailsOpened, calibration_details_preserved_after_update: calibrationDetailsOpened});
+      screenshots.push({
+        file,
+        sha256: sha256(fs.readFileSync(path.join(output, file))),
+        calibration_details_opened: calibrationDetails.opened,
+        calibration_details_preserved_after_update: calibrationDetails.preservedAfterUpdate,
+      });
       log('Captured ' + viewport.name + ' component preview');
     } finally {
       await page.close();

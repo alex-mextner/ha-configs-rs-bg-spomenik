@@ -31,9 +31,10 @@ template:
 script:
   plant_care_status:
     alias: "Состояние растений"
-    description: "Сообщить влажность и состояние полива стрелиции на выбранной колонке."
+    description: "Сообщить влажность и состояние полива на Станции, которой задан вопрос."
     icon: mdi:flower
-    mode: single
+    mode: parallel
+    max: 10
     max_exceeded: silent
     fields:
       speak:
@@ -42,7 +43,27 @@ script:
         default: true
         selector:
           boolean:
+      reply_target:
+        name: "Станция, которой задан вопрос"
+        description: "Обязательна для речи; без неё доступна проверка с speak: false."
+        selector:
+          entity:
+            filter:
+              - integration: yandex_station
+                domain: media_player
     sequence:
+      - variables:
+          reply_target: "{{ reply_target | default('', true) }}"
+      - if: >-
+          {% set reply_entry = config_entry_id(reply_target)
+             if reply_target is string and reply_target.startswith('media_player.') else none %}
+          {{ speak | default(true) | bool
+             and (not reply_entry
+                  or config_entry_attr(reply_entry, 'domain') != 'yandex_station'
+                  or not has_value(reply_target)) }}
+        then:
+          - stop: "Для ответа нужна доступная Станция, которой задан вопрос."
+            error: true
       - action: plant_care_alerts.refresh
       - variables:
           care_entity: sensor.strelitsiia_poliv
@@ -109,8 +130,45 @@ script:
             forecast_status: "{{ forecast_status }}"
       - if: "{{ speak | default(true) | bool }}"
         then:
-          - action: plant_care_alerts.announce
+          - if: "{{ not has_value(reply_target) }}"
+            then:
+              - stop: "Станция, которой задан вопрос, стала недоступна."
+                error: true
+          - action: media_player.play_media
+            target:
+              entity_id: "{{ reply_target }}"
             data:
-              message: "{{ report.message }}"
+              media_content_type: text
+              media_content_id: "{{ report.message }}"
       - stop: "Состояние растений готово"
         response_variable: report
+
+
+automation:
+  - id: plant_care_yandex_reply
+    alias: "Растения: ответ на Станции запроса"
+    description: "Прямое событие Станции задаёт адресата каждого голосового отчёта."
+    mode: parallel
+    max: 10
+    max_exceeded: silent
+    triggers:
+      - trigger: event
+        event_type: yandex_speaker
+        event_data:
+          instance: text_action
+          value: "ничего не делай...,,::..,,..."
+    variables:
+      reply_target: "{{ trigger.event.data.entity_id | default('', true) }}"
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set reply_entry = config_entry_id(reply_target)
+             if reply_target is string and reply_target.startswith('media_player.') else none %}
+          {{ reply_entry
+             and config_entry_attr(reply_entry, 'domain') == 'yandex_station'
+             and has_value(reply_target) }}
+    actions:
+      - action: script.plant_care_status
+        data:
+          reply_target: "{{ reply_target }}"
+          speak: true

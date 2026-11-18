@@ -1,38 +1,166 @@
-"""Validate durable calibration evidence without repairing or rebasing it."""
+"""
+Validate durable calibration evidence without repairing or rebasing it.
+
+Required keys are declared below. Envelopes and reference snapshots reject unknown
+keys; other records allow diagnostic extensions. Effect fields may be absent only
+when the journal or current verification permits it. Optional attempts and unbound
+helper observations retain uncertainty without claiming an actual calibration.
+A separate care witness detects rollback of facts it has already observed; this
+validator cannot authenticate a wholesale rewrite of both independent stores.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
-from typing import Any, Never
+from typing import TYPE_CHECKING, Any, Never
+
+from .calibration_policy import (
+    ADC_MAX,
+    BARRIER_SECONDS,
+    COOLDOWN_SECONDS,
+    EPSILON,
+    MAX_STEP_FRACTION,
+    canonical_digest,
+    within_envelope,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 FORMAT_VERSION = 1
-ADC_MAX = 4095
-BARRIER_SECONDS = 1800
-COOLDOWN_SECONDS = 7 * 86400
-TOTAL_FRACTION = 0.05
-STEP_FRACTION = 0.01
-EPSILON = 1e-9
+UNKNOWN_OUTCOME = "interrupted_unknown"
 PAIR_SIZE = 2
+type EpochIntervals = dict[str, tuple[float, float]]
+ENVELOPE_FIELDS = frozenset({"format_version", "initialized_sources", "records"})
+ORIGINAL_FIELDS = frozenset({"original_dry", "original_wet"})
+BASELINE_FIELDS = frozenset(
+    {"dry", "wet", "source_fingerprint", "created_at", "provenance"}
+)
+FENCE_FIELDS = frozenset({"epoch", "identity", "fingerprint", "at"})
+EVIDENCE_FIELDS = frozenset(
+    {"evidence_id", "reference_ids", "references", "diagnostics"}
+)
+SNAPSHOT_FIELDS = EVIDENCE_FIELDS - {"evidence_id"}
+EVENT_FIELDS = frozenset(
+    {
+        "event_id",
+        "source",
+        "at",
+        "detected_at",
+        "kind",
+        "old_dry",
+        "old_wet",
+        "new_dry",
+        "new_wet",
+        "revision",
+        "source_fingerprint",
+    }
+)
+SAMPLE_FIELDS = frozenset(
+    {
+        "sampled_at",
+        "raw",
+        "burst",
+        "source_fingerprint",
+        "reliable",
+        "rollback_eligible",
+    }
+)
+PENDING_FIELDS = frozenset(
+    {
+        "expected",
+        "target",
+        "expected_revision",
+        "source_fingerprint",
+        "source_epoch",
+        "kind",
+        "context_id",
+        "started_at",
+        "reason",
+        "without_incident",
+    }
+)
+ATTEMPT_FIELDS = frozenset(
+    {
+        "attempt_id",
+        "started_at",
+        "resolved_at",
+        "outcome",
+        "expected",
+        "target",
+        "observed",
+        "evidence_id",
+    }
+)
+RECORD_FIELDS = frozenset(
+    {
+        "source",
+        "baseline",
+        "current",
+        "previous",
+        "source_fingerprint",
+        "identity_fingerprint",
+        "source_epoch",
+        "source_fences",
+        "revision",
+        "blocked_evidence_ids",
+        "history",
+        "samples",
+        "references",
+        "pending",
+        "status",
+        "last_saved_at",
+        "last_evaluated_at",
+    }
+)
+WITNESS_FIELDS = frozenset(
+    {
+        "baseline_dry",
+        "baseline_wet",
+        "baseline_fingerprint",
+        "source_epoch",
+        "source_fingerprint",
+        "revision",
+        "last_event_id",
+        "last_applied_at",
+        "decision_fence_at",
+    }
+)
+HELPER_OBSERVATION_FIELDS = frozenset(
+    {
+        "endpoint",
+        "before",
+        "after",
+        "at",
+        "context_id",
+        "event_id",
+        "detected_at",
+        "source_fingerprint",
+        "reason",
+    }
+)
+ATTEMPT_OUTCOMES = frozenset({"aborted", UNKNOWN_OUTCOME})
+HELPER_REASONS = frozenset({"pre_enrollment", "ambiguous_order", "invalid_time"})
 QUALIFIED_REASONS = {"automatic": "qualified_drift", "rollback": "contradiction"}
-EXCLUDED_REASONS = {"concurrent_change", "pending_effect_reconciled"}
+EXCLUDED_REASONS = frozenset({"concurrent_change", "pending_effect_reconciled"})
 EVENT_REASONS = {
-    "automatic": {"qualified_drift", "concurrent_change"},
-    "rollback": {"contradiction", "concurrent_change"},
-    "manual": {None},
-    "external_discovered": {None, "pending_effect_reconciled"},
+    "automatic": frozenset({"qualified_drift", "concurrent_change"}),
+    "rollback": frozenset({"contradiction", "concurrent_change"}),
+    "manual": frozenset({None}),
+    "external_discovered": frozenset({None, "pending_effect_reconciled"}),
 }
-REFERENCE_FIELDS = {
-    "reference_id",
-    "cycle_id",
-    "start_at",
-    "end_at",
-    "source_fingerprint",
-    "reference_source",
-    "protocol",
-    "reference_index",
-}
+REFERENCE_FIELDS = frozenset(
+    {
+        "reference_id",
+        "cycle_id",
+        "start_at",
+        "end_at",
+        "source_fingerprint",
+        "reference_source",
+        "protocol",
+        "reference_index",
+    }
+)
 
 
 class StorageIntegrityError(ValueError):
@@ -56,7 +184,7 @@ def _list(value: Any, path: str) -> list:
     return value
 
 
-def _required(value: dict, fields: set[str], path: str) -> None:
+def _required(value: dict, fields: frozenset[str] | set[str], path: str) -> None:
     missing = fields - value.keys()
     if missing:
         _fail(path, f"missing fields {sorted(missing)}")
@@ -109,8 +237,8 @@ def _pair(value: Any, path: str) -> list:
 
 def _strings(value: Any, path: str) -> list:
     result = _list(value, path)
-    for item in result:
-        _text(item, path)
+    for index, item in enumerate(result):
+        _text(item, f"{path}[{index}]")
     if len(set(result)) != len(result):
         _fail(path, "duplicate identifiers")
     return result
@@ -120,57 +248,61 @@ def source_fingerprint(identity: str, epoch: int) -> str:
     """Bind an observed source identity to a persistent, nonreusable epoch."""
     _text(identity, "source identity")
     _integer(epoch, "source epoch")
-    value = json.dumps([identity, epoch], separators=(",", ":")).encode()
-    return hashlib.sha256(value).hexdigest()
+    return canonical_digest([identity, epoch])
+
+
+def _anchors(value: dict, path: str, fields: tuple[str, str]) -> list:
+    dry = _number(value[fields[0]], f"{path}.{fields[0]}")
+    wet = _number(value[fields[1]], f"{path}.{fields[1]}")
+    if not 0 <= dry < wet <= ADC_MAX:
+        _fail(path, "invalid original anchors")
+    return [dry, wet]
 
 
 def _originals(value: Any, path: str) -> list:
     config = _mapping(value, path)
-    _required(config, {"original_dry", "original_wet"}, path)
-    dry = _number(config["original_dry"], f"{path}.original_dry")
-    wet = _number(config["original_wet"], f"{path}.original_wet")
-    if not 0 <= dry < wet <= ADC_MAX:
-        _fail(path, "invalid configured original anchors")
-    return [dry, wet]
+    _required(config, ORIGINAL_FIELDS, path)
+    return _anchors(config, path, ("original_dry", "original_wet"))
 
 
 def _baseline(record: dict, configured: dict | None, path: str) -> list:
-    value = _mapping(record["baseline"], f"{path}.baseline")
-    _required(
-        value,
-        {"dry", "wet", "source_fingerprint", "created_at", "provenance"},
-        f"{path}.baseline",
-    )
-    original = _originals(
-        {"original_dry": value["dry"], "original_wet": value["wet"]},
-        f"{path}.baseline",
-    )
+    baseline_path = f"{path}.baseline"
+    value = _mapping(record["baseline"], baseline_path)
+    _required(value, BASELINE_FIELDS, baseline_path)
+    original = _anchors(value, baseline_path, ("dry", "wet"))
     if value["provenance"] != "configured_original":
-        _fail(path, "baseline lacks configured-original provenance")
-    _timestamp(value["created_at"], f"{path}.baseline.created_at")
-    _text(value["source_fingerprint"], f"{path}.baseline.source_fingerprint")
+        _fail(
+            f"{baseline_path}.provenance",
+            "baseline lacks configured-original provenance",
+        )
+    _timestamp(value["created_at"], f"{baseline_path}.created_at")
+    _text(value["source_fingerprint"], f"{baseline_path}.source_fingerprint")
     if configured is not None and original != _originals(configured, path):
-        _fail(path, "stored baseline contradicts configured original anchors")
+        _fail(baseline_path, "stored baseline contradicts configured original anchors")
     return original
 
 
-def _fences(record: dict, path: str) -> dict[str, tuple[float, float]]:
+def _fences(record: dict, path: str) -> EpochIntervals:
     epoch = _integer(record["source_epoch"], f"{path}.source_epoch")
     fences = _list(record["source_fences"], f"{path}.source_fences")
     if len(fences) != epoch + 1:
         _fail(path, "source epoch and fence history disagree")
     previous_at = 0.0
     for index, item in enumerate(fences):
-        fence = _mapping(item, f"{path}.source_fences[{index}]")
-        _required(fence, {"epoch", "identity", "fingerprint", "at"}, path)
-        if _integer(fence["epoch"], path) != index:
-            _fail(path, "source fences are not contiguous")
-        identity = _text(fence["identity"], path)
+        fence_path = f"{path}.source_fences[{index}]"
+        fence = _mapping(item, fence_path)
+        _required(fence, FENCE_FIELDS, fence_path)
+        if _integer(fence["epoch"], f"{fence_path}.epoch") != index:
+            _fail(f"{fence_path}.epoch", "source fences are not contiguous")
+        identity = _text(fence["identity"], f"{fence_path}.identity")
         if fence["fingerprint"] != source_fingerprint(identity, index):
-            _fail(path, "source fence fingerprint does not bind its identity and epoch")
-        at = _timestamp(fence["at"], path)
+            _fail(
+                f"{fence_path}.fingerprint",
+                "source fence fingerprint does not bind its identity and epoch",
+            )
+        at = _timestamp(fence["at"], f"{fence_path}.at")
         if at < previous_at:
-            _fail(path, "source fence times moved backwards")
+            _fail(f"{fence_path}.at", "source fence times moved backwards")
         previous_at = at
     baseline = record["baseline"]
     if (
@@ -188,7 +320,7 @@ def _fences(record: dict, path: str) -> dict[str, tuple[float, float]]:
 
 
 def _epoch_time(
-    fingerprint: Any, at: float, intervals: dict[str, tuple[float, float]], path: str
+    fingerprint: Any, at: float, intervals: EpochIntervals, path: str
 ) -> None:
     identity = _text(fingerprint, path)
     if identity not in intervals:
@@ -198,12 +330,12 @@ def _epoch_time(
         _fail(path, "observation time is outside its source epoch")
 
 
-def _reference(
-    value: Any, fingerprints: dict[str, tuple[float, float]], path: str
-) -> dict:
+def _reference(value: Any, fingerprints: EpochIntervals, path: str) -> dict:
     reference = _mapping(value, path)
-    if set(reference) != REFERENCE_FIELDS:
-        _fail(path, "reference fields are incomplete or unknown")
+    _required(reference, REFERENCE_FIELDS, path)
+    unknown = reference.keys() - REFERENCE_FIELDS
+    if unknown:
+        _fail(path, f"unknown reference fields {sorted(unknown, key=str)}")
     for field in ("reference_id", "cycle_id", "reference_source", "protocol"):
         _text(reference[field], f"{path}.{field}")
     start = _timestamp(reference["start_at"], f"{path}.start_at")
@@ -211,27 +343,21 @@ def _reference(
     if start >= end:
         _fail(path, "reference interval is empty or reversed")
     _number(reference["reference_index"], f"{path}.reference_index")
-    fingerprint = reference["source_fingerprint"]
+    fingerprint = _text(reference["source_fingerprint"], f"{path}.source_fingerprint")
     _epoch_time(fingerprint, start, fingerprints, f"{path}.start_at")
     _epoch_time(fingerprint, end, fingerprints, f"{path}.end_at")
     return reference
 
 
-def _references(
-    value: Any, fingerprints: dict[str, tuple[float, float]], path: str
-) -> list:
+def _references(value: Any, fingerprints: EpochIntervals, path: str) -> list:
     references = _list(value, path)
     for index, reference in enumerate(references):
         _reference(reference, fingerprints, f"{path}[{index}]")
     return references
 
 
-def _evidence(
-    value: dict, fingerprints: dict[str, tuple[float, float]], path: str
-) -> None:
-    _required(
-        value, {"evidence_id", "reference_ids", "references", "diagnostics"}, path
-    )
+def _evidence(value: dict, fingerprints: EpochIntervals, path: str) -> None:
+    _required(value, EVIDENCE_FIELDS, path)
     _text(value["evidence_id"], f"{path}.evidence_id")
     ids = _strings(value["reference_ids"], f"{path}.reference_ids")
     references = _references(value["references"], fingerprints, f"{path}.references")
@@ -243,32 +369,41 @@ def _evidence(
         _fail(path, "evidence mixes source epochs")
     diagnostics = _mapping(value["diagnostics"], f"{path}.diagnostics")
     if "block_evidence_ids" in diagnostics:
-        _strings(diagnostics["block_evidence_ids"], f"{path}.block_evidence_ids")
+        _strings(
+            diagnostics["block_evidence_ids"], f"{path}.diagnostics.block_evidence_ids"
+        )
 
 
 def _rollback_exclusions(value: dict, prior: str | None, path: str) -> set[str]:
+    diagnostics_path = f"{path}.diagnostics"
     if not prior:
-        _fail(path, "rollback has no prior qualified evidence")
-    excluded = set(_strings(value["diagnostics"].get("block_evidence_ids"), path))
+        _fail(diagnostics_path, "rollback has no prior qualified evidence")
+    _required(value["diagnostics"], {"block_evidence_ids"}, diagnostics_path)
+    excluded = set(
+        _strings(
+            value["diagnostics"]["block_evidence_ids"],
+            f"{diagnostics_path}.block_evidence_ids",
+        )
+    )
     if not {prior, value["evidence_id"]} <= excluded:
-        _fail(path, "rollback must exclude its prior and contradictory evidence")
+        _fail(
+            f"{diagnostics_path}.block_evidence_ids",
+            "rollback must exclude its prior and contradictory evidence",
+        )
     return excluded
 
 
 def _bounded_change(before: list, after: list, original: list, path: str) -> None:
     dry, wet = original
     span = wet - dry
-    if before[0] != dry or after[0] != dry or before == after:
-        _fail(path, "automatic effect changes dry or has no wet change")
-    if any(
-        value <= dry
-        or value > ADC_MAX
-        or abs(value - wet) > TOTAL_FRACTION * span + EPSILON
-        for value in (before[1], after[1])
-    ):
-        _fail(path, "automatic effect exceeds the original envelope")
-    if abs(after[1] - before[1]) > STEP_FRACTION * span + EPSILON:
-        _fail(path, "automatic effect exceeds one bounded step")
+    if before[0] != dry or after[0] != dry:
+        _fail(path, "bounded change must preserve the configured dry anchor")
+    if before == after:
+        _fail(path, "bounded change has no wet effect")
+    if any(not within_envelope(dry, wet, value) for value in (before[1], after[1])):
+        _fail(path, "bounded change exceeds the original envelope")
+    if abs(after[1] - before[1]) > MAX_STEP_FRACTION * span + EPSILON:
+        _fail(path, "bounded change exceeds one bounded step")
 
 
 def _event_time(event: dict) -> float:
@@ -279,44 +414,31 @@ def _event(
     value: Any,
     source: str,
     original: list,
-    fingerprints: dict[str, tuple[float, float]],
+    fingerprints: EpochIntervals,
     path: str,
 ) -> dict:
     event = _mapping(value, path)
-    _required(
-        event,
-        {
-            "event_id",
-            "source",
-            "at",
-            "detected_at",
-            "kind",
-            "old_dry",
-            "old_wet",
-            "new_dry",
-            "new_wet",
-            "revision",
-            "source_fingerprint",
-        },
-        path,
-    )
+    _required(event, EVENT_FIELDS, path)
     _text(event["event_id"], f"{path}.event_id")
     _integer(event["revision"], f"{path}.revision")
     if event["source"] != source:
-        _fail(path, "journal event belongs to another source")
+        _fail(f"{path}.source", "journal event belongs to another source")
     _timestamp(event["detected_at"], f"{path}.detected_at")
     kind = _text(event["kind"], f"{path}.kind")
     if kind not in EVENT_REASONS:
-        _fail(path, "unknown actual-change kind")
+        _fail(f"{path}.kind", "unknown actual-change kind")
     if kind == "external_discovered":
         if event["at"] is not None:
-            _fail(path, "an unobserved effect cannot claim an exact time")
+            _fail(f"{path}.at", "an unobserved effect cannot claim an exact time")
     else:
         _timestamp(event["at"], f"{path}.at")
     for field in ("old_dry", "old_wet", "new_dry", "new_wet"):
         _number(event[field], f"{path}.{field}")
-    if _text(event["source_fingerprint"], path) not in fingerprints:
-        _fail(path, "journal source has no recorded epoch")
+    if (
+        _text(event["source_fingerprint"], f"{path}.source_fingerprint")
+        not in fingerprints
+    ):
+        _fail(f"{path}.source_fingerprint", "journal source has no recorded epoch")
     before = [event["old_dry"], event["old_wet"]]
     after = [event["new_dry"], event["new_wet"]]
     if before == after:
@@ -326,7 +448,7 @@ def _event(
 
 
 def _event_evidence(
-    event: dict, original: list, fingerprints: dict[str, tuple[float, float]], path: str
+    event: dict, original: list, fingerprints: EpochIntervals, path: str
 ) -> None:
     reason = event.get("reason")
     if reason is not None:
@@ -336,16 +458,15 @@ def _event_evidence(
     if _qualified(event):
         _completed_evidence(event, original, fingerprints, path)
     elif reason in EXCLUDED_REASONS:
-        _text(event.get("evidence_id"), f"{path}.evidence_id")
-        if {"reference_ids", "references", "diagnostics"} & event.keys():
+        _required(event, {"evidence_id"}, path)
+        _text(event["evidence_id"], f"{path}.evidence_id")
+        if SNAPSHOT_FIELDS & event.keys():
             _event_references(event, fingerprints, path)
-    elif {"evidence_id", "reference_ids", "references", "diagnostics"} & event.keys():
+    elif EVIDENCE_FIELDS & event.keys():
         _fail(path, "ordinary observed change claims decision evidence")
 
 
-def _event_references(
-    event: dict, fingerprints: dict[str, tuple[float, float]], path: str
-) -> None:
+def _event_references(event: dict, fingerprints: EpochIntervals, path: str) -> None:
     _evidence(event, fingerprints, path)
     if any(
         reference["end_at"] > _event_time(event) for reference in event["references"]
@@ -354,7 +475,7 @@ def _event_references(
 
 
 def _completed_evidence(
-    event: dict, original: list, fingerprints: dict[str, tuple[float, float]], path: str
+    event: dict, original: list, fingerprints: EpochIntervals, path: str
 ) -> None:
     _event_references(event, fingerprints, path)
     _bounded_change(
@@ -392,15 +513,12 @@ def _journal_evidence(
     event: dict,
     last_evidence: str | None,
     evidence_ids: set[str],
-    blocked: set[str],
     path: str,
 ) -> str | None:
     if not _qualified(event):
         return last_evidence
     if event["kind"] == "rollback":
-        excluded = _rollback_exclusions(event, last_evidence, path)
-        if not excluded <= blocked:
-            _fail(path, "rollback evidence lost its persistent exclusion")
+        _rollback_exclusions(event, last_evidence, path)
     last_evidence = event["evidence_id"]
     if last_evidence in evidence_ids:
         _fail(path, "qualified evidence was applied more than once")
@@ -411,9 +529,9 @@ def _journal_evidence(
 def _history(
     record: dict,
     original: list,
-    fingerprints: dict[str, tuple[float, float]],
+    fingerprints: EpochIntervals,
     path: str,
-) -> None:
+) -> set[str]:
     history = _list(record["history"], f"{path}.history")
     revision = _integer(record["revision"], f"{path}.revision")
     if revision != len(history):
@@ -424,12 +542,11 @@ def _history(
     evidence_ids: set[str] = set()
     last_evidence = None
     previous_time = record["baseline"]["created_at"]
-    blocked = set(record["blocked_evidence_ids"])
-    for index, value in enumerate(history, start=1):
-        event_path = f"{path}.history[{index - 1}]"
+    for index, value in enumerate(history):
+        event_path = f"{path}.history[{index}]"
         event = _event(value, record["source"], original, fingerprints, event_path)
         _journal_rollback_target(event, previous_event, event_path)
-        if event["revision"] != index or event["event_id"] in event_ids:
+        if event["revision"] != index + 1 or event["event_id"] in event_ids:
             _fail(
                 event_path,
                 "journal revision or event identifier is duplicated or missing",
@@ -444,7 +561,7 @@ def _history(
         previous = [event["new_dry"], event["new_wet"]]
         event_ids.add(event["event_id"])
         last_evidence = _journal_evidence(
-            event, last_evidence, evidence_ids, blocked, event_path
+            event, last_evidence, evidence_ids, event_path
         )
         previous_event = event
     if record.get("last_evidence_id") != last_evidence:
@@ -457,6 +574,7 @@ def _history(
     if record["previous"] != expected_previous:
         _fail(path, "previous anchors contradict the journal")
     _effect_fields(record, history, path)
+    return evidence_ids
 
 
 def _effect_fields(record: dict, history: list, path: str) -> None:
@@ -477,10 +595,9 @@ def _effect_fields(record: dict, history: list, path: str) -> None:
     for field in ("last_applied_at", "effective_at"):
         if _timestamp(record.get(field), f"{path}.{field}") != effective:
             _fail(
-                path, "cooldown or effective clock contradicts the last actual change"
+                f"{path}.{field}",
+                "cooldown or effective clock contradicts the last actual change",
             )
-    if _timestamp(record.get("barrier_until"), path) < effective + BARRIER_SECONDS:
-        _fail(path, "smoothing barrier does not cover the last actual change")
     _verified_effect(record, latest, path)
 
 
@@ -493,37 +610,43 @@ def _verified_effect(record: dict, latest: dict, path: str) -> None:
     )
     if verified is None:
         if current_qualified:
-            _fail(path, "latest qualified effect lost its current verification")
+            _fail(
+                f"{path}.verified_revision",
+                "latest qualified effect lost its current verification",
+            )
         if previous_wet is not None:
-            _fail(path, "unverified state claims a protective rollback target")
+            _fail(
+                f"{path}.previous_wet",
+                "unverified state claims a protective rollback target",
+            )
         return
-    if _integer(verified, path) != record["revision"] or not current_qualified:
-        _fail(path, "verified revision has no matching current qualified effect")
+    verified = _integer(verified, f"{path}.verified_revision")
+    if verified != record["revision"] or not current_qualified:
+        _fail(
+            f"{path}.verified_revision",
+            "verified revision has no matching current qualified effect",
+        )
     expected = latest["old_wet"] if latest["kind"] == "automatic" else None
     if previous_wet is not None:
-        _number(previous_wet, path)
+        _number(previous_wet, f"{path}.previous_wet")
     if previous_wet != expected:
-        _fail(path, "rollback target is not the preceding verified wet anchor")
+        _fail(
+            f"{path}.previous_wet",
+            "rollback target is not the preceding verified wet anchor",
+        )
 
 
-def _samples(
-    record: dict, fingerprints: dict[str, tuple[float, float]], path: str
-) -> None:
+def _samples(record: dict, fingerprints: EpochIntervals, path: str) -> None:
     samples = _list(record["samples"], f"{path}.samples")
-    fields = {
-        "sampled_at",
-        "raw",
-        "burst",
-        "source_fingerprint",
-        "reliable",
-        "rollback_eligible",
-    }
     for index, value in enumerate(samples):
         sample_path = f"{path}.samples[{index}]"
         sample = _mapping(value, sample_path)
-        _required(sample, fields, sample_path)
+        _required(sample, SAMPLE_FIELDS, sample_path)
         at = _timestamp(sample["sampled_at"], f"{sample_path}.sampled_at")
-        _epoch_time(sample["source_fingerprint"], at, fingerprints, sample_path)
+        fingerprint = _text(
+            sample["source_fingerprint"], f"{sample_path}.source_fingerprint"
+        )
+        _epoch_time(fingerprint, at, fingerprints, f"{sample_path}.sampled_at")
         _boolean(sample["reliable"], f"{sample_path}.reliable")
         _boolean(sample["rollback_eligible"], f"{sample_path}.rollback_eligible")
         _sample_values(sample, sample_path)
@@ -543,29 +666,29 @@ def _sample_values(sample: dict, path: str) -> None:
 
 
 def _pending_evidence(
-    record: dict, pending: dict, after: list, started: float, path: str
+    record: dict, pending: dict, accepted: set[str], path: str
 ) -> None:
-    kind = pending["kind"]
-    if any(reference["end_at"] > started for reference in pending["references"]):
-        _fail(path, "pending intent uses a reference from its future")
-    used = {
-        event["evidence_id"] for event in record["history"] if _qualified(event)
-    } | set(record["blocked_evidence_ids"])
-    if pending["evidence_id"] in used:
-        _fail(path, "pending intent reuses accepted or blocked evidence")
-    if kind == "rollback" and (
-        record.get("verified_revision") != record["revision"]
-        or record.get("previous_wet") != after[1]
+    if any(
+        reference["end_at"] > pending["started_at"]
+        for reference in pending["references"]
     ):
-        _fail(path, "pending rollback has no verified preceding target")
-    if kind == "rollback":
+        _fail(path, "pending intent uses a reference from its future")
+    if pending["evidence_id"] in accepted | set(record["blocked_evidence_ids"]):
+        _fail(path, "pending intent reuses accepted or blocked evidence")
+    if pending["kind"] == "rollback":
+        if (
+            record.get("verified_revision") != record["revision"]
+            or record.get("previous_wet") != pending["target"][1]
+        ):
+            _fail(path, "pending rollback has no verified preceding target")
         _rollback_exclusions(pending, record.get("last_evidence_id"), path)
 
 
 def _pending(
     record: dict,
     original: list,
-    fingerprints: dict[str, tuple[float, float]],
+    fingerprints: EpochIntervals,
+    accepted: set[str],
     path: str,
 ) -> None:
     value = record["pending"]
@@ -573,30 +696,17 @@ def _pending(
         return
     pending_path = f"{path}.pending"
     pending = _mapping(value, pending_path)
-    _required(
-        pending,
-        {
-            "expected",
-            "target",
-            "expected_revision",
-            "source_fingerprint",
-            "source_epoch",
-            "kind",
-            "context_id",
-            "started_at",
-            "reason",
-            "without_incident",
-        },
-        pending_path,
-    )
+    _required(pending, PENDING_FIELDS, pending_path)
     before = _pair(pending["expected"], f"{pending_path}.expected")
     after = _pair(pending["target"], f"{pending_path}.target")
+    revision = _integer(
+        pending["expected_revision"], f"{pending_path}.expected_revision"
+    )
+    epoch = _integer(pending["source_epoch"], f"{pending_path}.source_epoch")
     if (
         before != record["current"]
-        or _integer(pending["expected_revision"], f"{pending_path}.expected_revision")
-        != record["revision"]
-        or _integer(pending["source_epoch"], f"{pending_path}.source_epoch")
-        != record["source_epoch"]
+        or revision != record["revision"]
+        or epoch != record["source_epoch"]
         or pending["source_fingerprint"] != record["source_fingerprint"]
     ):
         _fail(
@@ -610,9 +720,9 @@ def _pending(
     if started < (record.get("last_applied_at") or record["baseline"]["created_at"]):
         _fail(pending_path, "pending intent predates the current state")
     _boolean(pending["without_incident"], f"{pending_path}.without_incident")
-    _bounded_change(before, after, original, pending_path)
+    _bounded_change(before, after, original, f"{pending_path}.target")
     _evidence(pending, fingerprints, pending_path)
-    _pending_evidence(record, pending, after, started, pending_path)
+    _pending_evidence(record, pending, accepted, pending_path)
 
 
 def _attempts(record: dict, original: list, path: str) -> None:
@@ -623,20 +733,7 @@ def _attempts(record: dict, original: list, path: str) -> None:
     for index, value in enumerate(attempts):
         attempt_path = f"{path}.attempts[{index}]"
         attempt = _mapping(value, attempt_path)
-        _required(
-            attempt,
-            {
-                "attempt_id",
-                "started_at",
-                "resolved_at",
-                "outcome",
-                "expected",
-                "target",
-                "observed",
-                "evidence_id",
-            },
-            attempt_path,
-        )
+        _required(attempt, ATTEMPT_FIELDS, attempt_path)
         identifier = _text(attempt["attempt_id"], f"{attempt_path}.attempt_id")
         if identifier in seen:
             _fail(attempt_path, "resolved attempt identifier is duplicated")
@@ -646,21 +743,17 @@ def _attempts(record: dict, original: list, path: str) -> None:
         if started < record["baseline"]["created_at"] or resolved < started:
             _fail(attempt_path, "attempt clocks contradict enrollment or resolution")
         outcome = _text(attempt["outcome"], f"{attempt_path}.outcome")
-        if outcome not in {"aborted", "interrupted_unknown"}:
-            _fail(attempt_path, "attempt cannot claim a completed actual effect")
+        if outcome not in ATTEMPT_OUTCOMES:
+            _fail(
+                f"{attempt_path}.outcome",
+                "attempt cannot claim a completed actual effect",
+            )
         before = _pair(attempt["expected"], f"{attempt_path}.expected")
         after = _pair(attempt["target"], f"{attempt_path}.target")
         _pair(attempt["observed"], f"{attempt_path}.observed")
         _bounded_change(before, after, original, attempt_path)
-        evidence_id = _text(attempt["evidence_id"], f"{attempt_path}.evidence_id")
-        if (
-            outcome == "interrupted_unknown"
-            and evidence_id not in record["blocked_evidence_ids"]
-        ):
-            _fail(
-                attempt_path, "uncertain attempt lost its persistent evidence exclusion"
-            )
-    if record["pending"] and record["pending"]["context_id"] in seen:
+        _text(attempt["evidence_id"], f"{attempt_path}.evidence_id")
+    if record["pending"] is not None and record["pending"]["context_id"] in seen:
         _fail(path, "pending intent was already resolved as an attempt")
 
 
@@ -674,20 +767,36 @@ def _event_exclusions(event: dict) -> list[str]:
 
 def _attempt_exclusions(record: dict) -> dict[str, float]:
     blocked_at: dict[str, float] = {}
-    for attempt in record.get("attempts", []):
-        if attempt["outcome"] == "interrupted_unknown":
-            identifier = attempt["evidence_id"]
-            blocked_at[identifier] = min(
-                blocked_at.get(identifier, math.inf), attempt["resolved_at"]
-            )
+    for attempt in _unknown_attempts(record):
+        identifier = attempt["evidence_id"]
+        blocked_at[identifier] = min(
+            blocked_at.get(identifier, math.inf), attempt["resolved_at"]
+        )
     return blocked_at
 
 
-def _decision_cutoff(
-    previous: float | None, resolutions: list[float], at: float | None
-) -> float | None:
-    times = [] if previous is None else [previous]
-    times.extend(time for time in resolutions if at is None or time <= at)
+def _unknown_attempts(record: dict) -> Iterator[dict]:
+    return (
+        attempt
+        for attempt in record.get("attempts", [])
+        if attempt["outcome"] == UNKNOWN_OUTCOME
+    )
+
+
+def decision_fence(record: dict, *, before: float | None = None) -> float | None:
+    """
+    Derive a decision cutoff from validated actual and uncertain facts.
+
+    The before argument filters uncertainty resolutions only. Historical replay
+    must supply its prior actual cutoff as last_applied_at, never the final time.
+    """
+    actual = record.get("last_applied_at")
+    times = [] if actual is None else [actual]
+    times.extend(
+        attempt["resolved_at"]
+        for attempt in _unknown_attempts(record)
+        if before is None or attempt["resolved_at"] <= before
+    )
     return max(times, default=None)
 
 
@@ -730,18 +839,13 @@ def _decision_constraints(
 
 def _decision_replay(record: dict, path: str) -> None:
     """Replay known exclusions, consumed cycles and temporal decision fences."""
-    resolutions = [
-        attempt["resolved_at"]
-        for attempt in record.get("attempts", [])
-        if attempt["outcome"] == "interrupted_unknown"
-    ]
+    replayed = {"last_applied_at": None, "attempts": record.get("attempts", [])}
     blocked_at = _attempt_exclusions(record)
     consumed: set[tuple[str, str, str]] = set()
-    cutoff = None
     for index, event in enumerate(record["history"]):
         event_path = f"{path}.history[{index}]"
         at = _event_time(event)
-        prior = _decision_cutoff(cutoff, resolutions, at)
+        prior = decision_fence(replayed, before=at)
         if _qualified(event):
             _decision_constraints(event, at, prior, consumed, event_path)
             if blocked_at.get(event["evidence_id"], math.inf) <= at:
@@ -752,48 +856,79 @@ def _decision_replay(record: dict, path: str) -> None:
             consumed.update(_reference_keys(event))
         for identifier in _event_exclusions(event):
             blocked_at[identifier] = min(blocked_at.get(identifier, math.inf), at)
-        cutoff = at
+        replayed["last_applied_at"] = at
     if not set(blocked_at) <= set(record["blocked_evidence_ids"]):
-        _fail(path, "journal evidence lost its persistent exclusion")
+        _fail(
+            f"{path}.blocked_evidence_ids",
+            "journal evidence lost its persistent exclusion",
+        )
     if record["pending"] is not None:
         pending = record["pending"]
         _decision_constraints(
             pending,
             pending["started_at"],
-            _decision_cutoff(cutoff, resolutions, None),
+            decision_fence(replayed),
             consumed,
             f"{path}.pending",
         )
 
 
+def _barrier(record: dict, path: str) -> None:
+    required_from = []
+    if record["history"]:
+        required_from.append(record["last_applied_at"])
+    if record["source_epoch"] > 0:
+        required_from.append(record["source_fences"][-1]["at"])
+    if required_from:
+        _required(record, {"barrier_until"}, path)
+    if "barrier_until" in record:
+        barrier = _timestamp(record["barrier_until"], f"{path}.barrier_until")
+        if required_from and barrier < max(required_from) + BARRIER_SECONDS:
+            _fail(
+                f"{path}.barrier_until",
+                "smoothing barrier does not cover the latest change or "
+                "source transition",
+            )
+
+
+def _helper_observation(value: Any, path: str) -> None:
+    observed = _mapping(value, path)
+    _required(observed, HELPER_OBSERVATION_FIELDS, path)
+    endpoint = _text(observed["endpoint"], f"{path}.endpoint")
+    if endpoint not in {"dry", "wet"}:
+        _fail(f"{path}.endpoint", "unknown helper endpoint")
+    for field in ("before", "after"):
+        _number(observed[field], f"{path}.{field}")
+    for field in ("at", "detected_at"):
+        _timestamp(observed[field], f"{path}.{field}")
+    _text(observed["event_id"], f"{path}.event_id")
+    context = observed["context_id"]
+    if context is not None and not isinstance(context, str):
+        _fail(f"{path}.context_id", "expected text or null")
+    if observed["source_fingerprint"] is not None:
+        _fail(
+            f"{path}.source_fingerprint",
+            "unbound helper observation claims a source epoch",
+        )
+    reason = _text(observed["reason"], f"{path}.reason")
+    if reason not in HELPER_REASONS:
+        _fail(f"{path}.reason", "unknown unbound observation reason")
+
+
+def _helper_observations(record: dict, path: str) -> None:
+    if "helper_observations" not in record:
+        return
+    observations = _list(record["helper_observations"], f"{path}.helper_observations")
+    for index, value in enumerate(observations):
+        _helper_observation(value, f"{path}.helper_observations[{index}]")
+
+
 def _record(source: str, value: Any, configured: dict | None) -> None:
     path = f"records[{source}]"
     record = _mapping(value, path)
-    _required(
-        record,
-        {
-            "source",
-            "baseline",
-            "current",
-            "previous",
-            "source_fingerprint",
-            "identity_fingerprint",
-            "source_epoch",
-            "source_fences",
-            "revision",
-            "blocked_evidence_ids",
-            "history",
-            "samples",
-            "references",
-            "pending",
-            "status",
-            "last_saved_at",
-            "last_evaluated_at",
-        },
-        path,
-    )
+    _required(record, RECORD_FIELDS, path)
     if record["source"] != source:
-        _fail(path, "record key and source disagree")
+        _fail(f"{path}.source", "record key and source disagree")
     original = _baseline(record, configured, path)
     fingerprints = _fences(record, path)
     _pair(record["current"], f"{path}.current")
@@ -801,58 +936,40 @@ def _record(source: str, value: Any, configured: dict | None) -> None:
     _strings(record["blocked_evidence_ids"], f"{path}.blocked_evidence_ids")
     _text(record["status"], f"{path}.status")
     _timestamp(record["last_saved_at"], f"{path}.last_saved_at")
-    if _number(record["last_evaluated_at"], path) < 0:
-        _fail(path, "evaluation clock is negative")
+    if _number(record["last_evaluated_at"], f"{path}.last_evaluated_at") < 0:
+        _fail(f"{path}.last_evaluated_at", "evaluation clock is negative")
     if "registry_identity" in record and not isinstance(
         record["registry_identity"], str
     ):
-        _fail(path, "registry identity is not text")
+        _fail(f"{path}.registry_identity", "registry identity is not text")
     if "applied_without_incident" in record:
-        _boolean(record["applied_without_incident"], path)
-    if "barrier_until" in record:
-        _number(record["barrier_until"], f"{path}.barrier_until")
-    if record["source_epoch"] and _timestamp(record.get("barrier_until"), path) < (
-        record["source_fences"][-1]["at"] + BARRIER_SECONDS
-    ):
-        _fail(path, "smoothing barrier does not cover the source transition")
-    _history(record, original, fingerprints, path)
+        _boolean(record["applied_without_incident"], f"{path}.applied_without_incident")
+    accepted = _history(record, original, fingerprints, path)
+    _barrier(record, path)
     _samples(record, fingerprints, path)
     _references(record["references"], fingerprints, f"{path}.references")
-    _pending(record, original, fingerprints, path)
+    _pending(record, original, fingerprints, accepted, path)
     _attempts(record, original, path)
+    _helper_observations(record, path)
     _decision_replay(record, path)
 
 
 def _witness(source: str, value: Any, records: dict) -> None:
     path = f"witnesses[{source}]"
     observed = _mapping(value, path)
-    _required(
-        observed,
-        {
-            "baseline_dry",
-            "baseline_wet",
-            "baseline_fingerprint",
-            "source_epoch",
-            "source_fingerprint",
-            "revision",
-            "last_event_id",
-            "last_applied_at",
-            "decision_fence_at",
-        },
-        path,
-    )
+    _required(observed, WITNESS_FIELDS, path)
     if source not in records:
         _fail(path, "previously witnessed source is missing from the Store")
     record = records[source]
     baseline = record["baseline"]
     if (
-        _number(observed["baseline_dry"], path) != baseline["dry"]
-        or _number(observed["baseline_wet"], path) != baseline["wet"]
+        _number(observed["baseline_dry"], f"{path}.baseline_dry") != baseline["dry"]
+        or _number(observed["baseline_wet"], f"{path}.baseline_wet") != baseline["wet"]
         or observed["baseline_fingerprint"] != baseline["source_fingerprint"]
     ):
         _fail(path, "baseline was changed after independent enrollment")
-    epoch = _integer(observed["source_epoch"], path)
-    revision = _integer(observed["revision"], path)
+    epoch = _integer(observed["source_epoch"], f"{path}.source_epoch")
+    revision = _integer(observed["revision"], f"{path}.revision")
     if epoch > record["source_epoch"] or revision > record["revision"]:
         _fail(path, "Store state was rolled back behind the care witness")
     if observed["source_fingerprint"] != record["source_fences"][epoch]["fingerprint"]:
@@ -866,7 +983,7 @@ def _witness(source: str, value: Any, records: dict) -> None:
     else:
         event = record["history"][revision - 1]
         if observed["last_event_id"] != event["event_id"] or _timestamp(
-            observed["last_applied_at"], path
+            observed["last_applied_at"], f"{path}.last_applied_at"
         ) != _event_time(event):
             _fail(path, "witness event or cooldown clock contradicts its revision")
     _witness_decision_fence(observed, record, path)
@@ -882,12 +999,7 @@ def _witness_decision_fence(observed: dict, record: dict, path: str) -> None:
     fence = _timestamp(fence, f"{path}.decision_fence_at")
     if actual is not None and fence < actual:
         _fail(path, "witness decision fence predates its actual effect")
-    resolutions = [
-        attempt["resolved_at"]
-        for attempt in record.get("attempts", [])
-        if attempt["outcome"] == "interrupted_unknown"
-    ]
-    primary = _decision_cutoff(record.get("last_applied_at"), resolutions, None)
+    primary = decision_fence(record)
     if primary is None or primary < fence:
         _fail(path, "Store decision fence was rolled back behind the care witness")
 
@@ -910,7 +1022,7 @@ def validate_storage(
             "records": {},
         }
     envelope = _mapping(data, "Store")
-    if set(envelope) != {"format_version", "initialized_sources", "records"}:
+    if set(envelope) != ENVELOPE_FIELDS:
         _fail("Store", "missing or unknown envelope fields")
     if _integer(envelope["format_version"], "format_version") != FORMAT_VERSION:
         _fail("Store", "unsupported format version")

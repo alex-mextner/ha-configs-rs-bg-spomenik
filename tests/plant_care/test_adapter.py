@@ -6,6 +6,7 @@
 
 import importlib.util
 import unittest
+from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -58,6 +59,43 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.manager._buttons = Mock(return_value={})
         self.now = datetime.now(UTC).timestamp()
 
+    def test_configuration_rejects_incomplete_or_reversed_calibration(self) -> None:
+        import voluptuous as vol
+
+        from custom_components.plant_care_alerts import CONFIG_SCHEMA, DOMAIN
+
+        valid = {
+            "freshness_sources": {"sensor.smooth": "sensor.raw"},
+            "calibration_sources": {
+                "sensor.smooth": {"dry": "input_number.dry", "wet": "input_number.wet"}
+            },
+            "automatic_calibration": {
+                "sensor.smooth": {
+                    "original_dry": 67,
+                    "original_wet": 221,
+                    "source_revision": "v1",
+                }
+            },
+        }
+        self.assertTrue(
+            CONFIG_SCHEMA({DOMAIN: valid})[DOMAIN]["automatic_calibration"][
+                "sensor.smooth"
+            ]["enabled"]
+        )
+        for update, removed in (
+            ({"original_wet": 67}, None),
+            ({"reference_entity": "sensor.reference"}, None),
+            ({}, "freshness_sources"),
+            ({}, "calibration_sources"),
+        ):
+            with self.subTest(update=update, removed=removed):
+                config = deepcopy(valid)
+                config["automatic_calibration"]["sensor.smooth"].update(update)
+                if removed:
+                    config.pop(removed)
+                with self.assertRaises(vol.Invalid):
+                    CONFIG_SCHEMA({DOMAIN: config})
+
     async def test_user_refresh_does_not_inherit_background_write_authority(
         self,
     ) -> None:
@@ -73,7 +111,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.async_refresh()
         self.assertEqual(phases, [True, False, False])
 
-    def test_missing_calibration_store_preserves_frozen_fault_basis(self) -> None:
+    async def test_failed_existing_store_preserves_frozen_fault_basis(self) -> None:
         from custom_components.plant_care_alerts.state_machine import evaluate
 
         sampled = datetime.fromtimestamp(self.now, UTC)
@@ -83,7 +121,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
             "sensor.raw": SimpleNamespace(
                 state="1500",
-                attributes={"sampled_at": sampled.isoformat()},
+                attributes={"sampled_at": sampled.isoformat(), "physical_pin": 22},
                 last_reported=sampled,
             ),
             "input_number.dry": SimpleNamespace(state="67", attributes={}),
@@ -93,7 +131,49 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.manager.config["calibration_sources"] = {
             "sensor.smooth": {"dry": "input_number.dry", "wet": "input_number.wet"}
         }
-        self.manager.calibration._storage_ready = False
+        self.manager.config["automatic_calibration"] = {
+            "sensor.smooth": {
+                "enabled": True,
+                "original_dry": 67,
+                "original_wet": 221,
+                "source_revision": "probe-v1",
+            }
+        }
+        states["input_number.wet"].state = "221"
+        self.hass.async_add_executor_job = AsyncMock(
+            side_effect=lambda function, *args: function(*args)
+        )
+        self.manager.calibration._identity_provider = lambda _source: "registered:raw"
+        self.manager.calibration.store = SimpleNamespace(
+            async_load=AsyncMock(return_value=None),
+            async_save=AsyncMock(),
+        )
+        persisted = None
+
+        async def save(data: dict) -> None:
+            nonlocal persisted
+            persisted = deepcopy(data)
+
+        self.manager.calibration.store.async_save.side_effect = save
+        self.manager.calibration._read_persisted = AsyncMock(
+            side_effect=lambda: deepcopy(persisted)
+        )
+        await self.manager.calibration.async_load()
+        await self.manager.calibration.async_prepare(
+            "a", "sensor.smooth", self.now - 600
+        )
+        self.assertEqual(
+            self.manager.calibration.reading_fields("a")["calibration_current"],
+            [67, 221],
+        )
+        self.manager.calibration.store.async_save.side_effect = OSError(
+            "disk unavailable"
+        )
+        with self.assertLogs(
+            "custom_components.plant_care_alerts.calibration_runtime", level="ERROR"
+        ):
+            self.assertFalse(await self.manager.calibration.async_save())
+        states["input_number.wet"].state = "2933"
         old = {
             "source_identity": "sensor.smooth",
             "raw_source_identity": "sensor.raw",
@@ -110,8 +190,16 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             "reliability_calibration_basis": [67, 221],
         }
         self.manager.records["a"] = old
-        reading = self.manager._reading(self.plant, self.now)
-        current = evaluate(old, reading, self.now, self.manager.settings)
+        current = old
+        for offset, raw in ((0, 1500), (300, 1490), (600, 1480)):
+            at = self.now + offset
+            states["sensor.raw"].state = str(raw)
+            states["sensor.raw"].attributes["sampled_at"] = at
+            states["sensor.smooth"].state = str((raw - 67) * 100 / (2933 - 67))
+            self.manager.records["a"] = current
+            reading = self.manager._reading(self.plant, at)
+            self.assertEqual(reading["calibration_current"], [67, 2933])
+            current = evaluate(current, reading, at, self.manager.settings)
         self.assertEqual(current["status"], "sensor_error")
         self.assertEqual(current["last_value_change_at"], old["last_value_change_at"])
         self.assertEqual(
@@ -120,6 +208,131 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(current["reliability_calibration_basis"], [67, 221])
         self.assertFalse(current["reliability_valid"])
+
+    async def test_failed_calibration_load_retains_care_witness_across_refresh_and_restart(
+        self,
+    ) -> None:
+        from custom_components.plant_care_alerts import CareManager
+        from custom_components.plant_care_alerts.calibration_runtime import (
+            CalibrationRuntime,
+            RuntimeHooks,
+        )
+
+        options = {
+            **self.manager.config,
+            "calibration_sources": {
+                "sensor.smooth": {"dry": "input_number.dry", "wet": "input_number.wet"}
+            },
+            "automatic_calibration": {
+                "sensor.smooth": {
+                    "enabled": True,
+                    "source_revision": "probe-v1",
+                    "original_dry": 67,
+                    "original_wet": 221,
+                }
+            },
+        }
+        identity = "registered-source"
+        record = CalibrationRuntime._new_record(
+            "sensor.smooth", (67, 221), identity, self.now - 86400
+        )
+        producer = CalibrationRuntime(self.hass, SimpleNamespace(), options)
+        witness = producer._witness_snapshot({"sensor.smooth": record})
+        prior = {"a": {"status": "sensor_error", "calibration_witnesses": witness}}
+        self.hass.data["adaptive_plant"] = {"a": self.plant}
+        for _ in range(2):
+            with patch("custom_components.plant_care_alerts.Store"):
+                manager = CareManager(self.hass, options)
+            manager.add_entities = Mock()
+            manager._buttons = Mock(return_value={})
+            manager._load_history = AsyncMock()
+            manager.store.async_load = AsyncMock(return_value=deepcopy(prior))
+            manager.store.async_save = AsyncMock()
+            manager.calibration = CalibrationRuntime(
+                self.hass,
+                SimpleNamespace(async_load=AsyncMock(return_value=None)),
+                options,
+                hooks=RuntimeHooks(identity_provider=lambda _source: identity),
+            )
+            with self.assertLogs(
+                "custom_components.plant_care_alerts.calibration_runtime", level="ERROR"
+            ):
+                await manager.load()
+            await manager.async_refresh()
+            self.assertEqual(manager.records["a"]["calibration_witnesses"], witness)
+            manager.store.async_save.assert_not_awaited()
+            self.assertIsNone(manager.calibration.witnesses())
+            prior = deepcopy(manager.records)
+
+    async def test_silent_care_save_does_not_acknowledge_or_replace_witness(
+        self,
+    ) -> None:
+        prior = {"source": {"revision": 1}}
+        current = {"source": {"revision": 2}}
+        self.manager.records["a"] = {
+            "status": "ok",
+            "calibration_witnesses": deepcopy(prior),
+        }
+        self.manager.calibration.witnesses = Mock(return_value=current)
+        self.manager.store.async_save = AsyncMock()
+        self.manager._read_persisted = AsyncMock(
+            return_value=deepcopy(self.manager.records)
+        )
+        with self.assertLogs("custom_components.plant_care_alerts", level="ERROR"):
+            self.assertFalse(await self.manager._persist_calibration_witnesses("a"))
+        self.assertEqual(self.manager.records["a"]["calibration_witnesses"], prior)
+        self.assertEqual(
+            self.manager.calibration._disabled_reason, "witness_unavailable"
+        )
+
+    async def test_failed_refresh_drops_queued_background_authority(self) -> None:
+        observed = []
+
+        async def broken() -> None:
+            await self.manager.async_background_refresh()
+            message = "refresh interrupted"
+            raise OSError(message)
+
+        self.manager._refresh_once = broken
+        with self.assertLogs("custom_components.plant_care_alerts", level="ERROR"):
+            await self.manager.async_background_refresh()
+        self.manager._refresh_once = AsyncMock(
+            side_effect=lambda: observed.append(self.manager._calibration_write_active)
+        )
+        await self.manager.async_refresh()
+        self.assertEqual(observed, [False])
+
+    def test_calibration_pause_keeps_existing_warning_delivery(self) -> None:
+        self.manager.records["a"] = {
+            "status": "calibrating",
+            "due_since": self.now - 90000,
+            "notified_status": "overdue",
+            "reliability_reason": "calibrating",
+        }
+        self.manager.details["a"] = {"plant_name": "Тест"}
+        self.manager.entities["a"] = SimpleNamespace(entity_id="sensor.test")
+        self.manager.emit_transition("a", "overdue")
+        event = self.hass.bus.async_fire.call_args.args[1]
+        self.assertFalse(event["clear"])
+        self.assertFalse(event["notify"])
+        self.assertEqual(self.manager.records["a"]["notified_status"], "overdue")
+        self.manager.records["a"].update(
+            status="checking",
+            reliability_reason=None,
+            calibration_confirmation_pending=True,
+        )
+        self.manager.emit_transition("a", "calibrating")
+        self.assertFalse(self.hass.bus.async_fire.call_args.args[1]["clear"])
+        self.manager.records["a"].update(
+            status="overdue", calibration_confirmation_pending=False
+        )
+        self.manager.emit_transition("a", "checking")
+        self.assertFalse(self.hass.bus.async_fire.call_args.args[1]["notify"])
+
+    def test_recorder_excludes_large_calibration_journal(self) -> None:
+        from custom_components.plant_care_alerts.sensor import PlantCareSensor
+
+        self.assertIn("calibration_history", PlantCareSensor._unrecorded_attributes)
 
     def test_unavailable_raw_source_invalidates_buffered_median(self) -> None:
         states = {
@@ -405,7 +618,12 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             async_setup,
         )
 
-        self.hass.services = SimpleNamespace(async_register=Mock())
+        self.hass.services = SimpleNamespace(
+            async_register=Mock(),
+            has_service=Mock(return_value=False),
+            async_services=Mock(return_value={DOMAIN: {"apply_calibration": object()}}),
+            async_remove=Mock(),
+        )
         self.hass.bus.async_listen = Mock(return_value=lambda: None)
         self.hass.bus.async_listen_once = Mock()
         self.manager.load = AsyncMock()

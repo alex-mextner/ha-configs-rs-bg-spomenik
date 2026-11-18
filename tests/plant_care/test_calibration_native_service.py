@@ -12,6 +12,13 @@ import time
 import unittest
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
+
+from calibration_fixtures import (
+    physical_attributes,
+    qualified_cycle_windows,
+    reference_attributes,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -34,7 +41,9 @@ if HA_AVAILABLE:
         issue_registry,
         label_registry,
     )
+    from homeassistant.helpers.storage import Store
     from homeassistant.setup import async_setup_component
+    from homeassistant.util.file import WriteError
 
     from custom_components import plant_care_alerts
     from custom_components.plant_care_alerts.calibration_runtime import (
@@ -51,20 +60,44 @@ DAY = 86400
 
 
 class BoundaryStore:
-    """Control the disk boundary while leaving native helpers and services real."""
+    """Use native disk storage with a controlled pending-save callback in CI."""
 
-    def __init__(self) -> None:
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+        self.native = self.new_store()
         self.data: dict | None = None
         self.on_pending: Callable[[], Awaitable[None]] | None = None
+        self.fail_pending_write = False
+        self.failed_write_results: list[None] = []
+
+    def new_store(self) -> Store:
+        return Store(
+            self.hass,
+            1,
+            "plant_care_calibration",
+            atomic_writes=True,
+            serialize_in_event_loop=False,
+        )
 
     async def async_load(self) -> dict | None:
-        return copy.deepcopy(self.data)
+        return await self.native.async_load()
+
+    async def async_read_persisted(self) -> dict | None:
+        return copy.deepcopy(await self.new_store().async_load())
 
     async def async_save(self, data: dict) -> None:
-        self.data = copy.deepcopy(data)
-        if self.on_pending and any(
-            row.get("pending") for row in data["records"].values()
-        ):
+        pending = any(row.get("pending") for row in data["records"].values())
+        if pending and self.fail_pending_write:
+            with patch(
+                "homeassistant.helpers.storage.write_utf8_file_atomic",
+                side_effect=WriteError("Isolated native CI write failure"),
+            ):
+                result = await self.native.async_save(data)
+            self.failed_write_results.append(result)
+        else:
+            await self.native.async_save(data)
+        self.data = await self.async_read_persisted()
+        if self.on_pending and pending:
             pending_callback, self.on_pending = self.on_pending, None
             await pending_callback()
 
@@ -81,6 +114,7 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.hass = HomeAssistant(config_dir.name)
         self.addAsyncCleanup(self.hass.async_stop, force=True)
         loader.async_setup(self.hass)
+        await device_registry.async_load(self.hass)
         self.hass.auth = await auth.auth_manager_from_config(self.hass, [], [])
         self.hass.config_entries = config_entries.ConfigEntries(self.hass, {})
         await self.hass.config_entries.async_initialize()
@@ -88,7 +122,6 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
             floor_registry,
             label_registry,
             area_registry,
-            device_registry,
             entity_registry,
             issue_registry,
         ):
@@ -109,7 +142,7 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.now = time.time() - 16 * DAY
         self.auto_context = Context()
         self.quality = {"reliability_valid": True}
-        self.store = BoundaryStore()
+        self.store = BoundaryStore(self.hass)
         await self._prepare_runtime()
         self.now += 16 * DAY
         await self._seed_qualified_history()
@@ -137,6 +170,7 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
                 clock=lambda: self.now,
                 quality_provider=lambda _entry, _at: self.quality,
                 context_factory=lambda: self.auto_context,
+                read_persisted=self.store.async_read_persisted,
             ),
         )
         manager = SimpleNamespace(config=config, calibration=self.runtime)
@@ -155,6 +189,17 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
         self._set_raw(self.now)
         await self.runtime.async_load()
         await self.runtime.async_prepare("plant", SOURCE, self.now, "rest:raw")
+        self.assertTrue(
+            self.hass.services.has_service(
+                plant_care_alerts.DOMAIN, "apply_calibration"
+            ),
+            "The native calibration service must be registered for these cases",
+        )
+        self.assertNotIn(
+            self.runtime.attributes("plant")["calibration_status"],
+            {"unsupported_runtime", "service_conflict", "storage_unavailable"},
+            "The native HA service and durable storage preconditions must be ready",
+        )
 
     def _unsubscribe_helper_changes(self) -> None:
         if self._helper_change_unsubscribe is not None:
@@ -165,26 +210,17 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(
             RAW,
             "209",
-            {
-                "sampled_at": sampled_at,
-                "samples": [208] * 5 + [209] + [210] * 5,
-                "physical_pin": 22,
-            },
+            physical_attributes(sampled_at),
         )
 
     async def _seed_qualified_history(self) -> None:
         fingerprint = self.runtime.attributes("plant")["calibration_source_fingerprint"]
-        for cycle, day in enumerate((0, 7, 14, 15)):
-            start = self.now - 15 * DAY - 3600 + day * DAY
+        for cycle, start, end in qualified_cycle_windows(self.now):
             samples = [
                 State(
                     RAW,
                     "209",
-                    {
-                        "sampled_at": start + offset * 300,
-                        "samples": [208] * 5 + [209] + [210] * 5,
-                        "physical_pin": 22,
-                    },
+                    physical_attributes(start + offset * 300),
                 )
                 for offset in range(13)
             ]
@@ -192,14 +228,12 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(
                 REFERENCE,
                 "90",
-                {
-                    "reference_id": f"native-reference-{cycle}",
-                    "cycle_id": f"native-cycle-{cycle}",
-                    "start_at": start,
-                    "end_at": start + 3600,
-                    "protocol": "gravimetric-v1",
-                    "source_fingerprint": fingerprint,
-                },
+                reference_attributes(
+                    cycle,
+                    start,
+                    end,
+                    fingerprint,
+                ),
             )
             self.assertTrue(
                 await self.runtime.async_record_reference("plant", self.now)
@@ -244,6 +278,27 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
             [row["kind"] for row in attributes["calibration_history"]], ["automatic"]
         )
         self.assertIsNone(self.store.data["records"][SOURCE]["pending"])
+
+    async def test_native_store_swallows_write_error_without_authorizing_effect(
+        self,
+    ) -> None:
+        before = await self.store.async_read_persisted()
+        self.assertIsNotNone(before)
+        self.store.fail_pending_write = True
+        with (
+            self.assertLogs("homeassistant.helpers.storage", level="ERROR"),
+            self.assertLogs(
+                "custom_components.plant_care_alerts.calibration_runtime", level="ERROR"
+            ),
+        ):
+            attributes = await self._complete_cycle()
+        self.assertEqual(self.store.failed_write_results, [None])
+        self.assertEqual(await self.store.async_read_persisted(), before)
+        self.assertEqual(float(self.hass.states.get(WET).state), 221)
+        self.assertEqual(float(self.hass.states.get(DRY).state), 67)
+        self.assertFalse(attributes["calibration_history_available"])
+        self.assertEqual(attributes["calibration_history"], [])
+        self.assertIsNone(self.runtime.witnesses())
 
     async def test_manual_write_during_pending_save_prevents_stale_application(
         self,
@@ -368,7 +423,9 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
             if event.context != self.auto_context or manual_tasks:
                 return
             task = self.hass.async_create_task(
-                self._manual_write(), "reentrant calibration manual change"
+                self._manual_write(),
+                "reentrant calibration manual change",
+                eager_start=True,
             )
             manual_tasks.append(task)
             values_before_outer_handler.append(float(self.hass.states.get(WET).state))
@@ -417,6 +474,7 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.hass.async_create_task(
                     copied_request(event.data["service_data"]),
                     "foreign calibration transaction attempt",
+                    eager_start=True,
                 )
             )
             values_before_original_handler.append(

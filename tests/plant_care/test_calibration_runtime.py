@@ -5,10 +5,17 @@ import importlib.util
 import sys
 import types
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+from calibration_fixtures import (
+    physical_attributes,
+    qualified_cycle_windows,
+    reference_attributes,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = "_plant_calibration_runtime_test"
@@ -29,6 +36,27 @@ def load(name: str) -> types.ModuleType:
 
 
 state_machine = load("state_machine")
+runtime_module = load("calibration_runtime")
+MISSING = object()
+
+
+class Interrupted(BaseException):
+    """Simulate process loss without the normal exception recovery path."""
+
+
+def raise_interrupted() -> None:
+    raise Interrupted
+
+
+def helper_event(
+    entity_id: str, before: Any, after: Any, context_id: str
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        data={"entity_id": entity_id, "old_state": before, "new_state": after},
+        context=SimpleNamespace(id=context_id),
+    )
+
+
 START = 1794538800.0
 NOW = START + 15 * 3600
 
@@ -117,6 +145,50 @@ class CalibrationReliabilityTests(unittest.TestCase):
         self.assertTrue(record["reliability_valid"])
         self.assertIsNone(record["reliability_incident_started_at"])
 
+    def test_expired_barrier_waits_quietly_for_next_physical_sample(self) -> None:
+        previous = {
+            "source_identity": "sensor.smooth",
+            "raw_source_identity": "sensor.raw",
+            "last_observed_value": 20.0,
+            "last_value_change_at": NOW - 600,
+            "last_source_value": 98.0,
+            "last_source_change_at": NOW - 600,
+            "reliability_last_sample_at": NOW - 300,
+            "reliability_valid": True,
+        }
+        during = reading(NOW + 1700, 90, 98)
+        during["calibration_current"] = [67, 222]
+        record = state_machine.evaluate(previous, during, NOW + 1700)
+        self.assertEqual(record["status"], "calibrating")
+        record = state_machine.evaluate(record, during, NOW + 1801)
+        self.assertNotEqual(record["status"], "sensor_error")
+        self.assertIsNone(record.get("reliability_incident_started_at"))
+        record = state_machine.evaluate(
+            record,
+            {**during, "sample_at": NOW + 2000, "raw_source_value": 99},
+            NOW + 2000,
+        )
+        self.assertNotEqual(record["status"], "sensor_error")
+
+    def test_barrier_does_not_trust_invalid_or_unmapped_physical_source(self) -> None:
+        previous = {
+            "source_identity": "sensor.smooth",
+            "raw_source_identity": "sensor.raw",
+            "last_observed_value": 20,
+            "last_value_change_at": NOW - 600,
+            "last_source_value": 98,
+            "last_source_change_at": NOW - 600,
+            "reliability_last_sample_at": NOW - 300,
+            "reliability_valid": True,
+        }
+        for invalid in ({"source_invalid": True}, {"raw_source_identity": None}):
+            with self.subTest(invalid=invalid):
+                current = state_machine.evaluate(
+                    previous, {**reading(NOW + 60, 20, 99), **invalid}, NOW + 60
+                )
+                self.assertEqual(current["status"], "sensor_error")
+                self.assertEqual(current["reliability_reason"], "invalid_sample")
+
     def test_healthy_calibration_barrier_creates_no_sensor_incident(self) -> None:
         previous = {
             "source_identity": "sensor.smooth",
@@ -144,6 +216,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self.data = None
         self.fail_save = False
+        self.drop_save = False
 
     async def async_load(self) -> dict | None:
         return copy.deepcopy(self.data)
@@ -152,7 +225,8 @@ class MemoryStore:
         if self.fail_save:
             message = "Storage write unavailable"
             raise OSError(message)
-        self.data = copy.deepcopy(data)
+        if not self.drop_save:
+            self.data = copy.deepcopy(data)
 
 
 def ha_state(value: float, at: float = NOW, **attributes: Any) -> SimpleNamespace:
@@ -164,7 +238,7 @@ def ha_state(value: float, at: float = NOW, **attributes: Any) -> SimpleNamespac
 
 
 class FakeServices:
-    """Model only the native permission/dispatch and helper state boundaries."""
+    """Model service dispatch and helper events; real permissions are tested in HA."""
 
     def __init__(self, hass) -> None:
         self.hass = hass
@@ -192,7 +266,7 @@ class FakeServices:
 
         async def set_native(value: float) -> None:
             before = self.hass.values[entity_id]
-            after = ha_state(value, self.hass.now)
+            after = ha_state(value, self.hass.now, **before.attributes)
             self.hass.values[entity_id] = after
             self.writes.append((entity_id, value))
             self.hass.runtime.note_helper_event(
@@ -223,14 +297,19 @@ class FakeServices:
 class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     """Exercise persistence and actual helper effects through the runtime adapter."""
 
-    async def asyncSetUp(self) -> None:
-        self.assertTrue(
-            (
-                ROOT / "custom_components/plant_care_alerts/calibration_runtime.py"
-            ).exists(),
-            "The autonomous calibration runtime adapter is missing",
+    def new_runtime(
+        self, hass: Any, store: MemoryStore, config: dict, *, hooks: Any = None
+    ) -> Any:
+        hooks = hooks or self.runtime_module.RuntimeHooks()
+        return self.runtime_module.CalibrationRuntime(
+            hass,
+            store,
+            config,
+            hooks=replace(hooks, read_persisted=store.async_load),
         )
-        self.runtime_module = load("calibration_runtime")
+
+    async def asyncSetUp(self) -> None:
+        self.runtime_module = runtime_module
         self.store = MemoryStore()
         self.config = {
             "freshness_sources": {"sensor.smooth": "sensor.raw"},
@@ -257,14 +336,137 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             now=NOW,
             runtime=None,
         )
+
+        async def executor(function, *args: Any) -> Any:
+            return function(*args)
+
+        self.hass.async_add_executor_job = executor
         self.hass.states = SimpleNamespace(get=self.hass.values.get)
         self.hass.services = FakeServices(self.hass)
-        self.manager = self.runtime_module.CalibrationRuntime(
-            self.hass, self.store, self.config
-        )
+        self.manager = self.new_runtime(self.hass, self.store, self.config)
         self.hass.runtime = self.manager
         await self.manager.async_load()
         await self.manager.async_prepare("plant", "sensor.smooth", NOW, "rest:raw")
+
+    async def test_failed_load_offers_no_witness_replacement_on_two_restarts(
+        self,
+    ) -> None:
+        durable = self.manager.witnesses()
+        missing = MemoryStore()
+        for _ in range(2):
+            restarted = self.new_runtime(self.hass, missing, self.config)
+            with self.assertLogs(self.runtime_module.__name__, level="ERROR"):
+                await restarted.async_load(durable)
+            await restarted.async_prepare("plant", "sensor.smooth", NOW + 1, "rest:raw")
+            self.assertIsNone(restarted.witnesses())
+            self.assertFalse(
+                restarted.attributes("plant")["calibration_history_available"]
+            )
+            self.assertEqual(self.hass.services.writes, [])
+
+    async def test_save_failure_then_manual_rescale_keeps_original_fault_basis(
+        self,
+    ) -> None:
+        self.store.fail_save = True
+        with self.assertLogs(self.runtime_module.__name__, level="ERROR"):
+            self.assertFalse(await self.manager.async_save())
+        self.hass.values["input_number.wet"] = ha_state(1600)
+        record = frozen_record()
+        for offset, raw in [(1801, 1330), (2101, 1340), (2401, 1350)]:
+            at = NOW + offset
+            self.hass.values["sensor.raw"] = ha_state(
+                raw, sampled_at=at, samples=[raw] * 11, physical_pin=22
+            )
+            await self.manager.async_prepare("plant", "sensor.smooth", at, "rest:raw")
+            fields = self.manager.reading_fields("plant")
+            self.assertEqual(fields, {})
+            current = {
+                "source_identity": "sensor.smooth",
+                "raw_source_identity": "sensor.raw",
+                "raw_source_value": raw,
+                "moisture": (raw - 67) * 100 / (1600 - 67),
+                "sample_at": at,
+                "has_sensor": True,
+                "calibration_current": [67, 1600],
+                **fields,
+            }
+            record = state_machine.evaluate(record, current, at)
+        self.assertFalse(record["reliability_valid"])
+        self.assertEqual(record["status"], "sensor_error")
+        self.assertEqual(record["last_value_change_at"], START)
+        self.assertEqual(record["reliability_incident_started_at"], START + 43201)
+
+    async def test_queued_manual_change_is_saved_before_new_source_epoch(self) -> None:
+        original = self.manager.attributes("plant")["calibration_source_fingerprint"]
+        self.hass.values["sensor.raw"] = ha_state("unavailable", NOW + 1)
+        self.hass.now = NOW + 10
+        self.external_wet_change(230)
+        await self.manager.async_prepare("plant", "sensor.smooth", NOW + 11, "rest:raw")
+        self.hass.values["sensor.raw"] = ha_state(
+            1400, sampled_at=NOW + 20, samples=[1400] * 11, physical_pin=23
+        )
+        await self.manager.async_prepare("plant", "sensor.smooth", NOW + 20, "rest:raw")
+        attrs = self.manager.attributes("plant")
+        self.assertTrue(attrs["calibration_history_available"])
+        record = self.store.data["records"]["sensor.smooth"]
+        self.assertEqual(record["history"][0]["source_fingerprint"], original)
+        self.assertEqual(record["history"][0]["at"], NOW + 10)
+        self.assertEqual(record["history"][0]["kind"], "manual")
+        self.assertGreaterEqual(record["barrier_until"], NOW + 1820)
+        self.assertEqual(record["current"], [67, 230])
+        self.assertEqual(record["source_epoch"], 1)
+
+    async def test_pre_enrollment_helper_facts_do_not_backdate_source_identity(
+        self,
+    ) -> None:
+        self.store = MemoryStore()
+        self.manager = self.new_runtime(self.hass, self.store, self.config)
+        self.hass.runtime = self.manager
+        await self.manager.async_load()
+        self.hass.values["sensor.raw"] = ha_state("unavailable", NOW)
+        self.hass.now = NOW + 1
+        self.external_wet_change(230)
+        await self.manager.async_prepare("plant", "sensor.smooth", NOW + 2, "rest:raw")
+        self.hass.values["sensor.raw"] = ha_state(
+            1400, sampled_at=NOW + 10, samples=[1400] * 11, physical_pin=22
+        )
+        await self.manager.async_prepare("plant", "sensor.smooth", NOW + 10, "rest:raw")
+        attrs = self.manager.attributes("plant")
+        self.assertTrue(attrs["calibration_history_available"])
+        record = self.store.data["records"]["sensor.smooth"]
+        self.assertEqual(record["source_fences"][0]["at"], NOW + 10)
+        self.assertEqual(record["baseline"]["created_at"], NOW + 10)
+        fact = record["helper_observations"][0]
+        self.assertEqual(
+            (fact["at"], fact["endpoint"], fact["before"], fact["after"]),
+            (NOW + 1, "wet", 221, 230),
+        )
+        self.assertEqual(fact["context_id"], "external")
+        self.assertIsNone(fact["source_fingerprint"])
+        self.assertEqual(fact["reason"], "pre_enrollment")
+        self.assertEqual(record["history"][0]["kind"], "external_discovered")
+        self.assertIsNone(record["history"][0]["at"])
+        self.assertEqual(record["history"][0]["detected_at"], NOW + 10)
+
+    async def test_nested_manual_only_events_replay_actual_old_new_chain(self) -> None:
+        old = self.hass.values["input_number.wet"]
+        middle = ha_state(225, NOW + 1)
+        final = ha_state(230, NOW + 2)
+        for before, after in [(middle, final), (old, middle)]:
+            self.manager.note_helper_event(
+                helper_event("input_number.wet", before, after, "manual")
+            )
+        self.hass.values["input_number.wet"] = final
+        await self.manager.async_prepare("plant", "sensor.smooth", NOW + 3, "rest:raw")
+        attrs = self.manager.attributes("plant")
+        self.assertTrue(attrs["calibration_history_available"])
+        self.assertEqual(
+            [(row["old_wet"], row["new_wet"]) for row in attrs["calibration_history"]],
+            [(221, 225), (225, 230)],
+        )
+        self.assertEqual(
+            self.store.data["records"]["sensor.smooth"]["current"], [67, 230]
+        )
 
     async def test_without_independent_reference_observes_without_changing_endpoints(
         self,
@@ -290,15 +492,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for offset, value in [(1, 222), (2, 223)]:
             new = ha_state(value, NOW + offset, step=1)
             self.manager.note_helper_event(
-                SimpleNamespace(
-                    data={
-                        "entity_id": "input_number.wet",
-                        "old_state": old,
-                        "new_state": new,
-                    },
-                    time_fired=new.last_updated,
-                    context=SimpleNamespace(id=f"manual-{offset}"),
-                )
+                helper_event("input_number.wet", old, new, f"manual-{offset}")
             )
             old = new
         self.hass.values["input_number.wet"] = old
@@ -317,9 +511,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_restart_preserves_manual_history_without_rebasing(self) -> None:
         self.hass.values["input_number.wet"] = ha_state(230, NOW + 1)
         await self.manager.async_prepare("plant", "sensor.smooth", NOW + 1, "rest:raw")
-        restarted = self.runtime_module.CalibrationRuntime(
-            self.hass, self.store, self.config
-        )
+        restarted = self.new_runtime(self.hass, self.store, self.config)
         await restarted.async_load()
         await restarted.async_prepare("plant", "sensor.smooth", NOW + 2, "rest:raw")
         attrs = restarted.attributes("plant")
@@ -357,7 +549,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return function(*args)
 
         self.hass.async_add_executor_job = executor
-        self.manager = self.runtime_module.CalibrationRuntime(
+        self.manager = self.new_runtime(
             self.hass,
             self.store,
             self.config,
@@ -374,26 +566,18 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.hass.now = NOW
         fingerprint = self.manager.attributes("plant")["calibration_source_fingerprint"]
-        for cycle, day in enumerate((0, 7, 14, 15)):
-            start = NOW - 15 * 86400 - 3600 + day * 86400
+        for cycle, start, end in qualified_cycle_windows(NOW):
             states = [
                 ha_state(
                     raw,
-                    sampled_at=start + offset * 300,
-                    samples=[raw - 1] * 5 + [raw] + [raw + 1] * 5,
-                    physical_pin=22,
+                    **physical_attributes(start + offset * 300, raw),
                 )
                 for offset in range(13)
             ]
             self.manager.seed_history("plant", states, self.quality, NOW)
             self.hass.values["sensor.reference"] = ha_state(
                 90,
-                reference_id=f"wet-{cycle}",
-                cycle_id=f"cycle-{cycle}",
-                start_at=start,
-                end_at=start + 3600,
-                protocol="gravimetric-v1",
-                source_fingerprint=fingerprint,
+                **reference_attributes(cycle, start, end, fingerprint),
             )
             self.assertTrue(await self.manager.async_record_reference("plant", NOW))
         self.hass.values["sensor.raw"] = states[-1]
@@ -409,7 +593,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
         attrs = self.manager.attributes("plant")
         self.assertEqual(self.hass.services.writes, [("input_number.wet", 222)])
-        self.assertEqual(self.hass.values["input_number.dry"].state, "67")
+        self.assertEqual(float(self.hass.values["input_number.dry"].state), 67)
         self.assertEqual(intents[0]["expected"], [67, 221])
         self.assertEqual(intents[0]["target"], [67, 222])
         self.assertIsNone(self.store.data["records"]["sensor.smooth"]["pending"])
@@ -419,6 +603,106 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.manager.reading_fields("plant")["calibration_verified_revision"], 1
         )
         self.assertEqual(attrs["calibration_baseline_wet"], 221)
+
+    async def test_silent_store_write_failure_never_authorizes_helper_effect(
+        self,
+    ) -> None:
+        await self.qualified_fixture()
+        prior = copy.deepcopy(self.store.data)
+        self.store.drop_save = True
+        with self.assertLogs(self.runtime_module.__name__, level="ERROR"):
+            await self.manager.async_observe(
+                "plant", self.quality, NOW, allow_write=True
+            )
+        self.assertEqual(self.hass.services.writes, [])
+        self.assertEqual(float(self.hass.values["input_number.wet"].state), 221)
+        self.assertEqual(self.store.data, prior)
+        self.assertIsNone(self.manager.witnesses())
+        self.assertFalse(
+            self.manager.attributes("plant")["calibration_history_available"]
+        )
+
+    async def test_malformed_burst_is_untrusted_without_losing_finite_observations(
+        self,
+    ) -> None:
+        self.hass.values["sensor.raw"] = ha_state(
+            100,
+            sampled_at=NOW + 1,
+            samples=["99", "bad", float("nan"), 101],
+            physical_pin=22,
+        )
+        await self.manager.async_observe("plant", {"reliability_valid": True}, NOW + 1)
+        self.assertTrue(await self.manager.async_save())
+        point = self.store.data["records"]["sensor.smooth"]["samples"][-1]
+        self.assertEqual(point["burst"], [99, 101])
+        self.assertFalse(point["reliable"])
+        self.assertFalse(point["rollback_eligible"])
+        self.assertTrue(
+            self.manager.attributes("plant")["calibration_history_available"]
+        )
+
+    async def test_disabled_calibration_keeps_history_and_consumes_helper_events(
+        self,
+    ) -> None:
+        self.hass.now = NOW + 1
+        self.external_wet_change(225)
+        await self.manager.async_prepare("plant", "sensor.smooth", NOW + 1, "rest:raw")
+        self.config["automatic_calibration"]["sensor.smooth"]["enabled"] = False
+        self.hass.now = NOW + 2
+        self.external_wet_change(230)
+        await self.manager.async_prepare("plant", "sensor.smooth", NOW + 2, "rest:raw")
+        attrs = self.manager.attributes("plant")
+        self.assertFalse(attrs["calibration_enabled"])
+        self.assertTrue(attrs["calibration_history_available"])
+        self.assertEqual(
+            [row["new_wet"] for row in attrs["calibration_history"]], [225, 230]
+        )
+        self.assertFalse(self.manager._events.get("sensor.smooth"))
+        await self.manager.async_observe(
+            "plant", {"reliability_valid": True}, NOW + 2, allow_write=True
+        )
+        self.assertEqual(self.hass.services.writes, [])
+
+    async def test_pending_evidence_copies_only_configured_reference_protocol(
+        self,
+    ) -> None:
+        await self.qualified_fixture()
+        record = self.manager.records["sensor.smooth"]
+        record["references"] += [
+            {**reference, "protocol": "retired-protocol"}
+            for reference in list(record["references"])
+        ]
+        intents = []
+        self.hass.services.before_write = lambda: intents.append(
+            copy.deepcopy(self.store.data["records"]["sensor.smooth"]["pending"])
+        )
+        await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
+        self.assertEqual(self.hass.services.writes, [("input_number.wet", 222)])
+        self.assertEqual(len(intents[0]["references"]), 4)
+        self.assertEqual(
+            {row["protocol"] for row in intents[0]["references"]}, {"gravimetric-v1"}
+        )
+
+    async def test_accepted_reference_ids_cannot_reenter_after_retention_window(
+        self,
+    ) -> None:
+        await self.qualified_fixture()
+        await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
+        at = NOW + 92 * 86400
+        source = self.manager.attributes("plant")["calibration_source_fingerprint"]
+        self.hass.values["sensor.reference"] = ha_state(
+            90,
+            reference_id="wet-0",
+            cycle_id="cycle-0",
+            start_at=at - 3600,
+            end_at=at,
+            protocol="gravimetric-v1",
+            source_fingerprint=source,
+        )
+        self.assertFalse(await self.manager.async_record_reference("plant", at))
+        self.assertTrue(
+            self.manager.attributes("plant")["calibration_history_available"]
+        )
 
     async def test_failed_persistence_prevents_helper_write(self) -> None:
         await self.qualified_fixture()
@@ -445,7 +729,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
         await self.manager.async_prepare("plant", "sensor.smooth", NOW, "rest:raw")
         self.assertEqual(self.hass.services.writes, [])
-        self.assertEqual(self.hass.values["input_number.wet"].state, "223")
+        self.assertEqual(float(self.hass.values["input_number.wet"].state), 223)
         row = self.manager.attributes("plant")["calibration_history"][0]
         self.assertEqual(row["kind"], "external_discovered")
         self.assertIsNone(row["at"])
@@ -460,34 +744,31 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             90,
             reference_id="self-reference",
             cycle_id="cycle",
-            start_at=NOW - 3600,
-            end_at=NOW,
+            start_at=NOW + 3600,
+            end_at=NOW + 7200,
             protocol="qualified",
             source_entity="sensor.raw",
             source_fingerprint=self.manager.attributes("plant")[
                 "calibration_source_fingerprint"
             ],
         )
-        self.assertFalse(await self.manager.async_record_reference("plant", NOW))
+        self.assertFalse(await self.manager.async_record_reference("plant", NOW + 7200))
         self.assertEqual(self.manager.attributes("plant")["calibration_references"], 0)
+        self.hass.values["sensor.reference"].attributes.pop("source_entity")
+        self.assertTrue(await self.manager.async_record_reference("plant", NOW + 7200))
+        self.assertEqual(self.manager.attributes("plant")["calibration_references"], 1)
 
     async def test_restart_reconciles_uncertain_completed_effect_once(self) -> None:
         await self.qualified_fixture()
 
-        class ShutdownDuringWrite(BaseException):
-            pass
-
-        def shutdown() -> None:
-            raise ShutdownDuringWrite
-
-        self.hass.services.after_write = shutdown
-        with self.assertRaises(ShutdownDuringWrite):
+        self.hass.services.after_write = raise_interrupted
+        with self.assertRaises(Interrupted):
             await self.manager.async_observe(
                 "plant", self.quality, NOW, allow_write=True
             )
-        self.assertEqual(self.hass.values["input_number.wet"].state, "222.0")
+        self.assertEqual(float(self.hass.values["input_number.wet"].state), 222)
         self.assertIsNotNone(self.store.data["records"]["sensor.smooth"]["pending"])
-        restarted = self.runtime_module.CalibrationRuntime(
+        restarted = self.new_runtime(
             self.hass,
             self.store,
             self.config,
@@ -575,15 +856,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         after = ha_state(value, self.hass.now)
         self.hass.values["input_number.wet"] = after
         self.manager.note_helper_event(
-            SimpleNamespace(
-                data={
-                    "entity_id": "input_number.wet",
-                    "old_state": before,
-                    "new_state": after,
-                },
-                time_fired=after.last_updated,
-                context=SimpleNamespace(id="external"),
-            )
+            helper_event("input_number.wet", before, after, "external")
         )
 
     async def test_manual_change_during_native_dispatch_is_not_overwritten(
@@ -791,9 +1064,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_bootstrap_never_takes_current_helper_as_original(self) -> None:
         self.hass.values["input_number.wet"] = ha_state(230)
-        manager = self.runtime_module.CalibrationRuntime(
-            self.hass, MemoryStore(), self.config
-        )
+        manager = self.new_runtime(self.hass, MemoryStore(), self.config)
         await manager.async_load()
         await manager.async_prepare("plant", "sensor.smooth", NOW, "rest:raw")
         attrs = manager.attributes("plant")
@@ -806,9 +1077,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         witnesses = self.manager.witnesses()
-        missing = self.runtime_module.CalibrationRuntime(
-            self.hass, MemoryStore(), self.config
-        )
+        missing = self.new_runtime(self.hass, MemoryStore(), self.config)
         with self.assertLogs(self.runtime_module.__name__, level="ERROR"):
             await missing.async_load(witnesses)
         self.hass.values["input_number.wet"] = ha_state(1500)
@@ -822,9 +1091,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.store.data["records"].pop("sensor.smooth")
-        restarted = self.runtime_module.CalibrationRuntime(
-            self.hass, self.store, self.config
-        )
+        restarted = self.new_runtime(self.hass, self.store, self.config)
         with self.assertLogs(self.runtime_module.__name__, level="ERROR"):
             await restarted.async_load()
         await restarted.async_prepare("plant", "sensor.smooth", NOW + 1, "rest:raw")
@@ -928,14 +1195,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         after = ha_state(68)
         self.hass.values["input_number.dry"] = after
         self.manager.note_helper_event(
-            SimpleNamespace(
-                data={
-                    "entity_id": "input_number.dry",
-                    "old_state": before,
-                    "new_state": after,
-                },
-                context=SimpleNamespace(id="external-dry"),
-            )
+            helper_event("input_number.dry", before, after, "external-dry")
         )
         await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
         self.assertEqual(self.hass.services.writes, [])
@@ -952,14 +1212,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             after = ha_state(221, step=0.5)
             self.hass.values["input_number.wet"] = after
             self.manager.note_helper_event(
-                SimpleNamespace(
-                    data={
-                        "entity_id": "input_number.wet",
-                        "old_state": before,
-                        "new_state": after,
-                    },
-                    context=SimpleNamespace(id="changed-step"),
-                )
+                helper_event("input_number.wet", before, after, "changed-step")
             )
             return decision
 
@@ -980,14 +1233,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 if new is not None:
                     self.hass.values["input_number.wet"] = new
                 self.manager.note_helper_event(
-                    SimpleNamespace(
-                        data={
-                            "entity_id": "input_number.wet",
-                            "old_state": old,
-                            "new_state": new,
-                        },
-                        context=SimpleNamespace(id="recreated-helper"),
-                    )
+                    helper_event("input_number.wet", old, new, "recreated-helper")
                 )
             return decision
 
@@ -1011,18 +1257,12 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         await self.qualified_fixture()
 
-        class Interrupted(BaseException):
-            pass
-
-        def interrupt() -> None:
-            raise Interrupted
-
-        self.hass.services.before_write = interrupt
+        self.hass.services.before_write = raise_interrupted
         with self.assertRaises(Interrupted):
             await self.manager.async_observe(
                 "plant", self.quality, NOW, allow_write=True
             )
-        restarted = self.runtime_module.CalibrationRuntime(
+        restarted = self.new_runtime(
             self.hass,
             self.store,
             self.config,
@@ -1081,20 +1321,12 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.qualified_fixture()
         older = copy.deepcopy(self.store.data)
 
-        class Interrupted(BaseException):
-            pass
-
-        def interrupt() -> None:
-            raise Interrupted
-
-        self.hass.services.before_write = interrupt
+        self.hass.services.before_write = raise_interrupted
         with self.assertRaises(Interrupted):
             await self.manager.async_observe(
                 "plant", self.quality, NOW, allow_write=True
             )
-        restarted = self.runtime_module.CalibrationRuntime(
-            self.hass, self.store, self.config
-        )
+        restarted = self.new_runtime(self.hass, self.store, self.config)
         await restarted.async_load(self.manager.witnesses())
         await restarted.async_prepare("plant", "sensor.smooth", NOW + 1, "rest:raw")
         witness = restarted.witnesses()["sensor.smooth"]
@@ -1103,9 +1335,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(witness["last_applied_at"])
         restored_store = MemoryStore()
         restored_store.data = older
-        restored = self.runtime_module.CalibrationRuntime(
-            self.hass, restored_store, self.config
-        )
+        restored = self.new_runtime(self.hass, restored_store, self.config)
         with self.assertLogs(self.runtime_module.__name__, level="ERROR"):
             await restored.async_load(restarted.witnesses())
         await restored.async_prepare("plant", "sensor.smooth", NOW + 2, "rest:raw")
@@ -1115,10 +1345,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_witness_merge_keeps_decision_fence_independent_of_actual_rank(
         self,
     ) -> None:
-        merge = getattr(self.runtime_module, "collect_witnesses", None)
-        self.assertTrue(
-            callable(merge), "The care witness merge must retain time fences"
-        )
+        merge = self.runtime_module.collect_witnesses
         initial = self.manager.witnesses()["sensor.smooth"]
         stronger_actual = {
             **initial,
@@ -1148,18 +1375,15 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_witness_merge_does_not_repair_missing_or_invalid_time_fence(
         self,
     ) -> None:
-        merge = getattr(self.runtime_module, "collect_witnesses", None)
-        self.assertTrue(
-            callable(merge), "The care witness merge must retain time fences"
-        )
+        merge = self.runtime_module.collect_witnesses
         initial = {
             **self.manager.witnesses()["sensor.smooth"],
             "decision_fence_at": None,
         }
-        for value in ("missing", "123", -1, True):
+        for value in (MISSING, "123", -1, True):
             with self.subTest(fence=value):
                 bad = {**initial, "revision": 1}
-                if value == "missing":
+                if value is MISSING:
                     bad.pop("decision_fence_at")
                 else:
                     bad["decision_fence_at"] = value
@@ -1168,7 +1392,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "b": {"calibration_witnesses": {"sensor.smooth": initial}},
                 }
                 result = merge(records)["sensor.smooth"]
-                if value == "missing":
+                if value is MISSING:
                     self.assertNotIn("decision_fence_at", result)
                 else:
                     self.assertEqual(result["decision_fence_at"], value)

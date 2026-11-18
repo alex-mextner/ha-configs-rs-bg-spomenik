@@ -21,7 +21,7 @@
     cooldown:'наблюдение — перерыв между изменениями шкалы',
     deadband:'наблюдение — подтверждённое отклонение слишком мало',
     helper_resolution:'наблюдение — изменение меньше выбранного шага записи',
-    applying:'Сохраняю изменение шкалы',
+    applying:'сохраняю изменение шкалы',
     applied:'изменение шкалы сохранено',
     rolled_back:'предыдущая шкала восстановлена',
     storage_unavailable:'наблюдение — журнал временно недоступен',
@@ -45,12 +45,13 @@
   const calibrationReasonWords = {
     qualified_drift:'Независимые опорные измерения подтвердили улучшение.',
     contradiction:'На последующем независимом измерении прежняя шкала дала меньшую ошибку.',
-    pending_effect_reconciled:'Проверено после перезапуска; время и автор изменения неизвестны.',
+    pending_effect_reconciled:'Проверено по текущим настройкам; время и автор изменения неизвестны.',
+    concurrent_change:'Во время записи настройка была изменена извне; калибровка не подтверждена.',
   };
-  const adcLabel = value => typeof value === 'number' && Number.isFinite(value)
-    ? new Intl.NumberFormat('ru-RU', {maximumFractionDigits:6}).format(value) : '—';
-  const validEpoch = value => typeof value === 'number' && value > 0
-    && Number.isFinite(value) && Number.isFinite(new Date(value * 1000).getTime());
+  const adcFormatter = new Intl.NumberFormat('ru-RU', {maximumFractionDigits:6});
+  const adcLabel = value => Number.isFinite(value) ? adcFormatter.format(value) : '—';
+  const validEpoch = value => Number.isFinite(value) && value > 0
+    && Number.isFinite(new Date(value * 1000).getTime());
   const dateLabel = value => {
     if (value == null || value === '') return null;
     const dateOnly = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -193,18 +194,20 @@
       }[a.wet_risk] || 'Высокая влажность: недостаточно данных';
     }
     _calibrationEvents(a) {
-      if (a.calibration_history_available !== true || !Array.isArray(a.calibration_history)) return [];
+      if (a.calibration_history_available !== true || !Array.isArray(a.calibration_history)) return null;
       return a.calibration_history.filter(event => event
         && typeof event.event_id === 'string' && event.event_id
-        && ['automatic','rollback','manual','external_discovered'].includes(event.kind)
-        && [event.old_dry,event.old_wet,event.new_dry,event.new_wet].every(value => typeof value === 'number' && Number.isFinite(value))
+        && Object.hasOwn(calibrationEventWords, event.kind)
+        && [event.old_dry,event.old_wet,event.new_dry,event.new_wet].every(Number.isFinite)
+        && Number.isInteger(event.revision) && event.revision > 0
         && (event.at === null ? validEpoch(event.detected_at) : validEpoch(event.at)))
-        .slice().sort((a,b) => (b.at ?? b.detected_at) - (a.at ?? a.detected_at));
+        .sort((first,second) => second.revision - first.revision);
     }
     _calibrationEvent(event) {
       const discovered = event.at === null;
       const stamp = discovered ? event.detected_at : event.at;
-      const title = discovered ? 'Обнаружено внешнее изменение' : calibrationEventWords[event.kind];
+      const title = event.reason === 'concurrent_change'
+        ? 'Автоматическая запись при конфликте настроек' : calibrationEventWords[event.kind];
       const reason = calibrationReasonWords[event.reason];
       const before = `${adcLabel(event.old_dry)} / ${adcLabel(event.old_wet)}`;
       const after = `${adcLabel(event.new_dry)} / ${adcLabel(event.new_wet)}`;
@@ -217,7 +220,7 @@
       const events = this._calibrationEvents(a);
       const current = `${adcLabel(a.calibration_dry_adc)} / ${adcLabel(a.calibration_wet_adc)}`;
       const baseline = `${adcLabel(a.calibration_baseline_dry)} / ${adcLabel(a.calibration_baseline_wet)}`;
-      const journal = a.calibration_history_available !== true || !Array.isArray(a.calibration_history)
+      const journal = events === null
         ? '<div class="calibration-unavailable">История калибровки временно недоступна</div>'
         : events.length
           ? `<ol class="calibration-history">${events.map(event => this._calibrationEvent(event)).join('')}</ol>`

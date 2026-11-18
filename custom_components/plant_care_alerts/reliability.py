@@ -413,7 +413,9 @@ def _calibration_reading(state: dict, reading: dict, now: float) -> dict:
     state["reliability_calibration_basis"] = basis
     raw = number(reading.get("raw_source_value"))
     if frozen and basis != current and raw is not None:
-        value = max(0.0, min(MAX_INDEX, 100 * (raw - basis[0]) / (basis[1] - basis[0])))
+        value = max(
+            0.0, min(MAX_INDEX, MAX_INDEX * (raw - basis[0]) / (basis[1] - basis[0]))
+        )
         return {**reading, "moisture": value}
     return reading
 
@@ -421,10 +423,15 @@ def _calibration_reading(state: dict, reading: dict, now: float) -> dict:
 def _observe_barrier_raw(
     state: dict, reading: dict, now: float, settings: dict
 ) -> str | None:
+    reason = _sample_reason(reading, now, settings.get("stale_seconds", 1200))
+    if reason is not None:
+        return reason
     stamp, raw = (
         number(reading.get("sample_at")),
         number(reading.get("raw_source_value")),
     )
+    if state.get("raw_source_identity") is None:
+        return "invalid_sample"
     last = number(state.get("reliability_last_sample_at"))
     if (
         stamp is None
@@ -433,8 +440,6 @@ def _observe_barrier_raw(
         or (last is not None and stamp < last)
     ):
         return "invalid_sample"
-    if now - stamp > settings.get("stale_seconds", 1200):
-        return "stale"
     if last is None or stamp > last:
         if state.get("last_source_value") != raw:
             state.update(last_source_value=raw, last_source_change_at=stamp)

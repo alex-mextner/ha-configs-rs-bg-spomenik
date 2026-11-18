@@ -110,6 +110,18 @@ assert.match(journal, /Откат к предыдущей шкале/);
 assert.match(journal, /221.*→.*222/);
 assert.equal((journal.match(/class="calibration-event"/g) || []).length, 3);
 
+const sameTime = render({...active, calibration_history: [
+  event('automatic', {event_id: 'first', revision: 1}),
+  event('manual', {event_id: 'last', revision: 2, old_wet: 222, new_wet: 230}),
+]});
+assert.ok(sameTime.indexOf('Изменение настройки') < sameTime.indexOf('Автоматическая калибровка'));
+const concurrent = render({...active, calibration_history: [
+  event('automatic', {reason: 'concurrent_change', old_wet: 230}),
+]});
+assert.match(concurrent, /Автоматическая запись при конфликте настроек/);
+assert.match(concurrent, /калибровка не подтверждена/);
+assert.doesNotMatch(concurrent, /Автоматическая калибровка/);
+
 const discovered = render({...active, calibration_history: [
   event('external_discovered', {at: null, detected_at: now, new_wet: 224}),
 ]});
@@ -122,7 +134,7 @@ const disabled = render({...active, calibration_enabled: false, calibration_hist
 assert.match(disabled, /Автокалибровка.*отключена/);
 assert.equal((disabled.match(/class="calibration-event"/g) || []).length, 3);
 const pending = render({...active, calibration_status: 'applying'});
-assert.match(pending, /Сохраняю изменение шкалы/);
+assert.match(pending, /сохраняю изменение шкалы/i);
 assert.doesNotMatch(pending, /Автоматическая калибровка/);
 
 const malformed = render({...active, calibration_history: [
@@ -150,7 +162,8 @@ const explained = render({...active, calibration_history: [
 ]});
 assert.match(explained, /Независимые опорные измерения подтвердили улучшение/);
 assert.match(explained, /прежняя шкала дала меньшую ошибку/);
-assert.match(explained, /после перезапуска/);
+assert.match(explained, /Проверено по текущим настройкам/);
+assert.doesNotMatch(explained, /после перезапуска/);
 assert.match(explained, /автор изменения неизвест/);
 
 const rerendered = new Card();

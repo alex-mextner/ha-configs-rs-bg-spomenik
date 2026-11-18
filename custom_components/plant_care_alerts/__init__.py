@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -39,7 +40,16 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .analytics import analyze
-from .calibration_runtime import CalibrationRuntime, RuntimeHooks, collect_witnesses
+from .calibration_runtime import (
+    APPLY_CALIBRATION_SERVICE,
+    CALIBRATION_DOMAIN,
+    CALIBRATION_STORE_KEY,
+    SUPPORTED_HA_VERSION,
+    CalibrationRuntime,
+    RuntimeHooks,
+    collect_witnesses,
+    require_persisted_snapshot,
+)
 from .photo import persist_photo
 from .reliability import UNCHANGED_SECONDS, assess
 from .state_machine import evaluate, finite
@@ -48,13 +58,13 @@ from .voice import async_announce, configured_target, target_available
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
 
-DOMAIN = "plant_care_alerts"
+DOMAIN = CALIBRATION_DOMAIN
 MAX_SAMPLE_SKEW_SECONDS = 60
 MAX_MOISTURE_INDEX = 100
 VOICE_START_HOUR = 8
 VOICE_LAST_HOUR = 21
 RETRY_DELAYS = (60, 300, 900, 3600)
-CLEAR_STATUSES = {"sensor_error", "ok", "checking", "snoozed", "calibrating"}
+CLEAR_STATUSES = {"sensor_error", "ok", "checking", "snoozed"}
 VOICE_METADATA_KEYS = (
     "forecast_voice_at",
     "voice_unavailable_reason",
@@ -64,68 +74,93 @@ VOICE_METADATA_KEYS = (
     "voice_next_at",
 )
 _LOGGER = logging.getLogger(__name__)
+
+
+def _validate_calibration_config(config: dict) -> dict:
+    for source, options in config.get("automatic_calibration", {}).items():
+        if options["original_dry"] >= options["original_wet"]:
+            message = "Automatic calibration requires original_dry < original_wet"
+            raise vol.Invalid(message)
+        if bool(options.get("reference_entity")) != bool(
+            options.get("reference_protocol")
+        ):
+            message = (
+                "reference_entity and reference_protocol must be configured together"
+            )
+            raise vol.Invalid(message)
+        if source not in config.get(
+            "freshness_sources", {}
+        ) or source not in config.get("calibration_sources", {}):
+            message = "Automatic calibration requires raw-source and endpoint mappings"
+            raise vol.Invalid(message)
+    return config
+
+
 CONFIG_SCHEMA = vol.Schema(
     {
-        vol.Optional(DOMAIN, default={}): vol.Schema(
-            {
-                vol.Optional("confirmation_hours", default=6): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.1, max=48)
-                ),
-                vol.Optional("overdue_hours", default=24): vol.All(
-                    vol.Coerce(float), vol.Range(min=1, max=168)
-                ),
-                vol.Optional("stale_minutes", default=20): vol.All(
-                    vol.Coerce(float), vol.Range(min=5, max=1440)
-                ),
-                vol.Optional("unchanged_hours", default=12): vol.All(
-                    vol.Coerce(float), vol.Range(min=12, max=12)
-                ),
-                vol.Optional("freshness_sources", default={}): {
-                    cv.entity_id: cv.entity_id
-                },
-                vol.Optional("user_reports", default={}): {cv.entity_id: cv.string},
-                vol.Optional("calibration_sources", default={}): {
-                    cv.entity_id: vol.Schema(
-                        {
-                            vol.Required("dry"): cv.entity_id,
-                            vol.Required("wet"): cv.entity_id,
-                        }
-                    )
-                },
-                vol.Optional("automatic_calibration", default={}): {
-                    cv.entity_id: vol.Schema(
-                        {
-                            vol.Optional("enabled", default=True): cv.boolean,
-                            vol.Required("original_dry"): vol.All(
-                                vol.Coerce(float), vol.Range(min=0, max=4095)
-                            ),
-                            vol.Required("original_wet"): vol.All(
-                                vol.Coerce(float), vol.Range(min=0, max=4095)
-                            ),
-                            vol.Required("source_revision"): vol.All(
-                                cv.string, vol.Length(min=1)
-                            ),
-                            vol.Optional("reference_entity"): cv.entity_id,
-                            vol.Optional("reference_protocol"): vol.All(
-                                cv.string, vol.Length(min=1)
-                            ),
-                        }
-                    )
-                },
-                vol.Optional("wet_hours", default=72): vol.All(
-                    vol.Coerce(float), vol.Range(min=1, max=312)
-                ),
-                vol.Optional("wet_percent", default=90): vol.All(
-                    vol.Coerce(float), vol.Range(min=1, max=100)
-                ),
-                vol.Optional(
-                    "voice_toggle", default="input_boolean.plant_care_voice_enabled"
-                ): cv.entity_id,
-                vol.Optional(
-                    "voice_speaker",
-                    default="media_player.yandex_station_m00zrw3008rajg",
-                ): cv.entity_id,
-            }
+        vol.Optional(DOMAIN, default={}): vol.All(
+            vol.Schema(
+                {
+                    vol.Optional("confirmation_hours", default=6): vol.All(
+                        vol.Coerce(float), vol.Range(min=0.1, max=48)
+                    ),
+                    vol.Optional("overdue_hours", default=24): vol.All(
+                        vol.Coerce(float), vol.Range(min=1, max=168)
+                    ),
+                    vol.Optional("stale_minutes", default=20): vol.All(
+                        vol.Coerce(float), vol.Range(min=5, max=1440)
+                    ),
+                    vol.Optional("unchanged_hours", default=12): vol.All(
+                        vol.Coerce(float), vol.Range(min=12, max=12)
+                    ),
+                    vol.Optional("freshness_sources", default={}): {
+                        cv.entity_id: cv.entity_id
+                    },
+                    vol.Optional("user_reports", default={}): {cv.entity_id: cv.string},
+                    vol.Optional("calibration_sources", default={}): {
+                        cv.entity_id: vol.Schema(
+                            {
+                                vol.Required("dry"): cv.entity_id,
+                                vol.Required("wet"): cv.entity_id,
+                            }
+                        )
+                    },
+                    vol.Optional("automatic_calibration", default={}): {
+                        cv.entity_id: vol.Schema(
+                            {
+                                vol.Optional("enabled", default=True): cv.boolean,
+                                vol.Required("original_dry"): vol.All(
+                                    vol.Coerce(float), vol.Range(min=0, max=4095)
+                                ),
+                                vol.Required("original_wet"): vol.All(
+                                    vol.Coerce(float), vol.Range(min=0, max=4095)
+                                ),
+                                vol.Required("source_revision"): vol.All(
+                                    cv.string, vol.Length(min=1)
+                                ),
+                                vol.Optional("reference_entity"): cv.entity_id,
+                                vol.Optional("reference_protocol"): vol.All(
+                                    cv.string, vol.Length(min=1)
+                                ),
+                            }
+                        )
+                    },
+                    vol.Optional("wet_hours", default=72): vol.All(
+                        vol.Coerce(float), vol.Range(min=1, max=312)
+                    ),
+                    vol.Optional("wet_percent", default=90): vol.All(
+                        vol.Coerce(float), vol.Range(min=1, max=100)
+                    ),
+                    vol.Optional(
+                        "voice_toggle", default="input_boolean.plant_care_voice_enabled"
+                    ): cv.entity_id,
+                    vol.Optional(
+                        "voice_speaker",
+                        default="media_player.yandex_station_m00zrw3008rajg",
+                    ): cv.entity_id,
+                }
+            ),
+            _validate_calibration_config,
         )
     },
     extra=vol.ALLOW_EXTRA,
@@ -152,7 +187,11 @@ def needs_notification(record: Any) -> bool:
 
 def needs_clear(record: dict[str, Any]) -> bool:
     """Retry a pending phone clear while no current watering warning applies."""
-    return record.get("status") in CLEAR_STATUSES and bool(record.get("clear_pending"))
+    return (
+        record.get("status") in CLEAR_STATUSES
+        and not record.get("calibration_confirmation_pending")
+        and bool(record.get("clear_pending"))
+    )
 
 
 def acknowledge_delivery(record: dict[str, Any], status: str) -> None:
@@ -309,8 +348,8 @@ async def async_setup(hass: Any, config: Any) -> bool:
 
 def _register_calibration_service(hass: Any, manager: CareManager) -> None:
     """Register an owned admin action with explicit control of the wet helper."""
-    name = "apply_calibration"
-    if ha_version != "2026.9.3":
+    name = APPLY_CALIBRATION_SERVICE
+    if ha_version != SUPPORTED_HA_VERSION:
         manager.calibration.inhibit_writes("unsupported_runtime")
         return
     if hass.services.has_service(DOMAIN, name):
@@ -325,11 +364,16 @@ def _register_calibration_service(hass: Any, manager: CareManager) -> None:
         await _require_entity_control(hass, call.context, entity_id)
         if hass.data.get(DOMAIN) is not manager or hass.state is not CoreState.running:
             return {entity_id: {"applied": False}}
+        if not manager.calibration.has_armed_target(
+            entity_id, call.data["transaction_id"], call.context.id
+        ):
+            return {entity_id: {"applied": False}}
         component = hass.data.get(DATA_INSTANCES, {}).get("input_number")
         entity = component.get_entity(entity_id) if component else None
+        if entity is None:
+            return {entity_id: {"applied": False}}
         if (
-            ha_version != "2026.9.3"
-            or type(entity) is not InputNumber
+            type(entity) is not InputNumber
             or getattr(entity.async_set_native_value, "__func__", None)
             is not InputNumber.async_set_native_value
         ):
@@ -474,10 +518,10 @@ class CareManager:
     def __init__(self, hass: Any, config: Any) -> None:
         """Initialize the adapter without changing upstream plant state."""
         self.hass, self.config = hass, config
-        self.store = Store(hass, 1, DOMAIN)
+        self.store = self._new_store(DOMAIN)
         self.calibration = CalibrationRuntime(
             hass,
-            Store(hass, 1, "plant_care_calibration"),
+            self._new_store(CALIBRATION_STORE_KEY),
             config,
             hooks=RuntimeHooks(
                 context_factory=Context,
@@ -486,6 +530,7 @@ class CareManager:
                 quality_provider=self._calibration_quality,
                 identity_provider=self._calibration_source_identity,
                 write_ready=lambda: self.hass.state is CoreState.running,
+                read_persisted=lambda: self._read_persisted(CALIBRATION_STORE_KEY),
             ),
         )
         self.records, self.entities, self.details = {}, {}, {}
@@ -537,6 +582,15 @@ class CareManager:
         """Keep existing source subscriptions while recorder history is pending."""
         return self.watched | self._refresh_watched | self.calibration.watched_entities
 
+    def _new_store(self, key: str) -> Store:
+        return Store(
+            self.hass, 1, key, atomic_writes=True, serialize_in_event_loop=False
+        )
+
+    async def _read_persisted(self, key: str) -> dict | None:
+        """Read through a new Store, excluding the writer's own pending memory."""
+        return await self._new_store(key).async_load()
+
     async def load(self) -> None:
         """Restore alert timing through the supported Home Assistant storage API."""
         data = await self.store.async_load()
@@ -550,16 +604,20 @@ class CareManager:
     async def _persist_calibration_witnesses(self, entry_id: str) -> bool:
         witnesses = self.calibration.witnesses()
         record = self.records[entry_id]
-        if record.get("calibration_witnesses", {}) == witnesses:
+        if witnesses is None or record.get("calibration_witnesses", {}) == witnesses:
             return False
-        record["calibration_witnesses"] = witnesses
+        snapshot = deepcopy(self.records)
+        snapshot[entry_id]["calibration_witnesses"] = witnesses
         try:
-            await self.store.async_save(self.records)
+            await self.store.async_save(snapshot)
+            require_persisted_snapshot(await self._read_persisted(DOMAIN), snapshot)
         except Exception:
             self.calibration.inhibit_writes("witness_unavailable")
             _LOGGER.exception(
                 "Calibration witness could not be persisted; writes disabled"
             )
+            return False
+        record["calibration_witnesses"] = witnesses
         return True
 
     def _calibration_source_identity(self, source: str) -> str:
@@ -573,7 +631,7 @@ class CareManager:
         )
 
     def _calibration_quality(self, entry_id: str, now: float) -> dict:
-        """Recheck physical evidence after the executor without changing care state."""
+        """Recheck physical evidence and refresh source metadata after the executor."""
         plant = self.hass.data.get("adaptive_plant", {}).get(entry_id)
         if plant is None:
             return {"reliability_valid": False, "reliability_reason": "missing"}
@@ -601,6 +659,11 @@ class CareManager:
                 f"{kind}: сухая точка {event['old_dry']:g} → {event['new_dry']:g}; "
                 f"мокрая точка {event['old_wet']:g} → {event['new_wet']:g} ADC."
             )
+            if event.get("reason") == "concurrent_change":
+                message += (
+                    " Изменение не подтверждено независимыми данными:"
+                    " обнаружено одновременное редактирование настройки."
+                )
             if event["at"] is None:
                 message += " Время изменения неизвестно."
             async_log_entry(
@@ -751,9 +814,13 @@ class CareManager:
         """Publish a change; delivery remains pending until acknowledged."""
         current = self.records[entry_id]
         status = current["status"]
-        if status in CLEAR_STATUSES and (
-            previous in {"due", "overdue"}
-            or current.get("notified_status") in {"due", "overdue"}
+        if (
+            status in CLEAR_STATUSES
+            and not current.get("calibration_confirmation_pending")
+            and (
+                previous in {"due", "overdue"}
+                or current.get("notified_status") in {"due", "overdue"}
+            )
         ):
             current["clear_pending"] = True
         notify = needs_notification(current)
@@ -1245,6 +1312,7 @@ class CareManager:
             _LOGGER.exception("Failed to update plant care alerts")
         finally:
             self._calibration_write_active = False
+            self._calibration_write_pending = False
             self.busy = False
             self._refresh_owner = None
             self._refresh_watched = set()

@@ -3,15 +3,19 @@
 import importlib.util
 import json
 import sys
+import types
 import unittest
+from collections.abc import Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
 
-MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "custom_components/plant_care_alerts/calibration.py"
-)
-SPEC = importlib.util.spec_from_file_location("_plant_calibration_test", MODULE_PATH)
+ROOT = Path(__file__).resolve().parents[2]
+PACKAGE = "_plant_calibration_engine_test"
+package = types.ModuleType(PACKAGE)
+package.__path__ = [str(ROOT / "custom_components/plant_care_alerts")]
+sys.modules[PACKAGE] = package
+MODULE_PATH = ROOT / "custom_components/plant_care_alerts/calibration.py"
+SPEC = importlib.util.spec_from_file_location(PACKAGE + ".calibration", MODULE_PATH)
 calibration = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = calibration
 SPEC.loader.exec_module(calibration)
@@ -27,7 +31,7 @@ def baseline(**changes: object) -> calibration.CalibrationState:
         "original_wet": 221.0,
         "current_wet": 221.0,
         "revision": 0,
-        "last_applied_at": None,
+        "decision_fence_at": None,
         "last_evidence_id": None,
         "source_fingerprint": SOURCE,
         "baseline_source_fingerprint": SOURCE,
@@ -42,6 +46,7 @@ def reading(at, raw, **changes: object) -> calibration.PhysicalSample:
         "raw": raw,
         "burst": (raw - 1,) * 5 + (raw,) + (raw + 1,) * 5,
         "source_fingerprint": SOURCE,
+        "reliable": True,
     }
     return calibration.PhysicalSample(**(values | changes))
 
@@ -78,8 +83,131 @@ def qualified_history(
     return samples, references, samples[-1].sampled_at
 
 
+def full_scale_state(wet: float = 4000.0) -> calibration.CalibrationState:
+    return baseline(
+        original_dry=0.0, original_wet=wet, current_dry=0.0, current_wet=wet
+    )
+
+
+def rollback_state(fence_at: float, **changes: object) -> calibration.CalibrationState:
+    values = {
+        "current_wet": 222.0,
+        "previous_wet": 221.0,
+        "revision": 1,
+        "decision_fence_at": fence_at,
+        "last_evidence_id": "accepted-evidence",
+    }
+    return baseline(**(values | changes))
+
+
+def custom_history(
+    offsets: Sequence[float],
+    raws: Sequence[float] | None = None,
+    *,
+    index: float = 90.0,
+    window_bounds: tuple[float, float] = (0.0, 3600.0),
+) -> tuple[
+    list[calibration.PhysicalSample], list[calibration.QualifiedWetReference], float
+]:
+    values = [209.2] * len(offsets) if raws is None else raws
+    samples, refs = [], []
+    for day in (0, 7, 14, 15):
+        _, ref = reference_window(day, index=index, count=0)
+        start = ref.start_at
+        refs.append(
+            replace(
+                ref, start_at=start + window_bounds[0], end_at=start + window_bounds[1]
+            )
+        )
+        samples.extend(
+            reading(start + offset, raw)
+            for offset, raw in zip(offsets, values, strict=True)
+        )
+    return samples, refs, refs[-1].end_at
+
+
 class CalibrationTests(unittest.TestCase):
     """Exercise bounded updates and refusal of insufficient physical evidence."""
+
+    def test_even_burst_central_adc_rails_do_not_qualify_an_anchor(self) -> None:
+        for raw, burst in (
+            (4094.0, (4094.0,) * 3 + (4095.0,) * 3),
+            (1.0, (0.0,) * 3 + (1.0,) * 3),
+        ):
+            with self.subTest(raw=raw):
+                samples, refs, now = qualified_history(raw=raw, index=100.0)
+                samples = [replace(s, burst=burst) for s in samples]
+                now += 300
+                samples.append(reading(now, 4000.0))
+                state = full_scale_state()
+                result = calibration.evaluate_calibration(samples, refs, state, now)
+                self.assertEqual(result.reason, "poor_reference_quality")
+                self.assertEqual(
+                    set(result.diagnostics["rejected_references"].values()), {"clipped"}
+                )
+                self.assertIsNone(result.proposed_wet)
+
+    def test_oversized_json_integers_fail_closed_at_numeric_boundaries(self) -> None:
+        samples, refs, now = qualified_history()
+        huge = 10**400
+        cases = (
+            ("state", samples, refs, baseline(original_wet=huge), now, "invalid_state"),
+            ("clock", samples, refs, baseline(), huge, "invalid_state"),
+            (
+                "raw",
+                [*samples[:-1], reading(now, huge)],
+                refs,
+                baseline(),
+                now,
+                "unreliable_sample",
+            ),
+            (
+                "reference",
+                samples,
+                [replace(r, reference_index=huge) for r in refs],
+                baseline(),
+                now,
+                "poor_reference_quality",
+            ),
+        )
+        for label, points, references, state, at, reason in cases:
+            with self.subTest(boundary=label):
+                result = calibration.evaluate_calibration(points, references, state, at)
+                self.assertEqual(result.reason, reason)
+                self.assertIsNone(result.proposed_wet)
+
+    def test_omitted_reliability_does_not_trust_a_physical_sample(self) -> None:
+        samples, refs, now = qualified_history()
+        latest = calibration.PhysicalSample(
+            sampled_at=now,
+            raw=209.2,
+            burst=samples[-1].burst,
+            source_fingerprint=SOURCE,
+        )
+        result = calibration.evaluate_calibration(
+            [*samples[:-1], latest], refs, baseline(), now
+        )
+        self.assertEqual(result.reason, "unreliable_sample")
+        self.assertIsNone(result.proposed_wet)
+
+    def test_frozen_inputs_do_not_retain_mutable_json_list_aliases(self) -> None:
+        original = reading(START, 209.2)
+        burst = list(original.burst)
+        blocked = ["older-evidence"]
+        sample = replace(original, burst=burst)
+        state = baseline(blocked_evidence_ids=blocked)
+        burst[0] = 4095.0
+        blocked.append("later-mutation")
+        self.assertEqual(sample.burst, original.burst)
+        self.assertEqual(state.blocked_evidence_ids, ("older-evidence",))
+
+    def test_single_nan_reading_is_unreliable_not_conflicting_evidence(self) -> None:
+        samples, refs, now = qualified_history()
+        result = calibration.evaluate_calibration(
+            [*samples[:-1], reading(now, float("nan"))], refs, baseline(), now
+        )
+        self.assertEqual(result.reason, "unreliable_sample")
+        self.assertIsNone(result.proposed_wet)
 
     def test_current_raw_1500_without_reference_never_changes_baseline(self) -> None:
         result = calibration.evaluate_calibration(
@@ -118,14 +246,8 @@ class CalibrationTests(unittest.TestCase):
         self.assertIsNone(result.proposed_wet)
 
     def test_twelve_polls_in_fifty_five_minutes_are_insufficient(self) -> None:
-        samples, refs = [], []
-        for day in (0, 7, 14, 15):
-            window, ref = reference_window(day, count=12)
-            samples.extend(window)
-            refs.append(ref)
-        result = calibration.evaluate_calibration(
-            samples, refs, baseline(), refs[-1].end_at
-        )
+        samples, refs, now = custom_history([i * 300 for i in range(12)])
+        result = calibration.evaluate_calibration(samples, refs, baseline(), now)
         self.assertEqual(result.reason, "poor_reference_quality")
         self.assertIsNone(result.proposed_wet)
 
@@ -136,7 +258,9 @@ class CalibrationTests(unittest.TestCase):
         result = calibration.evaluate_calibration(samples, refs, baseline(), now)
         self.assertEqual(result.reason, "poor_reference_quality")
 
-    def test_twelve_buckets_with_one_long_gap_do_not_establish_coverage(self) -> None:
+    def test_internal_gap_over_ten_minutes_fails_coverage_despite_enough_votes(
+        self,
+    ) -> None:
         samples, refs, now = qualified_history()
         samples = [
             replace(s, sampled_at=s.sampled_at + 1200)
@@ -235,7 +359,7 @@ class CalibrationTests(unittest.TestCase):
 
     def test_cooldown_survives_state_reconstruction(self) -> None:
         samples, refs, now = qualified_history()
-        state = baseline(revision=1, last_applied_at=now - 6 * DAY)
+        state = baseline(revision=1, decision_fence_at=now - 6 * DAY)
         result = calibration.evaluate_calibration(samples, refs, state, now)
         self.assertEqual(result.reason, "cooldown")
         self.assertIsNone(result.proposed_wet)
@@ -274,16 +398,12 @@ class CalibrationTests(unittest.TestCase):
         self.assertIsNone(result.proposed_wet)
 
     def test_full_window_target_is_not_hidden_by_sample_envelope_filter(self) -> None:
-        samples, refs = [], []
-        for day in (0, 7, 14, 15):
-            _, ref = reference_window(day, index=100.0)
-            refs.append(ref)
-            samples.extend(
-                reading(ref.start_at + i * 100, 228.0 + i % 3) for i in range(37)
-            )
-        result = calibration.evaluate_calibration(
-            samples, refs, baseline(), refs[-1].end_at
+        samples, refs, now = custom_history(
+            [i * 100 for i in range(37)],
+            [228.0 + i % 3 for i in range(37)],
+            index=100.0,
         )
+        result = calibration.evaluate_calibration(samples, refs, baseline(), now)
         self.assertEqual(
             (result.status, result.reason), ("observe", "target_out_of_bounds")
         )
@@ -293,16 +413,12 @@ class CalibrationTests(unittest.TestCase):
     def test_stationarity_uses_observations_between_independent_votes(self) -> None:
         for phase in (0, 1):
             with self.subTest(phase=phase):
-                samples, refs = [], []
-                for day in (0, 7, 14, 15):
-                    _, ref = reference_window(day)
-                    refs.append(ref)
-                    samples.extend(
-                        reading(ref.start_at + i * 150, 209.2 + 10 * ((i + phase) % 2))
-                        for i in range(25)
-                    )
+                samples, refs, now = custom_history(
+                    [i * 150 for i in range(25)],
+                    [209.2 + 10 * ((i + phase) % 2) for i in range(25)],
+                )
                 result = calibration.evaluate_calibration(
-                    samples, refs, baseline(), refs[-1].end_at
+                    samples, refs, baseline(), now
                 )
                 self.assertEqual(result.reason, "poor_reference_quality")
                 self.assertIsNone(result.proposed_wet)
@@ -314,9 +430,7 @@ class CalibrationTests(unittest.TestCase):
         samples = [replace(s, burst=(4095.0,) * 11) for s in samples]
         now += 300
         samples.append(reading(now, 4000.0))
-        state = baseline(
-            original_dry=0.0, original_wet=4000.0, current_wet=4000.0, current_dry=0.0
-        )
+        state = full_scale_state()
         result = calibration.evaluate_calibration(samples, refs, state, now)
         self.assertEqual(result.reason, "poor_reference_quality")
         self.assertIsNone(result.proposed_wet)
@@ -328,15 +442,13 @@ class CalibrationTests(unittest.TestCase):
                 samples = [replace(s, burst=(rail,) * 11) for s in samples]
                 now += 300
                 samples.append(reading(now, 4000.0))
-                state = baseline(
-                    original_dry=0.0,
-                    original_wet=4000.0,
-                    current_wet=4000.0,
-                    current_dry=0.0,
-                )
+                state = full_scale_state()
                 result = calibration.evaluate_calibration(samples, refs, state, now)
                 self.assertEqual(result.reason, "poor_reference_quality")
                 self.assertEqual(result.diagnostics["qualified_cycles"], 0)
+                self.assertEqual(
+                    set(result.diagnostics["rejected_references"].values()), {"clipped"}
+                )
                 self.assertIsNone(result.proposed_wet)
 
     def test_true_independent_hundred_reference_is_not_inferred_from_clipping(
@@ -350,13 +462,7 @@ class CalibrationTests(unittest.TestCase):
     def test_qualified_later_contradiction_rolls_back_once(self) -> None:
         samples, refs, applied_at = qualified_history()
         window, ref = reference_window(16, raw=205.6)
-        state = baseline(
-            current_wet=222.0,
-            previous_wet=221.0,
-            revision=1,
-            last_applied_at=applied_at,
-            last_evidence_id="accepted-evidence",
-        )
+        state = rollback_state(applied_at)
         result = calibration.evaluate_calibration(
             samples + window, [*refs, ref], state, ref.end_at
         )
@@ -368,13 +474,7 @@ class CalibrationTests(unittest.TestCase):
     def test_blocked_rollback_evidence_does_not_repeat(self) -> None:
         samples, refs, applied_at = qualified_history()
         window, ref = reference_window(16, raw=205.6)
-        state = baseline(
-            current_wet=222.0,
-            previous_wet=221.0,
-            revision=1,
-            last_applied_at=applied_at,
-            last_evidence_id="accepted-evidence",
-        )
+        state = rollback_state(applied_at)
         first = calibration.evaluate_calibration(
             samples + window, [*refs, ref], state, ref.end_at
         )
@@ -394,7 +494,7 @@ class CalibrationTests(unittest.TestCase):
             current_wet=221.0,
             previous_wet=222.0,
             revision=2,
-            last_applied_at=rolled_back_at,
+            decision_fence_at=rolled_back_at,
             last_evidence_id="rollback-evidence",
             blocked_evidence_ids=("applied-evidence", "rollback-evidence"),
         )
@@ -411,11 +511,13 @@ class CalibrationTests(unittest.TestCase):
         state = baseline(
             current_wet=222.0,
             revision=1,
-            last_applied_at=applied_at,
+            decision_fence_at=applied_at,
             last_evidence_id="accepted-evidence",
         )
         result = calibration.evaluate_calibration(samples, refs, state, new_now)
         self.assertEqual(result.reason, "awaiting_cycles")
+        self.assertEqual(result.diagnostics["qualified_cycles"], 4)
+        self.assertEqual(result.diagnostics["fresh_qualified_cycles"], 0)
         self.assertIsNone(result.proposed_wet)
 
     def test_repeated_accepted_evidence_is_not_applied_again(self) -> None:
@@ -428,9 +530,7 @@ class CalibrationTests(unittest.TestCase):
 
     def test_adc_ceiling_applies_to_target_before_any_step(self) -> None:
         samples, refs, now = qualified_history(raw=3735.0)
-        state = baseline(
-            original_dry=0.0, original_wet=4094.0, current_wet=4094.0, current_dry=0.0
-        )
+        state = full_scale_state(4094.0)
         result = calibration.evaluate_calibration(samples, refs, state, now)
         self.assertEqual(result.reason, "target_out_of_bounds")
         self.assertIsNone(result.proposed_wet)
@@ -544,19 +644,11 @@ class CalibrationTests(unittest.TestCase):
                 self.assertIsNone(result.proposed_wet)
 
     def test_boundary_pairs_supply_only_seven_independent_votes(self) -> None:
-        samples, refs = [], []
-        for day in (0, 7, 14, 15):
-            _, ref = reference_window(day)
-            stamps = [
-                ref.start_at + offset
-                for b in range(1, 14, 2)
-                for offset in (300 * b - 1, 300 * b)
-            ]
-            refs.append(replace(ref, start_at=stamps[0], end_at=stamps[-1]))
-            samples.extend(reading(stamp, 209.2) for stamp in stamps)
-        result = calibration.evaluate_calibration(
-            samples, refs, baseline(), refs[-1].end_at
+        offsets = [offset for b in range(1, 14, 2) for offset in (300 * b - 1, 300 * b)]
+        samples, refs, now = custom_history(
+            offsets, window_bounds=(offsets[0], offsets[-1])
         )
+        result = calibration.evaluate_calibration(samples, refs, baseline(), now)
         self.assertEqual(result.reason, "poor_reference_quality")
         self.assertIsNone(result.proposed_wet)
 
@@ -618,13 +710,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(result.reason, "awaiting_holdout")
         window, ref = reference_window(16, raw=205.6)
         later = ref.end_at + DAY + 1
-        state = baseline(
-            current_wet=222,
-            previous_wet=221,
-            revision=1,
-            last_applied_at=applied_at,
-            last_evidence_id="prior-apply",
-        )
+        state = rollback_state(applied_at, last_evidence_id="prior-apply")
         result = calibration.evaluate_calibration(
             [*samples, *window, reading(later, 205.6)], [*refs, ref], state, later
         )
@@ -650,18 +736,11 @@ class CalibrationTests(unittest.TestCase):
         )
 
     def test_nominal_poll_jitter_does_not_merge_adjacent_temporal_votes(self) -> None:
-        samples, refs = [], []
-        for day in (0, 7, 14, 15):
-            _, ref = reference_window(day)
-            stamps = [
-                ref.start_at + i * 300 + (0.1 if i % 2 == 0 else -0.1)
-                for i in range(13)
-            ]
-            refs.append(replace(ref, start_at=stamps[0], end_at=stamps[-1]))
-            samples.extend(reading(stamp, 209.2) for stamp in stamps)
-        result = calibration.evaluate_calibration(
-            samples, refs, baseline(), refs[-1].end_at
+        offsets = [i * 300 + (0.1 if i % 2 == 0 else -0.1) for i in range(13)]
+        samples, refs, now = custom_history(
+            offsets, window_bounds=(offsets[0], offsets[-1])
         )
+        result = calibration.evaluate_calibration(samples, refs, baseline(), now)
         self.assertEqual(result.status, "propose")
         self.assertEqual(result.proposed_wet, 222.0)
 

@@ -3,43 +3,72 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 from .calibration import (
+    CalibrationDecision,
     CalibrationState,
     PhysicalSample,
     QualifiedWetReference,
     evaluate_calibration,
 )
+from .calibration_policy import (
+    ADC_MAX,
+    BARRIER_SECONDS,
+    CURRENT_MAX_AGE,
+    HISTORY_SECONDS,
+    HOLDOUT_MAX_AGE,
+    INDEX_MAX,
+    MAX_REFERENCES,
+    MAX_SAMPLES,
+    within_envelope,
+)
+from .calibration_policy import (
+    canonical_digest as _digest,
+)
+from .calibration_storage import (
+    FORMAT_VERSION,
+    decision_fence,
+    validate_storage,
+)
 from .calibration_storage import (
     source_fingerprint as epoch_fingerprint,
 )
-from .calibration_storage import (
-    validate_storage,
-)
-from .reliability import number
+from .reliability import UNCHANGED_SECONDS, number
 
 _LOGGER = logging.getLogger(__name__)
-BARRIER_SECONDS = 1800
-HISTORY_SECONDS = 90 * 86400
 SAVE_SECONDS = 1800
 EVALUATE_SECONDS = 3600
-ADC_MAX = 4095
 MAX_FUTURE_SECONDS = 60
-MAX_REFERENCE_IDS = 256
-INDEX_MAX = 100
-UNCHANGED_SECONDS = 43200
-CURRENT_MAX_AGE = 1200
-HOLDOUT_MAX_AGE = 86400
+MAX_REFERENCE_ID_LENGTH = 256
+CALIBRATION_DOMAIN = "plant_care_alerts"
+CALIBRATION_STORE_KEY = "plant_care_calibration"
+APPLY_CALIBRATION_SERVICE = "apply_calibration"
+SUPPORTED_HA_VERSION = "2026.9.3"
+
+
+@dataclass(frozen=True)
+class JournalTiming:
+    """Keep observed and detected event times explicit without positional ambiguity."""
+
+    at: float
+    detected_at: float | None = None
+
+
+def require_persisted_snapshot(persisted: dict | None, expected: dict) -> None:
+    """Require independently loaded data to match the exact intended snapshot."""
+    if persisted != expected:
+        message = "Independent storage read did not confirm the persisted snapshot"
+        raise OSError(message)
 
 
 @dataclass(frozen=True)
@@ -52,6 +81,7 @@ class RuntimeHooks:
     quality_provider: Callable[[str, float], dict] | None = None
     identity_provider: Callable[[str], str] | None = None
     write_ready: Callable[[], bool] | None = None
+    read_persisted: Callable[[], Awaitable[dict | None]] | None = None
 
 
 def sample_time(value: Any) -> float | None:
@@ -67,12 +97,6 @@ def sample_time(value: Any) -> float | None:
     if isinstance(value, datetime) and value.tzinfo is not None:
         return value.timestamp()
     return None
-
-
-def _digest(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
 
 
 def _within_invalid_interval(stamp: float, quality: dict, now: float) -> bool:
@@ -170,7 +194,7 @@ class CalibrationRuntime:
         self.config = config
         self.records: dict[str, dict] = {}
         self._envelope = {
-            "format_version": 1,
+            "format_version": FORMAT_VERSION,
             "initialized_sources": [],
             "records": self.records,
         }
@@ -179,7 +203,8 @@ class CalibrationRuntime:
         self._events: dict[str, list] = {}
         self._generations: dict[str, int] = {}
         self._lock = asyncio.Lock()
-        self._storage_ready = True
+        self._save_lock = asyncio.Lock()
+        self._storage_ready = False
         callbacks = hooks or RuntimeHooks()
         self._context_factory = callbacks.context_factory
         self._log_event = callbacks.log_event
@@ -187,9 +212,10 @@ class CalibrationRuntime:
         self._quality_provider = callbacks.quality_provider
         self._identity_provider = callbacks.identity_provider
         self._write_ready = callbacks.write_ready
+        self._read_persisted = callbacks.read_persisted
         self._stopping = False
         self._quality: dict[str, dict] = {}
-        self._write_checks: dict[str, tuple] = {}
+        self._write_checks: dict[str, tuple[str, CalibrationDecision, tuple]] = {}
         self._disabled_reason: str | None = None
 
     async def async_load(self, witnesses: dict | None = None) -> None:
@@ -201,6 +227,7 @@ class CalibrationRuntime:
             )
             self.records = self._envelope["records"]
             self._durable_witnesses = self._witness_snapshot()
+            self._storage_ready = True
         except Exception:
             self._storage_ready = False
             _LOGGER.exception(
@@ -214,10 +241,9 @@ class CalibrationRuntime:
                 "original_wet": options["original_wet"],
             }
             for source, options in self.config.get("automatic_calibration", {}).items()
-            if options.get("enabled", False)
         }
 
-    def _witness_snapshot(self) -> dict:
+    def _witness_snapshot(self, records: dict | None = None) -> dict:
         return {
             source: {
                 "baseline_dry": record["baseline"]["dry"],
@@ -230,32 +256,43 @@ class CalibrationRuntime:
                 if record["history"]
                 else None,
                 "last_applied_at": record.get("last_applied_at"),
-                "decision_fence_at": self._decision_time_fence(record),
+                "decision_fence_at": decision_fence(record),
             }
-            for source, record in self.records.items()
+            for source, record in (self.records if records is None else records).items()
         }
 
-    def witnesses(self) -> dict:
-        """Return only evidence whose calibration Store write completed."""
-        return {
-            source: dict(value) for source, value in self._durable_witnesses.items()
-        }
+    def witnesses(self) -> dict | None:
+        """Offer no replacement when independent calibration evidence is unavailable."""
+        if not self._storage_ready:
+            return None
+        return deepcopy(self._durable_witnesses)
 
     async def async_save(self) -> bool:
-        """Commit a consistent envelope before any helper effect is authorized."""
-        if not self._storage_ready:
-            return False
-        try:
-            validate_storage(
-                self._envelope, self._configured_originals(), self._durable_witnesses
-            )
-            await self.store.async_save(self._envelope)
-            self._durable_witnesses = self._witness_snapshot()
-        except Exception:
-            self._storage_ready = False
-            _LOGGER.exception("Unable to persist calibration history; writes disabled")
-            return False
-        return True
+        """Require a separate persisted read after Store's potentially silent write."""
+        async with self._save_lock:
+            if not self._storage_ready:
+                return False
+            snapshot = deepcopy(self._envelope)
+            try:
+                await self.hass.async_add_executor_job(
+                    validate_storage,
+                    snapshot,
+                    self._configured_originals(),
+                    deepcopy(self._durable_witnesses),
+                )
+                await self.store.async_save(snapshot)
+                persisted = (
+                    await self._read_persisted() if self._read_persisted else None
+                )
+                require_persisted_snapshot(persisted, snapshot)
+                self._durable_witnesses = self._witness_snapshot(snapshot["records"])
+            except Exception:
+                self._storage_ready = False
+                _LOGGER.exception(
+                    "Unable to persist calibration history; writes disabled"
+                )
+                return False
+            return True
 
     def _options(self, source: str) -> dict:
         return self.config.get("automatic_calibration", {}).get(source, {})
@@ -388,13 +425,20 @@ class CalibrationRuntime:
 
     @staticmethod
     def _change(
-        record: dict, endpoints: list[float], at: float, kind: str, **evidence: Any
+        record: dict,
+        endpoints: list[float],
+        kind: str,
+        *,
+        timing: JournalTiming,
+        event_id: str | None = None,
+        **evidence: Any,
     ) -> dict | None:
+        at, detected_at = timing.at, timing.detected_at
         if record["current"] == endpoints:
             return None
         previous = list(record["current"])
-        event_id = evidence.pop(
-            "event_id", _digest([record["source"], previous, endpoints, at, kind])
+        event_id = event_id or _digest(
+            [record["source"], previous, endpoints, at, kind]
         )
         if any(event["event_id"] == event_id for event in record["history"]):
             return None
@@ -403,7 +447,7 @@ class CalibrationRuntime:
             "event_id": event_id,
             "source": record["source"],
             "at": None if kind == "external_discovered" else at,
-            "detected_at": evidence.pop("detected_at", at),
+            "detected_at": at if detected_at is None else detected_at,
             "kind": kind,
             "old_dry": previous[0],
             "old_wet": previous[1],
@@ -419,35 +463,50 @@ class CalibrationRuntime:
             previous=previous,
             last_applied_at=at,
             effective_at=at,
-            barrier_until=at + BARRIER_SECONDS,
+            barrier_until=max(record.get("barrier_until", 0), at + BARRIER_SECONDS),
             verified_revision=None,
             previous_wet=None,
         )
         return event
 
+    @staticmethod
+    def _retain_helper_observations(
+        record: dict, events: list[dict], now: float, reason: str
+    ) -> None:
+        """Preserve observed facts without inventing a physical lineage or effect."""
+        existing = record.setdefault("helper_observations", [])
+        seen = {item["event_id"] for item in existing}
+        existing.extend(
+            {**event, "detected_at": now, "source_fingerprint": None, "reason": reason}
+            for event in events
+            if event["event_id"] not in seen
+        )
+
+    def _record_manual(self, record: dict, event: dict, now: float) -> dict | None:
+        endpoints = list(record["current"])
+        endpoints[0 if event["endpoint"] == "dry" else 1] = event["after"]
+        return self._change(
+            record,
+            endpoints,
+            "manual",
+            timing=JournalTiming(event["at"], now),
+            event_id=event["event_id"],
+            observed_old_value=event["before"],
+            changed_endpoint=event["endpoint"],
+        )
+
     def _manual_events(self, record: dict, now: float) -> list[dict]:
+        events = self._events.pop(record["source"], [])
+        ordered = _causal_events(record, events)
+        if ordered is None:
+            self._retain_helper_observations(record, events, now, "ambiguous_order")
+            return []
         changes = []
-        pending = record.get("pending") or {}
-        for event in self._events.pop(record["source"], []):
-            if (
-                pending.get("context_id")
-                and event["context_id"] == pending["context_id"]
-            ):
-                continue
+        for event in ordered:
             if event["at"] > now + MAX_FUTURE_SECONDS:
+                self._retain_helper_observations(record, [event], now, "invalid_time")
                 continue
-            endpoints = list(record["current"])
-            endpoints[0 if event["endpoint"] == "dry" else 1] = event["after"]
-            change = self._change(
-                record,
-                endpoints,
-                event["at"],
-                "manual",
-                event_id=event["event_id"],
-                observed_old_value=event["before"],
-                changed_endpoint=event["endpoint"],
-                detected_at=now,
-            )
+            change = self._record_manual(record, event, now)
             if change:
                 changes.append(change)
         return changes
@@ -458,41 +517,56 @@ class CalibrationRuntime:
             return "source_changed"
         if record["current"][0] != baseline["dry"]:
             return "dry_changed"
-        span = baseline["wet"] - baseline["dry"]
-        if abs(record["current"][1] - baseline["wet"]) > span * 0.05:
+        if not within_envelope(baseline["dry"], baseline["wet"], record["current"][1]):
             return "outside_baseline_envelope"
         return "awaiting_reference"
+
+    def _ensure_record(
+        self, source: str, identity: str | None, now: float
+    ) -> tuple[dict | None, bool]:
+        record = self.records.get(source)
+        if record is not None or identity is None:
+            return record, False
+        original = self._configured_originals()[source]
+        baseline = (original["original_dry"], original["original_wet"])
+        record = self._new_record(source, baseline, identity, now)
+        self._retain_helper_observations(
+            record, self._events.pop(source, []), now, "pre_enrollment"
+        )
+        self.records[source] = record
+        self._envelope["initialized_sources"].append(source)
+        return record, True
 
     async def async_prepare(
         self, entry_id: str, source: str, now: float, registry_identity: str = ""
     ) -> None:
-        """Reconcile helper history before evaluating a derived moisture reading."""
+        """Reconcile actual helper events before advancing the physical lineage."""
         options = self._options(source)
-        if not options.get("enabled", False):
+        if not options:
             return
         self.bindings[entry_id] = source
         async with self._lock:
             endpoints = self._endpoints(source)
-            fingerprint = self._fingerprint(source, registry_identity)
-            if endpoints is None or fingerprint is None or not self._storage_ready:
+            identity = self._fingerprint(source, registry_identity)
+            if endpoints is None or not self._storage_ready:
                 return
-            record = self.records.get(source)
-            changed = record is None
+            record, created = self._ensure_record(source, identity, now)
             if record is None:
-                original = self._configured_originals()[source]
-                baseline = (original["original_dry"], original["original_wet"])
-                record = self._new_record(source, baseline, fingerprint, now)
-                self.records[source] = record
-                self._envelope["initialized_sources"].append(source)
-            if record["identity_fingerprint"] != fingerprint:
-                self._advance_source(record, fingerprint, now)
-                changed = True
-            record["registry_identity"] = registry_identity
-            changed = changed or bool(record.get("pending"))
+                return
+            changed = (
+                created or bool(record.get("pending")) or bool(self._events.get(source))
+            )
             changes = self._reconcile_pending(record, endpoints, now)
             changes.extend(self._manual_events(record, now))
+            if identity is not None and record["identity_fingerprint"] != identity:
+                self._advance_source(record, identity, now)
+                changed = True
+            record["registry_identity"] = registry_identity
             discovered = self._change(
-                record, list(endpoints), now, "external_discovered"
+                record,
+                list(endpoints),
+                "external_discovered",
+                timing=JournalTiming(now),
             )
             if discovered:
                 changes.append(discovered)
@@ -519,7 +593,9 @@ class CalibrationRuntime:
                 "at": now,
             }
         )
-        record["barrier_until"] = now + BARRIER_SECONDS
+        record["barrier_until"] = max(
+            record.get("barrier_until", 0), now + BARRIER_SECONDS
+        )
         record["verified_revision"] = None
         record["previous_wet"] = None
         record["last_evaluated_at"] = 0
@@ -556,6 +632,15 @@ class CalibrationRuntime:
                     retained["rollback_eligible"] = False
 
     @staticmethod
+    def _normalized_burst(value: Any) -> tuple[list[float], bool]:
+        if not isinstance(value, (list, tuple)):
+            return [], False
+        parsed = [number(item) for item in value]
+        return [item for item in parsed if item is not None], all(
+            item is not None for item in parsed
+        )
+
+    @staticmethod
     def _adc_in_range(raw: float, burst: list) -> bool:
         """Keep ADC rail policy in the engine; bound storage trust inclusively."""
         return 0 <= raw <= ADC_MAX and all(
@@ -590,9 +675,8 @@ class CalibrationRuntime:
         stamp, raw = physical
         points = record["samples"]
         fingerprint = record["source_fingerprint"]
-        burst = state.attributes.get("samples", [])
-        burst = list(burst) if isinstance(burst, (list, tuple)) else []
-        in_range = self._adc_in_range(raw, burst)
+        burst, well_formed = self._normalized_burst(state.attributes.get("samples"))
+        in_range = well_formed and self._adc_in_range(raw, burst)
         duplicate = self._matching_sample(points, stamp, fingerprint)
         if duplicate is not None:
             duplicate["reliable"] = (
@@ -605,6 +689,7 @@ class CalibrationRuntime:
             "sampled_at": stamp,
             "raw": raw,
             "burst": burst,
+            "burst_malformed": not well_formed,
             "source_fingerprint": fingerprint,
             "reliable": in_range
             and (historical or quality.get("reliability_valid") is True)
@@ -613,11 +698,12 @@ class CalibrationRuntime:
             and rollback
             and stamp > (record.get("effective_at") or now),
         }
-        record["samples"] = [
+        retained = [
             p
             for p in points
             if now - HISTORY_SECONDS <= p["sampled_at"] <= now + MAX_FUTURE_SECONDS
-        ] + [point]
+        ][-(MAX_SAMPLES - 1) :]
+        record["samples"] = [*retained, point]
         self._quarantine_samples(record, quality, now, rollback=rollback)
         return True
 
@@ -641,7 +727,12 @@ class CalibrationRuntime:
                 return
             self._quality[entry_id] = quality
             self._append_sample(record, self._raw_state(record["source"]), quality, now)
-            if self._storage_ready and not self._disabled_reason and allow_write:
+            if (
+                self._storage_ready
+                and not self._disabled_reason
+                and allow_write
+                and self._options(record["source"]).get("enabled", True)
+            ):
                 await self._evaluate(entry_id, record, quality, now)
             if now - record.get("last_saved_at", 0) >= SAVE_SECONDS:
                 record["last_saved_at"] = now
@@ -650,7 +741,13 @@ class CalibrationRuntime:
     def reading_fields(self, entry_id: str) -> dict:
         """Describe a scale transition without asserting that a sensor recovered."""
         record = self._record(entry_id)
-        if record is None:
+        if (
+            record is None
+            or not self._storage_ready
+            or not self._source_matches(record)
+            or self._endpoints(record["source"]) != tuple(record["current"])
+            or self._events.get(record["source"])
+        ):
             return {}
         return {
             "calibration_revision": record["revision"],
@@ -666,9 +763,9 @@ class CalibrationRuntime:
         record = self._record(entry_id)
         if record is None:
             source = self.bindings.get(entry_id)
-            if source and self._options(source).get("enabled", False):
+            if source and self._options(source):
                 return {
-                    "calibration_enabled": True,
+                    "calibration_enabled": self._options(source).get("enabled", True),
                     "calibration_history_available": self._storage_ready,
                     "calibration_status": self._disabled_reason
                     or (
@@ -680,7 +777,7 @@ class CalibrationRuntime:
                 }
             return {}
         return {
-            "calibration_enabled": True,
+            "calibration_enabled": self._options(record["source"]).get("enabled", True),
             "calibration_history_available": self._storage_ready,
             "calibration_status": (self._disabled_reason or record["status"])
             if self._storage_ready
@@ -785,7 +882,8 @@ class CalibrationRuntime:
             or index is None
             or not 0 < index <= INDEX_MAX
             or not all(
-                isinstance(value, str) and 0 < len(value.strip()) <= MAX_REFERENCE_IDS
+                isinstance(value, str)
+                and 0 < len(value.strip()) <= MAX_REFERENCE_ID_LENGTH
                 for value in names
             )
             or attrs.get("protocol") != protocol
@@ -803,9 +901,40 @@ class CalibrationRuntime:
             index,
         )
 
+    @staticmethod
+    def _reference_was_used(record: dict, reference: QualifiedWetReference) -> bool:
+        return any(
+            event.get("source_fingerprint") == reference.source_fingerprint
+            and (
+                snapshot["reference_id"] == reference.reference_id
+                or snapshot["cycle_id"] == reference.cycle_id
+            )
+            for event in record["history"]
+            for snapshot in event.get("references", [])
+        )
+
+    def _configured_references(self, record: dict) -> list[dict]:
+        options = self._options(record["source"])
+        return [
+            reference
+            for reference in record["references"]
+            if reference["reference_source"] == options.get("reference_entity")
+            and reference["protocol"] == options.get("reference_protocol")
+            and reference["source_fingerprint"] == record["source_fingerprint"]
+        ]
+
+    def _decision_references(
+        self, record: dict, decision: CalibrationDecision
+    ) -> list[dict]:
+        return [
+            reference
+            for reference in self._configured_references(record)
+            if reference["reference_id"] in decision.reference_ids
+        ]
+
     def _ingest_reference(self, record: dict, now: float) -> bool:
         reference = self._reference(record, now)
-        if reference is None:
+        if reference is None or self._reference_was_used(record, reference):
             return False
         value = asdict(reference)
         references = [
@@ -813,7 +942,7 @@ class CalibrationRuntime:
         ]
         if value in references:
             return False
-        if len(references) >= MAX_REFERENCE_IDS:
+        if len(references) >= MAX_REFERENCES:
             record["reference_limit"] = True
             record["status"] = "evidence_limit"
             return False
@@ -866,18 +995,6 @@ class CalibrationRuntime:
             return self._quality_provider(entry_id, now)
         return self._quality.get(entry_id, {})
 
-    @staticmethod
-    def _decision_time_fence(record: dict) -> float | None:
-        """Treat an unknown effect conservatively without inventing an actual change."""
-        confirmed = number(record.get("last_applied_at"))
-        fences = [confirmed] if confirmed is not None else []
-        fences.extend(
-            attempt["resolved_at"]
-            for attempt in record.get("attempts", [])
-            if attempt["outcome"] == "interrupted_unknown"
-        )
-        return max(fences, default=None)
-
     def _engine_state(self, record: dict) -> CalibrationState:
         source = record["source"]
         wet_id = self.config["calibration_sources"][source]["wet"]
@@ -888,7 +1005,7 @@ class CalibrationRuntime:
             original_wet=baseline["wet"],
             current_wet=record["current"][1],
             revision=record["revision"],
-            last_applied_at=self._decision_time_fence(record),
+            decision_fence_at=decision_fence(record),
             last_evidence_id=record.get("last_evidence_id"),
             previous_wet=record.get("previous_wet"),
             source_fingerprint=record["source_fingerprint"],
@@ -940,8 +1057,11 @@ class CalibrationRuntime:
         )
 
     def _write_state_stable(self, record: dict, token: tuple, now: float) -> bool:
-        if self._stopping or (
-            self._write_ready is not None and not self._write_ready()
+        if (
+            self._stopping
+            or not self._storage_ready
+            or not self._options(record["source"]).get("enabled", True)
+            or (self._write_ready is not None and not self._write_ready())
         ):
             return False
         return (
@@ -953,7 +1073,7 @@ class CalibrationRuntime:
         )
 
     def _decision_quality(
-        self, entry_id: str, record: dict, decision: Any, now: float
+        self, entry_id: str, record: dict, decision: CalibrationDecision, now: float
     ) -> bool:
         fresh = self._current_quality(entry_id, now)
         if decision.status == "propose":
@@ -964,7 +1084,12 @@ class CalibrationRuntime:
         )
 
     def _write_allowed(
-        self, entry_id: str, record: dict, decision: Any, token: tuple, now: float
+        self,
+        entry_id: str,
+        record: dict,
+        decision: CalibrationDecision,
+        token: tuple,
+        now: float,
     ) -> bool:
         if not self._write_state_stable(record, token, now):
             return False
@@ -973,11 +1098,7 @@ class CalibrationRuntime:
             return False
         if not self._decision_quality(entry_id, record, decision, now):
             return False
-        referenced = [
-            r
-            for r in record["references"]
-            if r["reference_id"] in decision.reference_ids
-        ]
+        referenced = self._decision_references(record, decision)
         return (
             bool(referenced)
             and now - max(r["end_at"] for r in referenced) <= HOLDOUT_MAX_AGE
@@ -1012,12 +1133,9 @@ class CalibrationRuntime:
         if not self._source_matches(record):
             record["status"] = "source_changed"
             return
-        options = self._options(record["source"])
         references = tuple(
-            QualifiedWetReference(**r)
-            for r in record["references"]
-            if r["reference_source"] == options["reference_entity"]
-            and r["protocol"] == options["reference_protocol"]
+            QualifiedWetReference(**reference)
+            for reference in self._configured_references(record)
         )
         state = self._engine_state(record)
         samples = self._engine_samples(record)
@@ -1050,6 +1168,21 @@ class CalibrationRuntime:
         """Keep observation active when the owned native write path is unavailable."""
         self._disabled_reason = reason
 
+    def has_armed_target(
+        self, entity_id: str, transaction: str, context_id: str
+    ) -> bool:
+        """Reject unrelated admin calls without inhibiting a legitimate transaction."""
+        check = self._write_checks.get(transaction)
+        if check is None or context_id != transaction:
+            return False
+        record = self._record(check[0])
+        return bool(
+            record
+            and record.get("pending")
+            and self.config["calibration_sources"][record["source"]]["wet"] == entity_id
+            and record["pending"]["context_id"] == transaction
+        )
+
     async def async_guarded_apply(self, entity: Any, call: Any) -> dict:
         """Check expectations after permissions and immediately before native effect."""
         transaction = call.data.get("transaction_id")
@@ -1076,7 +1209,12 @@ class CalibrationRuntime:
         return {"applied": True}
 
     async def _apply(
-        self, entry_id: str, record: dict, decision: Any, token: tuple, now: float
+        self,
+        entry_id: str,
+        record: dict,
+        decision: CalibrationDecision,
+        token: tuple,
+        now: float,
     ) -> None:
         if self._context_factory is None:
             record["status"] = "context_unavailable"
@@ -1095,11 +1233,7 @@ class CalibrationRuntime:
             "reason": decision.reason,
             "evidence_id": decision.evidence_id,
             "reference_ids": list(decision.reference_ids),
-            "references": [
-                r
-                for r in record["references"]
-                if r["reference_id"] in decision.reference_ids
-            ],
+            "references": deepcopy(self._decision_references(record, decision)),
             "diagnostics": json.loads(json.dumps(decision.diagnostics)),
             "without_incident": quality.get("reliability_valid") is True
             and quality.get("reliability_incident_started_at") is None,
@@ -1118,15 +1252,20 @@ class CalibrationRuntime:
         await self._finish_apply(record, confirmed=confirmed)
 
     async def _call_guarded_service(
-        self, entry_id: str, record: dict, decision: Any, token: tuple, context: Any
+        self,
+        entry_id: str,
+        record: dict,
+        decision: CalibrationDecision,
+        token: tuple,
+        context: Any,
     ) -> bool | None:
         confirmed = None
         wet_id = self.config["calibration_sources"][record["source"]]["wet"]
         self._write_checks[context.id] = (entry_id, decision, token)
         try:
             response = await self.hass.services.async_call(
-                "plant_care_alerts",
-                "apply_calibration",
+                CALIBRATION_DOMAIN,
+                APPLY_CALIBRATION_SERVICE,
                 {"entity_id": wet_id, "transaction_id": context.id},
                 blocking=True,
                 context=context,
@@ -1150,7 +1289,10 @@ class CalibrationRuntime:
         )
         changes.extend(self._manual_events(record, finished))
         discovered = self._change(
-            record, list(endpoints), finished, "external_discovered"
+            record,
+            list(endpoints),
+            "external_discovered",
+            timing=JournalTiming(finished),
         )
         if discovered:
             changes.append(discovered)
@@ -1164,9 +1306,8 @@ class CalibrationRuntime:
         event = self._change(
             record,
             pending["target"],
-            at,
             pending["kind"],
-            detected_at=now,
+            timing=JournalTiming(at, now),
             reason=pending["reason"],
             evidence_id=pending["evidence_id"],
             reference_ids=pending["reference_ids"],
@@ -1218,18 +1359,7 @@ class CalibrationRuntime:
                 own_seen = True
                 change = self._observed_effect(record, pending, event, now)
             else:
-                endpoints = list(record["current"])
-                endpoints[0 if event["endpoint"] == "dry" else 1] = event["after"]
-                change = self._change(
-                    record,
-                    endpoints,
-                    event["at"],
-                    "manual",
-                    detected_at=now,
-                    event_id=event["event_id"],
-                    observed_old_value=event["before"],
-                    changed_endpoint=event["endpoint"],
-                )
+                change = self._record_manual(record, event, now)
             if change:
                 changes.append(change)
         return changes, own_seen
@@ -1254,9 +1384,8 @@ class CalibrationRuntime:
         return self._change(
             record,
             [record["current"][0], event["after"]],
-            event["at"],
             pending["kind"],
-            detected_at=now,
+            timing=JournalTiming(event["at"], now),
             reason="concurrent_change",
             evidence_id=pending["evidence_id"],
         )
@@ -1316,8 +1445,8 @@ class CalibrationRuntime:
         event = self._change(
             record,
             list(endpoints),
-            now,
             "external_discovered",
+            timing=JournalTiming(now),
             reason="pending_effect_reconciled",
             evidence_id=pending.get("evidence_id"),
         )
@@ -1332,7 +1461,7 @@ def _evaluate_snapshots(
     references: tuple,
     state: CalibrationState,
     now: float,
-) -> Any:
+) -> CalibrationDecision:
     """Alternate acquisition evidence can only recommend undoing our last step."""
     decision = evaluate_calibration(samples, references, state, now)
     if decision.status == "observe" and rollback is not None:

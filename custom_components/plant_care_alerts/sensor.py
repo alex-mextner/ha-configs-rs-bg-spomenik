@@ -25,6 +25,7 @@ class PlantCareSensor(SensorEntity):
     """Expose one plant alert with controls and photo metadata."""
 
     _attr_should_poll = False
+    _unrecorded_attributes = frozenset({"calibration_history"})
     _attr_icon = "mdi:flower"
 
     def __init__(self, manager: Any, entry_id: Any) -> None:

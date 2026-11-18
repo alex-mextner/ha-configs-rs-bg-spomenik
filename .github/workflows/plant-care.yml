@@ -80,7 +80,7 @@ jobs:
         run: |
           node tests/plant_care/test_card.cjs
           node tests/plant_care/test_reliability_card.cjs
-          node tests/plant_care/card_autocalibration.test.cjs
+          node tests/plant_care/test_autocalibration_card.cjs
       - name: Recovery controller regression tests
         if: always()
         run: python3 tests/plant_recovery/test_recovery.py

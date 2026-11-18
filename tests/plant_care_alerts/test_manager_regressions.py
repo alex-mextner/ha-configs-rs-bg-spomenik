@@ -22,6 +22,8 @@ from custom_components.plant_care_alerts import (
 )
 from custom_components.plant_care_alerts.state_machine import evaluate
 
+from .service_fixtures import make_service_registry
+
 MODULE = "custom_components.plant_care_alerts"
 TEST_TIMEOUT = 5
 
@@ -36,7 +38,7 @@ class TestManagerRegressions(unittest.IsolatedAsyncioTestCase):
             is_running=True,
             state=CoreState.running,
             states=SimpleNamespace(get=lambda _: None),
-            services=SimpleNamespace(async_register=Mock()),
+            services=make_service_registry(),
             bus=SimpleNamespace(
                 async_fire=Mock(),
                 async_listen=Mock(return_value=lambda: None),

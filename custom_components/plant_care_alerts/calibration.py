@@ -1,7 +1,5 @@
 """Pure deterministic wet-endpoint calibration; runtime owns all writes."""
 
-import hashlib
-import json
 import math
 from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
@@ -10,16 +8,22 @@ from itertools import pairwise
 from statistics import median
 from typing import Literal, TypedDict
 
+from . import calibration_policy as policy
+
 
 @dataclass(frozen=True)
 class PhysicalSample:
-    """One physical ADC burst, regardless of its number of ADC reads."""
+    """One explicitly qualified physical burst, independent of its read count."""
 
     sampled_at: float
     raw: float
     burst: tuple[float, ...] | list[float]
     source_fingerprint: str
-    reliable: bool = True
+    reliable: bool = False
+
+    def __post_init__(self) -> None:
+        """Copy burst data independently of mutable caller lists."""
+        object.__setattr__(self, "burst", tuple(self.burst))
 
 
 @dataclass(frozen=True)
@@ -36,28 +40,78 @@ class QualifiedWetReference:
     reference_index: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CalibrationState:
-    """Immutable baseline and the persisted state of prior accepted changes."""
+    """
+    Validated runtime snapshot; the original baseline never follows helper edits.
+
+    Runtime fences manual/source changes and clears their rollback authority.
+    The decision fence includes actual changes and unresolved-attempt cutoffs;
+    it does not replace the actual timestamps in the persisted journal.
+    """
 
     original_dry: float
     original_wet: float
     current_wet: float
     revision: int
-    last_applied_at: float | None
+    decision_fence_at: float | None
     last_evidence_id: str | None
+    source_fingerprint: str | None
+    baseline_source_fingerprint: str | None
+    current_dry: float | None
     previous_wet: float | None = None
-    source_fingerprint: str | None = None
-    baseline_source_fingerprint: str | None = None
+    # Block revoked/uncertain attempts and rollback directives, never a successful
+    # current forward effect merely because it was applied.
     blocked_evidence_ids: tuple[str, ...] | list[str] = ()
-    current_dry: float | None = None
     wet_step: float = 1.0
+
+    def __post_init__(self) -> None:
+        """Retain evidence IDs independently of mutable caller lists."""
+        object.__setattr__(
+            self, "blocked_evidence_ids", tuple(self.blocked_evidence_ids)
+        )
+
+    @property
+    def original_span(self) -> float:
+        """Return the immutable span used by every drift bound."""
+        return self.original_wet - self.original_dry
+
+
+CalibrationReason = Literal[
+    "invalid_state",
+    "source_changed",
+    "manual_override",
+    "stale_sample",
+    "conflicting_evidence",
+    "future_sample",
+    "unreliable_sample",
+    "evidence_reused",
+    "awaiting_cycles",
+    "insufficient_span",
+    "awaiting_holdout",
+    "target_out_of_bounds",
+    "deadband",
+    "helper_resolution",
+    "holdout_failed",
+    "awaiting_reference",
+    "evidence_limit",
+    "cooldown",
+    "poor_reference_quality",
+    "qualified_drift",
+    "contradiction",
+]
 
 
 class CalibrationDiagnostics(TypedDict, total=False):
-    """Optional diagnostic fields; each decision includes only available facts."""
+    """
+    Available facts plus a required persistence directive on accepted rollback.
+
+    Runtime must union block_evidence_ids into state.blocked_evidence_ids when
+    committing a rollback, and clear previous_wet. Other entries are diagnostics.
+    """
 
     qualified_cycles: int
+    fresh_qualified_cycles: int
     rejected_references: dict[str, str]
     block_evidence_ids: tuple[str, ...]
     holdout_error_before: float
@@ -65,44 +119,16 @@ class CalibrationDiagnostics(TypedDict, total=False):
     target_wet: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CalibrationDecision:
-    """A recommendation only; observe never contains a writable endpoint."""
+    """Recommendation only; observe never contains a writable endpoint."""
 
     status: Literal["observe", "propose", "rollback"]
-    reason: str
+    reason: CalibrationReason
     proposed_wet: float | None
     evidence_id: str | None
     reference_ids: tuple[str, ...]
     diagnostics: CalibrationDiagnostics
-
-
-# All drift bounds use the immutable original span, never the last fitted span.
-ADC_MAX = 4095
-INDEX_MAX = 100
-MIN_BURST_READS = 5
-MAX_BURST_READS = 64
-MIN_TRAINING_CYCLES = 3
-MIN_TOTAL_CYCLES = 4
-DAY = 86400.0
-NOMINAL_SAMPLE_SECONDS = 300.0
-# Allow 10% scheduling jitter, but never two near-boundary copies as two votes.
-MIN_VOTE_SPACING = 270.0
-MAX_TOTAL_DRIFT_FRACTION = 0.05
-MAX_STEP_FRACTION = 0.01
-WINDOW_SPREAD_FRACTION = 0.05
-MIN_WINDOW_SECONDS = 3600.0
-MAX_WINDOW_SECONDS = 7200.0
-MIN_VOTES = 12
-MAX_GAP_SECONDS = 600.0
-TRAINING_SPAN_SECONDS = 14 * DAY
-COOLDOWN_SECONDS = 7 * DAY
-HISTORY_SECONDS = 90 * DAY
-HOLDOUT_MAX_AGE = DAY
-CURRENT_MAX_AGE = 1200.0
-MAX_SAMPLES = 30000
-MAX_REFERENCES = 256
-EPSILON = 1e-9
 
 
 @dataclass(frozen=True)
@@ -115,11 +141,12 @@ class _Window:
 
 
 def _finite(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _quantile(values: Sequence[float], fraction: float) -> float:
@@ -130,63 +157,55 @@ def _quantile(values: Sequence[float], fraction: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-
-
 def _observe(
-    reason: str, diagnostics: CalibrationDiagnostics | None = None
+    reason: CalibrationReason, diagnostics: CalibrationDiagnostics | None = None
 ) -> CalibrationDecision:
-    return CalibrationDecision("observe", reason, None, None, (), diagnostics or {})
-
-
-def _within_envelope(value: float, state: CalibrationState) -> bool:
-    span = state.original_wet - state.original_dry
-    return (
-        state.original_dry < value <= ADC_MAX
-        and abs(value - state.original_wet) <= MAX_TOTAL_DRIFT_FRACTION * span + EPSILON
+    return CalibrationDecision(
+        status="observe",
+        reason=reason,
+        proposed_wet=None,
+        evidence_id=None,
+        reference_ids=(),
+        diagnostics=diagnostics or {},
     )
 
 
-def _valid_applied_clock(state: CalibrationState, now: float) -> bool:
-    if state.last_applied_at is None:
+def _within_envelope(value: float, state: CalibrationState) -> bool:
+    return policy.within_envelope(state.original_dry, state.original_wet, value)
+
+
+def _valid_decision_fence(state: CalibrationState, now: float) -> bool:
+    if state.decision_fence_at is None:
         return (
             state.revision == 0
             and state.previous_wet is None
             and state.last_evidence_id is None
         )
-    return _finite(state.last_applied_at) and 0 <= state.last_applied_at <= now
+    return _finite(state.decision_fence_at) and 0 <= state.decision_fence_at <= now
 
 
-def _numeric_state_reason(state: CalibrationState, now: float) -> str | None:
+def _numeric_state_valid(state: CalibrationState, now: float) -> bool:
     numbers = (
         state.original_dry,
         state.original_wet,
         state.current_wet,
+        state.current_dry,
         state.wet_step,
         now,
     )
-    if not all(_finite(value) for value in numbers):
-        return "invalid_state"
-    if not (
-        0 <= state.original_dry < state.original_wet <= ADC_MAX and state.wet_step > 0
-    ):
-        return "invalid_state"
-    if not isinstance(state.revision, int) or state.revision < 0:
-        return "invalid_state"
-    if not _valid_applied_clock(state, now):
-        return "invalid_state"
-    if state.current_dry is None or not _finite(state.current_dry):
-        return "invalid_state"
-    return None
+    return (
+        all(_finite(value) for value in numbers)
+        and 0 <= state.original_dry < state.original_wet <= policy.ADC_MAX
+        and state.wet_step > 0
+        and isinstance(state.revision, int)
+        and state.revision >= 0
+        and _valid_decision_fence(state, now)
+    )
 
 
-def _state_reason(state: CalibrationState, now: float) -> str | None:
-    reason = _numeric_state_reason(state, now)
-    if reason:
-        return reason
+def _state_reason(state: CalibrationState, now: float) -> CalibrationReason | None:
+    if not _numeric_state_valid(state, now):
+        return "invalid_state"
     if (
         not state.source_fingerprint
         or state.source_fingerprint != state.baseline_source_fingerprint
@@ -196,65 +215,65 @@ def _state_reason(state: CalibrationState, now: float) -> str | None:
         state.current_wet, state
     ):
         return "manual_override"
-    span = state.original_wet - state.original_dry
+    span = state.original_span
     if state.previous_wet is not None and (
         not _finite(state.previous_wet)
         or not _within_envelope(state.previous_wet, state)
         or abs(state.previous_wet - state.current_wet)
-        > MAX_STEP_FRACTION * span + EPSILON
+        > policy.MAX_STEP_FRACTION * span + policy.EPSILON
     ):
         return "invalid_state"
     return None
 
 
 def _sample_good(sample: PhysicalSample, state: CalibrationState) -> bool:
-    span = state.original_wet - state.original_dry
     if (
         sample.reliable is not True
         or sample.source_fingerprint != state.source_fingerprint
     ):
         return False
-    # Keep physical observations outside the fitted envelope. Filtering them
-    # before robust window statistics could hide an out-of-bounds full target.
-    if not _finite(sample.raw) or not 0 <= sample.raw <= ADC_MAX:
+    # Keep out-of-envelope readings until the complete robust target is evaluated.
+    if not _finite(sample.raw) or not 0 <= sample.raw <= policy.ADC_MAX:
         return False
     burst = sample.burst
-    if not MIN_BURST_READS <= len(burst) <= MAX_BURST_READS or not all(
-        _finite(v) and 0 <= v <= ADC_MAX for v in burst
+    if not policy.MIN_BURST_READS <= len(burst) <= policy.MAX_BURST_READS or not all(
+        _finite(value) and 0 <= value <= policy.ADC_MAX for value in burst
     ):
         return False
-    center = median(burst)
-    mad = median(abs(v - center) for v in burst)
-    return (
-        abs(sample.raw - center) <= 1.0
-        and mad <= max(2.0, 0.02 * span)
-        and _quantile(burst, 0.9) - _quantile(burst, 0.1) <= max(6.0, 0.1 * span)
+    return abs(
+        sample.raw - median(burst)
+    ) <= policy.RAW_MEDIAN_TOLERANCE and _robust_spread_ok(
+        burst, state.original_span, policy.BURST_SPREAD_FRACTION
     )
 
 
 def _sample_unclipped(sample: PhysicalSample) -> bool:
-    return 0 < sample.raw < ADC_MAX and 0 < median(sample.burst) < ADC_MAX
+    ordered = sorted(sample.burst)
+    lower_middle = ordered[(len(ordered) - 1) // 2]
+    upper_middle = ordered[len(ordered) // 2]
+    return (
+        0 < sample.raw < policy.ADC_MAX
+        and lower_middle > 0
+        and upper_middle < policy.ADC_MAX
+    )
 
 
 def _current_sample_good(sample: PhysicalSample, state: CalibrationState) -> bool:
-    span = state.original_wet - state.original_dry
+    span = state.original_span
     return (
         _sample_good(sample, state)
         and _sample_unclipped(sample)
         and state.original_dry
         < sample.raw
-        <= state.original_wet + MAX_TOTAL_DRIFT_FRACTION * span
+        <= state.original_wet + policy.MAX_TOTAL_DRIFT_FRACTION * span
     )
 
 
 def _same_sample(left: PhysicalSample, right: PhysicalSample) -> bool:
-    def burst_tuple(sample: PhysicalSample) -> tuple | None:
-        return tuple(sample.burst) if isinstance(sample.burst, (tuple, list)) else None
-
     return (
         left.sampled_at == right.sampled_at
         and left.raw == right.raw
-        and burst_tuple(left) == burst_tuple(right)
+        and left.burst == right.burst
         and left.source_fingerprint == right.source_fingerprint
         and left.reliable is right.reliable
     )
@@ -262,18 +281,20 @@ def _same_sample(left: PhysicalSample, right: PhysicalSample) -> bool:
 
 def _current_reason(
     samples: Sequence[PhysicalSample], state: CalibrationState, now: float
-) -> str | None:
+) -> CalibrationReason | None:
     dated = [s for s in samples if _finite(s.sampled_at)]
     if not dated:
         return "stale_sample"
     latest = max(dated, key=lambda s: s.sampled_at)
     if any(
-        not _same_sample(s, latest) for s in dated if s.sampled_at == latest.sampled_at
+        not _same_sample(s, latest)
+        for s in dated
+        if s is not latest and s.sampled_at == latest.sampled_at
     ):
         return "conflicting_evidence"
     if latest.sampled_at > now:
         return "future_sample"
-    if now - latest.sampled_at > CURRENT_MAX_AGE:
+    if now - latest.sampled_at > policy.CURRENT_MAX_AGE:
         return "stale_sample"
     if latest.source_fingerprint != state.source_fingerprint:
         return "source_changed"
@@ -287,7 +308,7 @@ def _unique_samples(
     conflicts: set[float] = set()
     for sample in samples:
         stamp = sample.sampled_at
-        if not _finite(stamp) or not now - HISTORY_SECONDS <= stamp <= now:
+        if not _finite(stamp) or not now - policy.HISTORY_SECONDS <= stamp <= now:
             continue
         if stamp in unique and not _same_sample(sample, unique[stamp]):
             conflicts.add(stamp)
@@ -317,15 +338,15 @@ def _reference_reason(
             _finite(v)
             for v in (reference.start_at, reference.end_at, reference.reference_index)
         )
-        or not 0 < reference.reference_index <= INDEX_MAX
+        or not 0 < reference.reference_index <= policy.INDEX_MAX
     ):
         return "invalid_reference"
-    if reference.start_at < now - HISTORY_SECONDS or reference.end_at > now:
+    if reference.start_at < now - policy.HISTORY_SECONDS or reference.end_at > now:
         return "reference_time"
     if (
-        not MIN_WINDOW_SECONDS
+        not policy.MIN_WINDOW_SECONDS
         <= reference.end_at - reference.start_at
-        <= MAX_WINDOW_SECONDS
+        <= policy.MAX_WINDOW_SECONDS
     ):
         return "reference_window"
     return None
@@ -334,30 +355,37 @@ def _reference_reason(
 def _coverage_good(
     samples: Sequence[PhysicalSample], reference: QualifiedWetReference
 ) -> bool:
-    if len(samples) < MIN_VOTES:
+    if not samples:
         return False
     first, last = samples[0].sampled_at, samples[-1].sampled_at
     return (
-        last - first >= MIN_WINDOW_SECONDS
-        and first - reference.start_at <= NOMINAL_SAMPLE_SECONDS
-        and reference.end_at - last <= NOMINAL_SAMPLE_SECONDS
+        last - first >= policy.MIN_WINDOW_SECONDS
+        and first - reference.start_at <= policy.NOMINAL_SAMPLE_SECONDS
+        and reference.end_at - last <= policy.NOMINAL_SAMPLE_SECONDS
         and all(
-            b.sampled_at - a.sampled_at <= MAX_GAP_SECONDS for a, b in pairwise(samples)
+            b.sampled_at - a.sampled_at <= policy.MAX_GAP_SECONDS
+            for a, b in pairwise(samples)
         )
     )
 
 
-def _stationary(values: Sequence[float], span: float) -> bool:
+def _robust_spread_ok(
+    values: Sequence[float], span: float, spread_fraction: float
+) -> bool:
     center = median(values)
     mad = median(abs(value - center) for value in values)
-    third = max(1, len(values) // 3)
-    return (
-        mad <= max(2.0, 0.02 * span)
-        and _quantile(values, 0.9) - _quantile(values, 0.1)
-        <= max(6.0, WINDOW_SPREAD_FRACTION * span)
-        and abs(median(values[:third]) - median(values[-third:]))
-        <= max(2.0, 0.02 * span)
+    return mad <= max(
+        policy.MIN_MAD_COUNTS, policy.MAD_SPAN_FRACTION * span
+    ) and _quantile(values, 0.9) - _quantile(values, 0.1) <= max(
+        policy.MIN_SPREAD_COUNTS, spread_fraction * span
     )
+
+
+def _stationary(values: Sequence[float], span: float) -> bool:
+    third = max(1, len(values) // 3)
+    return _robust_spread_ok(values, span, policy.WINDOW_SPREAD_FRACTION) and abs(
+        median(values[:third]) - median(values[-third:])
+    ) <= max(policy.MIN_TREND_COUNTS, policy.TREND_SPAN_FRACTION * span)
 
 
 def _temporal_votes(samples: Sequence[PhysicalSample]) -> list[PhysicalSample]:
@@ -365,7 +393,7 @@ def _temporal_votes(samples: Sequence[PhysicalSample]) -> list[PhysicalSample]:
     for sample in samples:
         if (
             not selected
-            or sample.sampled_at - selected[-1].sampled_at >= MIN_VOTE_SPACING
+            or sample.sampled_at - selected[-1].sampled_at >= policy.MIN_VOTE_SPACING
         ):
             selected.append(sample)
     return selected
@@ -375,19 +403,17 @@ def _window(
     samples: Sequence[PhysicalSample],
     reference: QualifiedWetReference,
     state: CalibrationState,
-) -> _Window | None:
-    # Votes establish independence only; all physical observations inform statistics.
-    selected = _temporal_votes(samples)
-    if len(selected) < MIN_VOTES or not _coverage_good(samples, reference):
-        return None
-    values = [s.raw for s in samples]
-    # Reported raw may differ by one count from the physical burst median.
-    # Inspect both so that rounding cannot hide clipped evidence.
+) -> _Window | Literal["coverage_or_stationarity", "clipped"]:
+    # Votes establish independence; every good observation informs statistics.
+    votes = _temporal_votes(samples)
+    if len(votes) < policy.MIN_VOTES or not _coverage_good(samples, reference):
+        return "coverage_or_stationarity"
     if not all(_sample_unclipped(sample) for sample in samples):
-        return None
-    if not _stationary(values, state.original_wet - state.original_dry):
-        return None
-    digest = _digest(
+        return "clipped"
+    values = [sample.raw for sample in samples]
+    if not _stationary(values, state.original_span):
+        return "coverage_or_stationarity"
+    digest = policy.canonical_digest(
         [
             (float(s.sampled_at), float(s.raw), tuple(float(v) for v in s.burst))
             for s in samples
@@ -402,43 +428,40 @@ def _window(
     )
 
 
-def _reference_copies(
+def _references_by_id(
     references: Sequence[QualifiedWetReference],
 ) -> dict[str, QualifiedWetReference] | None:
-    copies: dict[str, QualifiedWetReference] = {}
+    by_id: dict[str, QualifiedWetReference] = {}
     for reference in references:
         if (
-            reference.reference_id in copies
-            and reference != copies[reference.reference_id]
+            reference.reference_id in by_id
+            and reference != by_id[reference.reference_id]
         ):
             return None
-        copies[reference.reference_id] = reference
-    return copies
+        by_id[reference.reference_id] = reference
+    return by_id
 
 
 def _collect_windows(
     samples: Sequence[PhysicalSample],
-    references: Sequence[QualifiedWetReference],
+    references: dict[str, QualifiedWetReference],
     state: CalibrationState,
     now: float,
-) -> tuple[list[_Window], CalibrationDiagnostics, bool]:
-    copies = _reference_copies(references)
-    if copies is None:
-        return [], {}, True
-    unique: dict[str, QualifiedWetReference] = {}
+) -> tuple[list[_Window], CalibrationDiagnostics]:
+    valid: list[QualifiedWetReference] = []
     rejected: dict[str, str] = {}
-    for reference in copies.values():
+    for reference in references.values():
         reason = _reference_reason(reference, state, now)
-        if reason:
+        if reason is not None:
             rejected[reference.reference_id] = reason
         else:
-            unique[reference.reference_id] = reference
+            valid.append(reference)
     physical = _unique_samples(samples, state, now)
-    stamps = [s.sampled_at for s in physical]
+    stamps = [sample.sampled_at for sample in physical]
     windows: list[_Window] = []
     cycles: set[str] = set()
     for reference in sorted(
-        unique.values(), key=lambda r: (r.start_at, r.end_at, r.reference_id)
+        valid, key=lambda r: (r.start_at, r.end_at, r.reference_id)
     ):
         subset = physical[
             bisect_left(stamps, reference.start_at) : bisect_right(
@@ -446,8 +469,8 @@ def _collect_windows(
             )
         ]
         window = _window(subset, reference, state)
-        if window is None:
-            rejected[reference.reference_id] = "coverage_or_stationarity"
+        if isinstance(window, str):
+            rejected[reference.reference_id] = window
         elif reference.cycle_id in cycles or (
             windows and reference.start_at <= windows[-1].reference.end_at
         ):
@@ -455,20 +478,21 @@ def _collect_windows(
         else:
             cycles.add(reference.cycle_id)
             windows.append(window)
-    return (
-        windows,
-        {"qualified_cycles": len(windows), "rejected_references": rejected},
-        False,
-    )
+    return windows, {"qualified_cycles": len(windows), "rejected_references": rejected}
 
 
 def _implied_wet(window: _Window, dry: float) -> float:
-    return dry + (window.median_raw - dry) * 100.0 / window.reference.reference_index
+    return (
+        dry
+        + (window.median_raw - dry)
+        * policy.INDEX_MAX
+        / window.reference.reference_index
+    )
 
 
 def _error(raw: float, reference_index: float, dry: float, wet: float) -> float:
     # Deliberately unclipped: a capped 100 must not conceal calibration error.
-    return abs(100.0 * (raw - dry) / (wet - dry) - reference_index)
+    return abs(policy.INDEX_MAX * (raw - dry) / (wet - dry) - reference_index)
 
 
 def _window_error(window: _Window, dry: float, wet: float) -> float:
@@ -489,7 +513,7 @@ def _evidence_id(windows: Sequence[_Window], state: CalibrationState, kind: str)
         ]
         for w in windows
     ]
-    return _digest(
+    return policy.canonical_digest(
         [
             kind,
             state.source_fingerprint,
@@ -507,23 +531,35 @@ def _reused(evidence_id: str, state: CalibrationState) -> bool:
     )
 
 
+def _after_decision_fence(
+    windows: Sequence[_Window], state: CalibrationState
+) -> list[_Window]:
+    return [
+        w
+        for w in windows
+        if state.decision_fence_at is None
+        or w.reference.start_at > state.decision_fence_at
+    ]
+
+
 def _rollback(
     windows: Sequence[_Window],
     state: CalibrationState,
     now: float,
     diagnostics: CalibrationDiagnostics,
 ) -> CalibrationDecision | None:
+    # A blocked current effect has no rollback authority; accepted forward
+    # effects are never blocked merely because they were successfully applied.
     if (
         state.previous_wet is None
-        or state.last_applied_at is None
+        or state.decision_fence_at is None
         or state.last_evidence_id in state.blocked_evidence_ids
     ):
         return None
     later = [
         w
-        for w in windows
-        if w.reference.start_at > state.last_applied_at
-        and now - w.reference.end_at <= HOLDOUT_MAX_AGE
+        for w in _after_decision_fence(windows, state)
+        if now - w.reference.end_at <= policy.HOLDOUT_MAX_AGE
     ]
     if not later:
         return None
@@ -538,7 +574,7 @@ def _rollback(
             state.original_dry,
             state.previous_wet,
         )
-        + EPSILON
+        + policy.EPSILON
         < _error(
             raw, window.reference.reference_index, state.original_dry, state.current_wet
         )
@@ -560,27 +596,29 @@ def _rollback(
         ),
     }
     return CalibrationDecision(
-        "rollback",
-        "contradiction",
-        state.previous_wet,
-        evidence,
-        (window.reference.reference_id,),
-        details,
+        status="rollback",
+        reason="contradiction",
+        proposed_wet=state.previous_wet,
+        evidence_id=evidence,
+        reference_ids=(window.reference.reference_id,),
+        diagnostics=details,
     )
 
 
-def _training_reason(windows: Sequence[_Window], now: float) -> str | None:
-    if len(windows) < MIN_TRAINING_CYCLES:
+def _training_reason(
+    windows: Sequence[_Window], now: float
+) -> CalibrationReason | None:
+    if len(windows) < policy.MIN_TRAINING_CYCLES:
         return "awaiting_cycles"
-    training = windows[:-1] if len(windows) >= MIN_TOTAL_CYCLES else windows
+    training = windows[:-1] if len(windows) >= policy.MIN_TOTAL_CYCLES else windows
     if (
         training[-1].reference.start_at - training[0].reference.start_at
-        < TRAINING_SPAN_SECONDS
+        < policy.TRAINING_SPAN_SECONDS
     ):
         return "insufficient_span"
     if (
-        len(windows) < MIN_TOTAL_CYCLES
-        or now - windows[-1].reference.end_at > HOLDOUT_MAX_AGE
+        len(windows) < policy.MIN_TOTAL_CYCLES
+        or now - windows[-1].reference.end_at > policy.HOLDOUT_MAX_AGE
     ):
         return "awaiting_holdout"
     return None
@@ -592,7 +630,7 @@ def _candidate(
     diagnostics: CalibrationDiagnostics,
 ) -> CalibrationDecision:
     training, holdout = windows[:-1], windows[-1]
-    span = state.original_wet - state.original_dry
+    span = state.original_span
     targets = [_implied_wet(w, state.original_dry) for w in training]
     target = median(targets)
     details: CalibrationDiagnostics = {**diagnostics, "target_wet": target}
@@ -605,12 +643,14 @@ def _candidate(
     if _reused(evidence, state):
         return _observe("evidence_reused", details)
     difference = target - state.current_wet
-    if abs(difference) <= max(2.0, 0.005 * span):
+    if abs(difference) <= max(
+        policy.MIN_DEADBAND_COUNTS, policy.DEADBAND_SPAN_FRACTION * span
+    ):
         return _observe("deadband", details)
-    # No EWMA. Quantization is our policy using the configured helper increment,
-    # not a claim that HA set_value cannot store fractional ADC counts.
+    # Quantize the bounded move using the chosen write increment without EWMA.
     steps = math.floor(
-        (min(abs(difference), MAX_STEP_FRACTION * span) + EPSILON) / state.wet_step
+        (min(abs(difference), policy.MAX_STEP_FRACTION * span) + policy.EPSILON)
+        / state.wet_step
     )
     if steps < 1:
         return _observe("helper_resolution", details)
@@ -634,11 +674,19 @@ def _verify_candidate(
     training_before = median(_window_error(w, dry, state.current_wet) for w in training)
     training_after = median(_window_error(w, dry, proposed) for w in training)
     details = {**details, "holdout_error_before": before, "holdout_error_after": after}
-    if after + EPSILON >= before or training_after + EPSILON >= training_before:
+    if (
+        after + policy.EPSILON >= before
+        or training_after + policy.EPSILON >= training_before
+    ):
         return _observe("holdout_failed", details)
-    ids = tuple(w.reference.reference_id for w in [*training, holdout])
+    ids = tuple(window.reference.reference_id for window in windows)
     return CalibrationDecision(
-        "propose", "qualified_drift", proposed, evidence, ids, details
+        status="propose",
+        reason="qualified_drift",
+        proposed_wet=proposed,
+        evidence_id=evidence,
+        reference_ids=ids,
+        diagnostics=details,
     )
 
 
@@ -653,7 +701,7 @@ def _preflight(
         return _observe(reason)
     if not references:
         return _observe("awaiting_reference")
-    if len(samples) > MAX_SAMPLES or len(references) > MAX_REFERENCES:
+    if len(samples) > policy.MAX_SAMPLES or len(references) > policy.MAX_REFERENCES:
         return _observe("evidence_limit")
     reason = _current_reason(samples, state, now)
     return _observe(reason) if reason else None
@@ -665,18 +713,15 @@ def _forward_calibration(
     now: float,
     diagnostics: CalibrationDiagnostics,
 ) -> CalibrationDecision:
+    fresh_cycles = _after_decision_fence(windows, state)
+    diagnostics = {**diagnostics, "fresh_qualified_cycles": len(fresh_cycles)}
     if (
-        state.last_applied_at is not None
-        and now - state.last_applied_at < COOLDOWN_SECONDS
+        state.decision_fence_at is not None
+        and now - state.decision_fence_at < policy.COOLDOWN_SECONDS
     ):
         return _observe("cooldown", diagnostics)
-    fresh_cycles = [
-        w
-        for w in windows
-        if state.last_applied_at is None or w.reference.start_at > state.last_applied_at
-    ]
     reason = _training_reason(fresh_cycles, now)
-    if reason:
+    if reason is not None:
         return _observe(reason, diagnostics)
     return _candidate(fresh_cycles, state, diagnostics)
 
@@ -689,14 +734,15 @@ def evaluate_calibration(
 ) -> CalibrationDecision:
     """Evaluate qualified observations without I/O or modifying caller state."""
     preflight = _preflight(samples, references, state, now)
-    if preflight:
+    if preflight is not None:
         return preflight
-    windows, diagnostics, conflict = _collect_windows(samples, references, state, now)
-    if conflict:
+    references_by_id = _references_by_id(references)
+    if references_by_id is None:
         return _observe("conflicting_evidence")
+    windows, diagnostics = _collect_windows(samples, references_by_id, state, now)
     if not windows:
         return _observe("poor_reference_quality", diagnostics)
     rollback = _rollback(windows, state, now, diagnostics)
-    if rollback:
+    if rollback is not None:
         return rollback
     return _forward_calibration(windows, state, now, diagnostics)
