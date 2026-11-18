@@ -42,13 +42,25 @@ jobs:
           docker run --rm --network none --entrypoint python3 \
             --mount "type=bind,source=$PWD/packages/living_room_evening.yaml,target=/config/evening.yaml,readonly" \
             ghcr.io/home-assistant/home-assistant:2026.9.3 -c '
+          import asyncio
           import json
           from pathlib import Path
+          from tempfile import TemporaryDirectory
           import yaml
+          from homeassistant.core import HomeAssistant
           from homeassistant.components.script.config import SCRIPT_ENTITY_SCHEMA
-          package = yaml.safe_load(Path("/config/evening.yaml").read_text())
-          script = SCRIPT_ENTITY_SCHEMA(package["script"]["living_room_evening"])
-          print(json.dumps({"home_assistant": "2026.9.3", "script": "living_room_evening", "actions": len(script["sequence"]), "schema": "passed"}))
+
+          async def main():
+              with TemporaryDirectory() as config_dir:
+                  hass = HomeAssistant(config_dir)
+                  try:
+                      package = yaml.safe_load(Path("/config/evening.yaml").read_text())
+                      script = SCRIPT_ENTITY_SCHEMA(package["script"]["living_room_evening"])
+                      print(json.dumps({"home_assistant": "2026.9.3", "script": "living_room_evening", "actions": len(script["sequence"]), "schema": "passed"}))
+                  finally:
+                      await hass.async_stop()
+
+          asyncio.run(main())
           '
           docker run --rm --network none --entrypoint python3 \
             --mount "type=bind,source=$PWD/packages/living_room_evening.yaml,target=/repo/packages/living_room_evening.yaml,readonly" \
