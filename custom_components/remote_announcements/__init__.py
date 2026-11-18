@@ -61,7 +61,7 @@ DOMAIN = "remote_announcements"
 ATTEMPT_BUDGET = 2.0
 RECOVERY_RESERVE = 0.6
 COMPLETION_MARGIN = 0.2
-AISIS_MINIMUM_VOLUME = 0.1
+AISIS_MINIMUM_VOLUME = 0.0
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = vol.Schema(
@@ -429,7 +429,7 @@ class Manager:
             message = "speaker_volume_unknown"
             raise ProviderNotReadyError(message)
         if backend == "aisis" and (muted_before or old_volume < AISIS_MINIMUM_VOLUME):
-            message = "aisis_cannot_restore_muted_or_zero_volume"
+            message = "aisis_cannot_restore_muted_or_invalid_volume"
             raise ProviderNotReadyError(message)
         applied = speech_volume(old_volume, self.config["volume_floor"])
         pause = self.config["music_mode"] == "pause" and before.state == "playing"

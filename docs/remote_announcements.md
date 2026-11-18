@@ -70,9 +70,17 @@ Speech volume is `max(current volume, 0.5)` (HA 0..1; speaker 0..10). Restore th
 old volume only while the current level still equals our temporary level and the
 speaker was not muted by the user during speech. Yandex volume-zero mute is lifted
 for speech and its remembered volume plus previous mute state are restored; user
-changes during speech win. Installed AISIS cannot restore zero/mute (its volume API
-accepts 1..10 and has no mute operation), so that case reports
-`aisis_cannot_restore_muted_or_zero_volume` explicitly. No Alice fallback is used.
+changes during speech win. AISIS can restore native zero volume once its Quasar
+volume API accepts integer levels 0..10. HA's normalized zero maps to native zero;
+it must not be rounded up to the previous minimum level. A reported mute remains
+unsupported because AISIS has no mute operation. Reported mute or a negative volume
+reports `aisis_cannot_restore_muted_or_invalid_volume`. No Alice fallback is used.
+
+**Deployment order:** install the reviewed AISIS Quasar zero-volume overlay and
+verify the installed schema and actual native volume readback before deploying this
+HA guard change. Older Quasar can acknowledge a request while discarding level zero,
+so an HTTP/service acknowledgement is not restoration proof. The tests assert the
+published device volume, and intervening human volume changes still prevent restore.
 
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,

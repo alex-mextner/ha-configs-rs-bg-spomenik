@@ -653,20 +653,106 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.calls, [])
 
-    async def test_aisis_zero_volume_reports_exact_round_trip_limitation(self) -> None:
+    def prepare_aisis_native_volume(self, volume: float, *, muted: bool = False) -> str:
+        """Publish AISIS state through its supported integer-volume boundary."""
         entity = CONFIG["aisis_entity"]
         self.hass.states.async_set(CONFIG["backend_entity"], "AISIS")
         self.hass.states.async_set(CONFIG["aisis_connected_entity"], "on")
-        self.hass.states.async_set(entity, "idle", {"volume_level": 0.0})
+        attributes = {
+            "volume_level": volume,
+            "media_content_id": "aisis-original-track",
+        }
+        if muted:
+            attributes["is_volume_muted"] = True
+        self.hass.states.async_set(entity, "playing", attributes)
         self.manager.settings["aisis"] = {
             "ready": True,
             "keys": [clip.key for clip in self.manager.cache.clips.values()],
         }
+        self.aisis_native_levels = []
+
+        async def volume_set(call) -> None:
+            self.calls.append((call.service, dict(call.data)))
+            self.assertEqual(call.data["entity_id"], entity)
+            # Literal supported native levels, not an acknowledgement-only fake.
+            level = {0.0: 0, 0.1: 1, 0.5: 5}[call.data["volume_level"]]
+            self.aisis_native_levels.append(level)
+            state = self.hass.states.get(entity)
+            self.hass.states.async_set(
+                entity, state.state, {**state.attributes, "volume_level": level / 10}
+            )
+
+        async def speak(call) -> None:
+            self.calls.append(("speak", dict(call.data)))
+            if self.manual_volume is not None:
+                state = self.hass.states.get(entity)
+                self.hass.states.async_set(
+                    entity,
+                    state.state,
+                    {**state.attributes, "volume_level": self.manual_volume},
+                )
+                await asyncio.sleep(0)
+
+        self.hass.services.async_register("media_player", "volume_set", volume_set)
+        self.hass.services.async_register("aisis_speaker", "speak", speak)
+        return entity
+
+    async def test_aisis_zero_and_low_native_volume_are_restored(self) -> None:
+        for original, native_level in ((0.0, 0), (0.1, 1)):
+            with self.subTest(original=original):
+                self.calls.clear()
+                entity = self.prepare_aisis_native_volume(original)
+                await self.manager.announce("tv")
+                self.assertEqual(self.aisis_native_levels, [5, native_level])
+                self.assertEqual(
+                    [name for name, _ in self.calls],
+                    ["volume_set", "speak", "volume_set"],
+                )
+                self.assertEqual(
+                    self.calls[1][1],
+                    {
+                        "duid": "M00ZRW3008RAJG",
+                        "text": self.manager.cache.get("tv").marker,
+                    },
+                )
+                state = self.hass.states.get(entity)
+                self.assertEqual(state.attributes["volume_level"], original)
+                self.assertEqual(
+                    state.attributes["media_content_id"], "aisis-original-track"
+                )
+                self.assertNotIn("is_volume_muted", state.attributes)
+                self.assertEqual(state.state, "playing")
+                self.assertEqual(
+                    self.hass.states.get(CONFIG["backend_entity"]).state, "AISIS"
+                )
+                self.assertEqual(self.manager.status, "sent_unconfirmed")
+
+    async def test_aisis_reported_mute_remains_unsupported(self) -> None:
+        self.prepare_aisis_native_volume(0.0, muted=True)
         with self.assertRaisesRegex(
-            ProviderNotReadyError, "aisis_cannot_restore_muted_or_zero_volume"
+            ProviderNotReadyError, "aisis_cannot_restore_muted"
         ):
             await self.manager.announce("tv")
         self.assertEqual(self.calls, [])
+        self.assertEqual(self.aisis_native_levels, [])
+
+    async def test_aisis_negative_volume_remains_rejected(self) -> None:
+        self.prepare_aisis_native_volume(-0.1)
+        with self.assertRaises(ProviderNotReadyError):
+            await self.manager.announce("tv")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.aisis_native_levels, [])
+
+    async def test_aisis_human_volume_change_prevents_zero_restore(self) -> None:
+        entity = self.prepare_aisis_native_volume(0.0)
+        self.manual_volume = 0.8
+        await self.manager.announce("tv")
+        self.assertEqual(self.aisis_native_levels, [5])
+        self.assertEqual([name for name, _ in self.calls], ["volume_set", "speak"])
+        state = self.hass.states.get(entity)
+        self.assertEqual(state.attributes["volume_level"], 0.8)
+        self.assertEqual(state.attributes["media_content_id"], "aisis-original-track")
+        self.assertEqual(state.state, "playing")
 
     async def test_real_ha_component_and_sensor_registration_with_prefilled_cache(
         self,
