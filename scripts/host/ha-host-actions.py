@@ -361,10 +361,37 @@ def kodi_jsonrpc_quit() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+def _kodi_active_state() -> str:
+    """Read the unit phase before cancelling an unfinished start."""
+    proc = run(
+        ["systemctl", "show", KODI_UNIT, "--property=ActiveState", "--value"],
+        timeout=3,
+    )
+    state = proc.stdout.strip()
+    if proc.returncode != 0 or not state:
+        error_message = "Kodi unit state could not be read"
+        raise RuntimeError(error_message)
+    return state
+
+
 def stop_kodi() -> dict[str, Any]:
     """Request graceful shutdown before the bounded unit-stop fallback."""
     if not kodi_running():
-        return {"kodi": "not_running"}
+        state = _kodi_active_state()
+        if state == "activating":
+            stop = run(["sudo", "-n", "systemctl", "stop", KODI_UNIT], timeout=20)
+            return {
+                "kodi": (
+                    "stopped"
+                    if _kodi_active_state() in {"inactive", "failed"}
+                    else "stop_requested"
+                ),
+                "method": "systemctl_stop",
+                "jsonrpc": None,
+                "systemctl_returncode": stop.returncode,
+            }
+        if state not in {"active", "reloading"}:
+            return {"kodi": "not_running"}
 
     rpc_result = kodi_jsonrpc_quit()
     # Kodi needs a few seconds to shut down on this board; killing the unit mid-shutdown

@@ -745,7 +745,9 @@ class RotatingFireplaceController:
     def _await_progress(
         self, proof: dict[str, Any], deadline: float
     ) -> dict[str, Any] | None:
-        progress_deadline = min(deadline, time.monotonic() + 3)
+        now = time.monotonic()
+        # Give a cold stream time to progress while reserving a share for fallback.
+        progress_deadline = min(deadline, now + max(3.0, (deadline - now) / 2))
         while time.monotonic() < progress_deadline:
             self._require_progress_ownership(proof)
             self._check_cancelled()
