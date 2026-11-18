@@ -19,14 +19,15 @@ from homeassistant.components import automation, trace
 from homeassistant.components.automation import config as automation_config
 from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import Context, CoreState, HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame, restore_state
+from homeassistant.helpers import trigger as trigger_helper
 from homeassistant.helpers.entity import entity_sources
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.template import Template
+from homeassistant.helpers.trace import script_execution_get, trace_clear, trace_get
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = yaml.safe_load((ROOT / "packages/plant_care_yandex.yaml").read_text())
@@ -279,8 +280,23 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.deliveries.clear()
                 self.announce.reset_mock()
-                with self.assertRaises(HomeAssistantError):
-                    await self.report(variables)
+                self.refresh.reset_mock()
+                # A native top-level error stop returns an aborted run, not an
+                # exception; verify both that outcome and the error-stop trace.
+                trace_clear()
+                result = await self.script.async_run(variables, Context())
+                self.assertIsNotNone(result)
+                self.assertIsNone(result.service_response)
+                self.assertEqual(script_execution_get(), "aborted")
+                stops = [
+                    entry.as_dict()["result"]
+                    for entries in (trace_get() or {}).values()
+                    for entry in entries
+                    if "stop" in entry.as_dict().get("result", {})
+                ]
+                self.assertEqual(len(stops), 1)
+                self.assertTrue(stops[0]["error"])
+                self.refresh.assert_not_awaited()
                 self.assert_no_speech()
 
     async def test_silent_report_requires_no_valid_speaker(self) -> None:
@@ -348,6 +364,7 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
             reports.append(await self.report(dict(call.data), call.context))
 
         self.hass.services.async_register("script", "plant_care_status", run_report)
+        await trigger_helper.async_setup(self.hass)
         config = await automation_config.async_validate_config(
             self.hass, {"automation": deepcopy(PACKAGE.get("automation", []))}
         )
