@@ -1,0 +1,114 @@
+# Read-only Alice access to the existing Strelitzia care engine.
+# The percentage is a relative calibrated probe index, not volumetric water content.
+template:
+  - sensor:
+      - name: "Стрелиция"
+        default_entity_id: sensor.strelitzia_yandex_moisture
+        unique_id: strelitzia_yandex_moisture
+        device_class: moisture
+        unit_of_measurement: "%"
+        state_class: measurement
+        availability: >-
+          {% set sample = as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), none) %}
+          {% set care_sample = state_attr('sensor.strelitsiia_poliv', 'last_sample_at') | float(none) %}
+          {% set dry = states('input_number.strelitzia_soil_dry_adc') %}
+          {% set wet = states('input_number.strelitzia_soil_wet_adc') %}
+          {{ states('sensor.strelitsiia_poliv') in ['ok', 'due', 'overdue', 'checking', 'snoozed']
+             and state_attr('sensor.strelitsiia_poliv', 'reliability_valid') == true
+             and is_number(state_attr('sensor.strelitsiia_poliv', 'moisture'))
+             and 0 <= state_attr('sensor.strelitsiia_poliv', 'moisture') | float <= 100
+             and is_number(states('sensor.strelitzia_soil_adc'))
+             and sample is number and 0 <= as_timestamp(now()) - sample <= 1200
+             and care_sample is number and 0 <= as_timestamp(now()) - care_sample <= 1200
+             and is_state('input_boolean.strelitzia_soil_dry_calibrated', 'on')
+             and is_number(dry) and is_number(wet) and wet | float > dry | float }}
+        state: "{{ state_attr('sensor.strelitsiia_poliv', 'moisture') | float(none) }}"
+        attributes:
+          meaning: "Относительный индекс между сухой и мокрой калибровкой; не объёмный процент воды."
+          source_entity: sensor.strelitsiia_poliv
+          freshness_entity: sensor.strelitzia_soil_adc
+
+script:
+  plant_care_status:
+    alias: "Состояние растений"
+    description: "Сообщить влажность и состояние полива стрелиции на выбранной колонке."
+    icon: mdi:flower
+    mode: single
+    max_exceeded: silent
+    fields:
+      speak:
+        name: "Произнести ответ"
+        description: "Выключи для проверки текста без звука."
+        default: true
+        selector:
+          boolean:
+    sequence:
+      - action: plant_care_alerts.refresh
+      - variables:
+          care_entity: sensor.strelitsiia_poliv
+      - variables:
+          care_state: "{{ states(care_entity) }}"
+          moisture: "{{ state_attr(care_entity, 'moisture') }}"
+          wet_risk: "{{ state_attr(care_entity, 'wet_risk') }}"
+          forecast_status: "{{ state_attr(care_entity, 'forecast_status') }}"
+          forecast_due_at: "{{ as_timestamp(state_attr(care_entity, 'forecast_due_at'), none) }}"
+          calibrated: >-
+            {% set dry = states('input_number.strelitzia_soil_dry_adc') %}
+            {% set wet = states('input_number.strelitzia_soil_wet_adc') %}
+            {{ is_state('input_boolean.strelitzia_soil_dry_calibrated', 'on')
+               and is_number(dry) and is_number(wet) and wet | float > dry | float }}
+          fresh: >-
+            {% set sample = as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), none) %}
+            {% set care_sample = state_attr(care_entity, 'last_sample_at') | float(none) %}
+            {{ states(care_entity) in ['ok', 'due', 'overdue', 'checking', 'snoozed']
+               and state_attr(care_entity, 'reliability_valid') == true
+               and is_number(state_attr(care_entity, 'moisture'))
+               and 0 <= state_attr(care_entity, 'moisture') | float <= 100
+               and is_number(states('sensor.strelitzia_soil_adc'))
+               and sample is number and 0 <= as_timestamp(now()) - sample <= 1200
+               and care_sample is number and 0 <= as_timestamp(now()) - care_sample <= 1200 }}
+      - variables:
+          message: >-
+            {% if not calibrated %}
+              Стрелиция: калибровка датчика недоступна. Проверь грунт вручную.
+            {% elif care_state == 'sensor_error' %}
+              {% set reason = state_attr(care_entity, 'reliability_reason') %}
+              {% if reason in ['saturated', 'lower_saturation', 'unchanged', 'raw_unchanged'] %}
+                Стрелиция: показания недостоверны, значение не меняется более двенадцати часов. Проверь грунт вручную; время полива по датчику определить нельзя.
+              {% elif reason == 'recovering' %}
+                Стрелиция: проверяю восстановление датчика. Пока проверь грунт вручную.
+              {% else %}
+                Стрелиция: показания датчика недостоверны. Проверь грунт вручную.
+              {% endif %}
+            {% elif not fresh %}
+              Стрелиция: свежих показаний нет. Проверь датчик и грунт перед поливом.
+            {% elif wet_risk == 'prolonged' %}
+              Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Показания долго высокие. Проверь грунт перед поливом.
+            {% elif care_state == 'overdue' %}
+              Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Полив просрочен. Проверь грунт и полей, если он сухой.
+            {% elif care_state == 'due' %}
+              Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Сухость подтверждена. Проверь грунт перед поливом.
+            {% elif care_state == 'checking' %}
+              Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Проверяю показания. Проверь грунт перед поливом.
+            {% elif care_state == 'snoozed' %}
+              Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Напоминание отложено. Проверь грунт перед поливом.
+            {% elif forecast_status == 'available' and forecast_due_at is number and forecast_due_at > as_timestamp(now()) %}
+              Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Полив ожидается около {{ forecast_due_at | timestamp_custom('%d.%m в %H:%M', true) }}.
+            {% else %}
+              Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Точного прогноза полива пока нет.
+            {% endif %}
+      - variables:
+          report:
+            message: "{{ message | trim }}"
+            available: "{{ calibrated and fresh }}"
+            moisture: "{{ moisture if calibrated and fresh else none }}"
+            care_state: "{{ care_state }}"
+            wet_risk: "{{ wet_risk }}"
+            forecast_status: "{{ forecast_status }}"
+      - if: "{{ speak | default(true) | bool }}"
+        then:
+          - action: plant_care_alerts.announce
+            data:
+              message: "{{ report.message }}"
+      - stop: "Состояние растений готово"
+        response_variable: report

@@ -4,8 +4,15 @@ plant_care_alerts:
   confirmation_hours: 6
   overdue_hours: 24
   stale_minutes: 20
+  unchanged_hours: 12
   freshness_sources:
     sensor.strelitzia_soil_smoothed: sensor.strelitzia_soil_adc
+  calibration_sources:
+    sensor.strelitzia_soil_smoothed:
+      dry: input_number.strelitzia_soil_dry_adc
+      wet: input_number.strelitzia_soil_wet_adc
+  user_reports:
+    sensor.strelitzia_soil_smoothed: "2026-11-03"
 
 # Upstream must not interpret individual resistive-probe spikes as watering.
 sensor:
@@ -18,7 +25,8 @@ sensor:
     max_age:
       minutes: 30
     precision: 1
-    keep_last_sample: false
+    # A steady capped index may not report again; ADC freshness is checked separately.
+    keep_last_sample: true
 
 input_boolean:
   plant_care_voice_enabled:
@@ -33,7 +41,6 @@ automation:
       path: plant_care/alerts.yaml
       input:
         notify_target: mobile_app_echowhiskey536
-        speaker: media_player.yandex_station_m00zrw3008rajg
         voice_toggle: input_boolean.plant_care_voice_enabled
         voice_start: "08:00:00"
         voice_end: "22:00:00"

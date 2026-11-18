@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """One alert sensor per upstream plant, discovered without YAML duplication."""
 
+from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
@@ -58,6 +59,12 @@ class PlantCareSensor(SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose card metadata without copying internal sample history."""
         record = self.manager.records[self.plant_id]
+
+        def iso(value: Any) -> str | None:
+            if isinstance(value, (int, float)):
+                return datetime.fromtimestamp(value, UTC).isoformat()
+            return value if isinstance(value, str) else None
+
         return {
             **self.manager.details[self.plant_id],
             **{
@@ -74,6 +81,50 @@ class PlantCareSensor(SensorEntity):
                     "ack_until",
                     "dry_threshold",
                     "recovery_threshold",
+                    "untrusted_moisture",
+                    "reliability_valid",
+                    "reliability_reason",
+                    "reliability_incident_reason",
+                    "reliability_incident_started_at",
+                    "reliability_incident_value_changed_at",
+                    "last_value_change_at",
+                    "last_source_change_at",
+                    "last_source_value",
+                    "stagnant_seconds",
+                    "recovery_sample_count",
+                    "reliability_recovered_at",
                 )
             },
+            **{
+                key: iso(record.get(key))
+                for key in (
+                    "last_watering_at",
+                    "wet_since",
+                    "forecast_due_at",
+                    "forecast_voice_at",
+                    "voice_next_at",
+                )
+            },
+            "snoozed_until": (
+                iso(record.get("snoozed_until"))
+                if (record.get("snoozed_until") or 0) > record.get("updated_at", 0)
+                else None
+            ),
+            "last_watering_source": record.get("last_watering_source", "unknown"),
+            "last_watering_precision": (
+                "sample"
+                if record.get("last_watering_source") == "auto"
+                else "day"
+                if record.get("last_watering_source") == "user_report"
+                else None
+            ),
+            "wet_risk": record.get("wet_risk", "unknown"),
+            "forecast_status": record.get("forecast_status", "insufficient_data"),
+            "voice_unavailable_reason": record.get("voice_unavailable_reason"),
+            "voice_target": record.get("voice_target"),
+            "voice_target_name": record.get("voice_target_name"),
+            "voice_target_available": record.get("voice_target_available", False),
+            "voice_config_entry_id": (
+                self.manager.voice_entry.entry_id if self.manager.voice_entry else None
+            ),
         }

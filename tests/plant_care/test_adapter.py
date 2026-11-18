@@ -1,12 +1,12 @@
 # Stdlib unittest runs inside the installed HA container without pytest.
-# ruff: noqa: PT009, PLC0415
+# ruff: noqa: PLC0415
 # HA imports stay inside tests so non-HA hosts can run the pure suite.
 # Copyright (c) 2026 Alex Ultra
 """Run in the installed Home Assistant container; no live service calls."""
 
 import importlib.util
 import unittest
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -20,12 +20,16 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     """Exercise plant-care regression scenarios."""
 
     def setUp(self) -> None:
+        from homeassistant.core import CoreState
+
         from custom_components.plant_care_alerts import (
             CareManager,
         )
 
         self.hass = SimpleNamespace(
             data={},
+            is_running=True,
+            state=CoreState.running,
             states=SimpleNamespace(get=lambda _entity: None),
             bus=SimpleNamespace(async_fire=Mock()),
             config_entries=SimpleNamespace(async_get_entry=Mock(return_value=object())),
@@ -66,7 +70,120 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         }
         self.hass.states.get = states.get
-        self.assertIsNone(self.manager._reading(self.plant, self.now)["moisture"])
+        reading = self.manager._reading(self.plant, self.now)
+        self.assertIsNone(reading["moisture"])
+        self.assertEqual(reading["raw_source_identity"], "sensor.raw")
+
+    def test_starting_phase_is_not_a_running_measurement(self) -> None:
+        from homeassistant.core import CoreState
+
+        unavailable = SimpleNamespace(
+            state="unavailable", attributes={}, last_reported=datetime.now(UTC)
+        )
+        states = {"sensor.smooth": unavailable, "sensor.raw": unavailable}
+        self.hass.states.get = states.get
+        # Real HA reports is_running=True during both phases.
+        self.hass.state = CoreState.starting
+        self.assertTrue(self.hass.is_running)
+        reading = self.manager._reading(self.plant, self.now)
+        self.assertTrue(reading["starting"])
+        self.assertIsNone(reading["moisture"])
+        self.hass.state = CoreState.running
+        reading = self.manager._reading(self.plant, self.now)
+        self.assertFalse(reading["starting"])
+        self.assertIsNone(reading["moisture"])
+
+    def test_absent_index_with_fresh_raw_report_is_missing_measurement(self) -> None:
+        sampled = datetime.now(UTC)
+        states = {
+            "sensor.smooth": SimpleNamespace(
+                state="unknown", attributes={}, last_reported=sampled
+            ),
+            "sensor.raw": SimpleNamespace(
+                state="180",
+                attributes={"sampled_at": sampled.isoformat()},
+                last_reported=sampled,
+            ),
+        }
+        self.hass.states.get = states.get
+        reading = self.manager._reading(self.plant, sampled.timestamp())
+        self.assertFalse(reading["starting"])
+        self.assertTrue(reading["measurement_missing"])
+        self.assertEqual(reading["raw_source_value"], "180")
+        self.assertEqual(reading["raw_source_identity"], "sensor.raw")
+        self.assertEqual(reading["sample_at"], sampled.timestamp())
+
+    def test_unmapped_measurement_has_no_separate_raw_identity(self) -> None:
+        sampled = datetime.now(UTC)
+        self.manager.config["freshness_sources"] = {}
+        states = {
+            "sensor.smooth": SimpleNamespace(
+                state="20", attributes={}, last_reported=sampled
+            ),
+        }
+        self.hass.states.get = states.get
+        reading = self.manager._reading(self.plant, sampled.timestamp())
+        self.assertIsNone(reading["raw_source_identity"])
+        self.assertIsNone(reading["raw_source_value"])
+        self.assertEqual(reading["sample_at"], sampled.timestamp())
+
+    async def test_changed_raw_mapping_loads_history_before_reliability(self) -> None:
+        sampled = datetime.now(UTC)
+        recent = sampled - timedelta(minutes=10)
+        old_clock = (sampled - timedelta(hours=13)).timestamp()
+
+        def state(value: str, at: datetime) -> SimpleNamespace:
+            return SimpleNamespace(
+                state=value,
+                attributes={"sampled_at": at.isoformat()},
+                last_updated=at,
+                last_reported=at,
+            )
+
+        self.hass.data["adaptive_plant"] = {"a": self.plant}
+        self.manager.config["freshness_sources"] = {"sensor.smooth": "sensor.new_raw"}
+        states = {
+            "sensor.smooth": state("50", sampled),
+            "sensor.new_raw": state("180", sampled),
+        }
+        self.hass.states.get = states.get
+        # A legacy record has no explicit raw_source_identity. Recorder loading
+        # replaces adc_identity before the real reliability evaluation runs.
+        self.manager.records["a"] = {
+            "status": "ok",
+            "source_identity": "sensor.smooth",
+            "last_observed_value": 50,
+            "last_value_change_at": recent.timestamp(),
+            "last_source_value": 180,
+            "last_source_change_at": old_clock,
+            "adc_identity": "sensor.old_raw",
+            "adc_samples": [[old_clock, 180]],
+        }
+        recorded = {
+            "sensor.smooth": [state("50", recent), state("50", sampled)],
+            "sensor.new_raw": [state("180", recent), state("180", sampled)],
+        }
+        recorder = SimpleNamespace(
+            async_add_executor_job=AsyncMock(return_value=recorded)
+        )
+        with (
+            patch(
+                "custom_components.plant_care_alerts.get_instance",
+                return_value=recorder,
+            ),
+            patch(
+                "custom_components.plant_care_alerts.dt_util.utcnow",
+                return_value=sampled,
+            ),
+        ):
+            await self.manager.async_refresh()
+        recorder.async_add_executor_job.assert_awaited_once()
+        self.manager.add_entities.assert_called_once()
+        current = self.manager.records["a"]
+        self.assertTrue(current["reliability_valid"])
+        self.assertNotEqual(current["status"], "sensor_error")
+        self.assertEqual(current["raw_source_identity"], "sensor.new_raw")
+        self.assertEqual(current["last_source_change_at"], recent.timestamp())
 
     async def test_options_reload_preserves_record(self) -> None:
         self.hass.data["adaptive_plant"] = {}
@@ -200,6 +317,11 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         record = evaluate(
             record, {"has_sensor": True, "moisture": 10, "sample_at": 2001}, 2001
         )
+        self.assertEqual(record["status"], "sensor_error")
+        for stamp in (2301, 2601):
+            record = evaluate(
+                record, {"has_sensor": True, "moisture": 10, "sample_at": stamp}, stamp
+            )
         self.assertEqual(record["status"], "due")
         acknowledge_delivery(record, "sensor_error")
         self.assertTrue(needs_notification(record))
@@ -231,6 +353,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(),
             ),
             patch("custom_components.plant_care_alerts.async_track_time_interval"),
+            patch("custom_components.plant_care_alerts.async_register_admin_service"),
         ):
             await async_setup(self.hass, {DOMAIN: self.manager.config})
         registration = next(
