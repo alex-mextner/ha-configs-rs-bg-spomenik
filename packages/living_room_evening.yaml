@@ -1,0 +1,54 @@
+# Issue #65: the four requested parts of an autumn or winter evening.
+# The installed EKF climate integration accepts mode and temperature together.
+script:
+  living_room_evening:
+    alias: Вечер
+    description: >-
+      Режим для осени и зимы: гирлянда, обогрев 22 °C, свет в гостиной
+      и спокойная музыка на станции с громкостью 4 из 10.
+    icon: mdi:weather-sunset
+    mode: single
+    sequence:
+      - alias: Включить гирлянду
+        continue_on_error: true
+        action: light.turn_on
+        target:
+          entity_id: light.girlianda
+      - alias: Включить обогрев 22 °C
+        continue_on_error: true
+        action: climate.set_temperature
+        target:
+          entity_id: climate.kondei_1
+        data:
+          hvac_mode: heat
+          temperature: 22
+      - alias: Включить свет в гостиной
+        continue_on_error: true
+        action: light.turn_on
+        target:
+          entity_id: light.gostinaia_globus_socket_1
+      - alias: Выбрать воспроизведение на самой станции
+        action: media_player.select_source
+        target:
+          entity_id: media_player.yandex_station_m0011hm00z86hg
+        data:
+          source: Станция
+      - alias: Установить громкость 4 из 10
+        action: media_player.volume_set
+        target:
+          entity_id: media_player.yandex_station_m0011hm00z86hg
+        data:
+          volume_level: 0.4
+      - alias: Включить спокойную музыку
+        action: media_player.play_media
+        target:
+          entity_id: media_player.yandex_station_m0011hm00z86hg
+        data:
+          media_content_type: command
+          media_content_id: Включи спокойную музыку
+
+yandex_smart_home:
+  entity_config:
+    script.living_room_evening:
+      name: Вечер
+      room: Гостиная
