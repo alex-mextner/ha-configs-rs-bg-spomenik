@@ -1,5 +1,4 @@
 # Stdlib unittest runs inside the installed HA container without pytest.
-# ruff: noqa: PT009
 # Copyright (c) 2026 Alex Ultra
 """Plant-care regression tests using standard-library unittest."""
 
@@ -33,7 +32,8 @@ class DeliveryTests(unittest.TestCase):
 
     def test_blueprint_is_generic_and_hourly(self) -> None:
         d = self.load("blueprints/automation/plant_care/alerts.yaml")
-        self.assertIn("speaker", d["blueprint"]["input"])
+        self.assertNotIn("speaker", d["blueprint"]["input"])
+        self.assertIn("plant_care_alerts.announce", str(d))
         self.assertIn("notify_target", d["blueprint"]["input"])
         self.assertTrue(
             any(
@@ -49,7 +49,7 @@ class DeliveryTests(unittest.TestCase):
     def test_instance_uses_verified_speaker_and_no_new_sidebar(self) -> None:
         d = self.load("packages/plant_care.yaml")
         inp = d["automation"][0]["use_blueprint"]["input"]
-        self.assertEqual(inp["speaker"], "media_player.yandex_station_m00zrw3008rajg")
+        self.assertNotIn("speaker", inp)
         self.assertEqual(inp["notify_target"], "mobile_app_echowhiskey536")
         self.assertEqual(inp["voice_start"], "08:00:00")
         self.assertEqual(inp["voice_end"], "22:00:00")
