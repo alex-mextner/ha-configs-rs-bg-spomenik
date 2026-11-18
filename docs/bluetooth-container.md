@@ -76,6 +76,12 @@ failed installation preserves the previous deployment configuration.
 An already running BlueZ daemon is not restarted. The installer itself does not
 interrupt HA: the explicit Compose apply above recreates HA when needed.
 
+A boot without an adapter yet (a USB dongle that enumerates late) does not fail
+`ha-compose.service`: `bluetooth.service` is skipped by its
+`ConditionPathIsDirectory=/sys/class/bluetooth`, the helper accepts that, and
+the adapter's udev `bluetooth.target` starts BlueZ when it appears. BlueZ that
+was allowed to start and is still not active remains a boot error.
+
 For an existing machine the safe targeted application is:
 
 ```bash
