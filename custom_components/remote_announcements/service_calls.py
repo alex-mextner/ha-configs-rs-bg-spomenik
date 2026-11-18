@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import HomeAssistant, ServiceResponse
 
 CANCELLATION_GRACE = 0.02
 SERVICE_ACK_LIMIT = 0.4
@@ -41,27 +41,38 @@ class ServiceCalls:
 
     async def call(
         self,
-        domain: str,
-        service: str,
+        service: tuple[str, str],
         data: dict[str, Any],
         *,
         deadline: float,
         guard: Callable[[], bool] | None = None,
+        response_validator: Callable[[ServiceResponse], None] | None = None,
     ) -> bool:
-        """Cancel a late call and return without waiting indefinitely for it."""
-        remaining = min(self.limit, deadline - time.monotonic())
+        """Bound native speech by its work deadline and controls by their ACK cap."""
+        domain, service_name = service
+        remaining = deadline - time.monotonic()
+        if response_validator is None:
+            remaining = min(self.limit, remaining)
         if remaining <= 0:
             raise ServiceTimeoutError
 
         async def invoke() -> bool:
             if guard is not None and not guard():
                 return False
-            await self.hass.services.async_call(domain, service, data, blocking=True)
+            response = await self.hass.services.async_call(
+                domain,
+                service_name,
+                data,
+                blocking=True,
+                return_response=response_validator is not None,
+            )
+            if response_validator is not None:
+                response_validator(response)
             return True
 
         task = asyncio.create_task(
             invoke(),
-            name=f"remote-announcement:{domain}.{service}",
+            name=f"remote-announcement:{domain}.{service_name}",
         )
         self.pending.add(task)
         task.add_done_callback(self._finished)
