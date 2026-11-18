@@ -65,3 +65,6 @@
 	path = submodules/ha-androidtv-remote
 	url = https://github.com/alex-mextner/ha-androidtv-remote.git
 	branch = local/ime-fix
+[submodule "submodules/adaptive-plant"]
+	path = submodules/adaptive-plant
+	url = https://github.com/Big-Xan/adaptive_plant.git
