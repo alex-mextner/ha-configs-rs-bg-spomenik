@@ -86,6 +86,76 @@ class ProgressBudgetCases(fixtures.FixtureBase):
         )
         self.assertLess(self.now, 150.0)
 
+    def test_final_candidate_uses_remaining_global_progress_budget(self) -> None:
+        controller = self.multi(operation_timeout=50, progress_interval=0.25)
+        with patch.object(controller._closing, "wait", side_effect=self.advance_wait):
+            first = controller.start("seed-previous-success")
+            self.assertEqual("local-0", first["source_id"])
+            controller.stop()
+            self.kodi.calls.clear()
+            self.deadlines.clear()
+            self.delays = {"1.webm": None, "2.webm": 14.0}
+            started = self.now
+            try:
+                proof = controller.start("last-candidate-cold-progress")
+            except fixtures.fireplace.FireplaceError as error:
+                self.fail(
+                    "Final cold source was stopped before its global deadline: "
+                    + str(error)
+                )
+        self.assertEqual("playing", proof["state"])
+        self.assertEqual("local-2", proof["source_id"])
+        self.assertTrue(proof["owned"] and proof["progressing"])
+        opened = [
+            Path(params["item"]["file"]).name
+            for method, params in self.kodi.calls
+            if method == "Player.Open"
+        ]
+        self.assertEqual(["1.webm", "2.webm"], opened)
+        self.assertEqual(
+            1, sum(method == "Player.Stop" for method, _ in self.kodi.calls)
+        )
+        last_open = [
+            observed
+            for method, observed, _ in self.deadlines
+            if method == "Player.Open"
+        ][-1]
+        self.assertGreater(self.now - last_open, (started + 50.0 - last_open) / 2)
+        self.assertLess(self.now, started + 50.0)
+
+    def test_only_eligible_source_uses_remaining_global_progress_budget(self) -> None:
+        self.delays = {"one.webm": 30.0}
+        controller = self.multi(
+            sources=[
+                {
+                    "id": "local-only",
+                    "kind": "local",
+                    "path": str(self.media),
+                    "sha256": self.sha,
+                    "title": "one.webm",
+                }
+            ],
+            operation_timeout=50,
+            progress_interval=0.25,
+        )
+        with patch.object(controller._closing, "wait", side_effect=self.advance_wait):
+            try:
+                proof = controller.start("only-candidate-cold-progress")
+            except fixtures.fireplace.FireplaceError as error:
+                self.fail(
+                    "Only cold source was stopped before its global deadline: "
+                    + str(error)
+                )
+        self.assertEqual("playing", proof["state"])
+        self.assertEqual("local-only", proof["source_id"])
+        self.assertTrue(proof["owned"] and proof["progressing"])
+        self.assertGreater(self.now, 125.0)
+        self.assertLess(self.now, 150.0)
+        self.assertEqual(
+            1, sum(method == "Player.Open" for method, _ in self.kodi.calls)
+        )
+        self.assertFalse(any(method == "Player.Stop" for method, _ in self.kodi.calls))
+
     def test_stalled_candidates_remain_inside_global_deadline(self) -> None:
         self.delays = dict.fromkeys(("0.webm", "1.webm", "2.webm"))
         controller = self.multi(operation_timeout=8)

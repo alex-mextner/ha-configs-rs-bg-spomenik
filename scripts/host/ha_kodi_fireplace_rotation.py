@@ -743,11 +743,13 @@ class RotatingFireplaceController:
             raise self.Error(error_message)
 
     def _await_progress(
-        self, proof: dict[str, Any], deadline: float
+        self, proof: dict[str, Any], deadline: float, *, final: bool = False
     ) -> dict[str, Any] | None:
         now = time.monotonic()
-        # Give a cold stream time to progress while reserving a share for fallback.
-        progress_deadline = min(deadline, now + max(3.0, (deadline - now) / 2))
+        # Reserve time for fallback only while another candidate remains.
+        progress_deadline = (
+            deadline if final else min(deadline, now + max(3.0, (deadline - now) / 2))
+        )
         while time.monotonic() < progress_deadline:
             self._require_progress_ownership(proof)
             self._check_cancelled()
@@ -792,7 +794,7 @@ class RotatingFireplaceController:
         starting: dict[str, Any],
         deadline: float,
     ) -> dict[str, Any]:
-        for source in candidates:
+        for index, source in enumerate(candidates):
             self._check_cancelled()
             if time.monotonic() >= deadline:
                 break
@@ -802,7 +804,9 @@ class RotatingFireplaceController:
             except SourceUnavailable:
                 self._cancel_attempt()
                 continue
-            value = self._await_progress(opened, deadline)
+            value = self._await_progress(
+                opened, deadline, final=index == len(candidates) - 1
+            )
             if value is not None:
                 return value
             self._publish(starting)
