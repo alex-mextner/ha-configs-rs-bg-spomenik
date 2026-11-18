@@ -11,6 +11,7 @@ const HOST = 'plant-care-card';
 const TILE = HOST + ' button.plant-tile';
 const DIALOG = HOST + ' dialog.plant-dialog';
 const GRAPH = DIALOG + ' .chart';
+const SYNTHETIC_PHOTO_URL = 'https://plant-card-synthetic.invalid/plant.svg';
 
 async function recordedRun(scope, action) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'plant-card-interactions-'));
@@ -45,8 +46,10 @@ function historyPoints(history) {
   const start = Date.parse(history.start);
   const end = Date.parse(history.end);
   assert.ok(Number.isFinite(start) && Number.isFinite(end) && start < end);
-  const points = history.points.flatMap(item => {
+  const points = history.points.flatMap((item, index) => {
     const time = Date.parse(item.last_changed || item.last_updated);
+    // Only the first raw boundary row is HA carry-forward, not later real observations at that time.
+    if (index === 0 && history.include_initial_state !== false && time === start) return [];
     if (item.state == null || String(item.state).trim() === '') return [];
     const value = Number(item.state);
     return Number.isFinite(time)
@@ -325,6 +328,7 @@ function syntheticFixture() {
   for (const [index, item] of definitions.entries()) {
     states[item.id] = {entity_id: item.id, state: 'ok', attributes: {
       plant_care: true, plant_name: item.name, source_entity: item.source, entry_id: 'qa-entry-' + index,
+      picture: SYNTHETIC_PHOTO_URL,
       moisture: item.moisture, raw_moisture: item.moisture, reliability_valid: true,
       last_sample_at: now / 1000, last_value_change_at: now / 1000, dry_threshold: 25,
       last_watering_at: '2026-11-17T08:30:00Z', last_watering_source: 'auto',
@@ -347,16 +351,132 @@ function syntheticFixture() {
       }));
       points.splice(2, 0, {state: 'unavailable', last_changed: new Date(start + 0.5 * (now - start)).toISOString()});
       histories[item.source + '|' + days] = {entity_id: item.source,
-        start: new Date(start).toISOString(), end: new Date(now).toISOString(), points};
+        start: new Date(start).toISOString(), end: new Date(now).toISOString(), points, include_initial_state: false};
     }
   }
   return {now, definitions, states, histories};
+}
+
+async function verifyLegacyBoundary(page, fixture) {
+  const history = structuredClone(fixture.histories['sensor.qa_soil_a|7']);
+  delete history.include_initial_state;
+  const start = Date.parse(history.start);
+  const end = Date.parse(history.end);
+  history.points = [
+    {state: '75', last_changed: history.start}, // Carried state, not an observation.
+    {state: '41', last_changed: history.start}, // A real observation at the same instant.
+    {state: '39', last_changed: new Date(start + 3600000).toISOString()},
+    {state: '35', last_changed: new Date(end - 3600000).toISOString()},
+  ];
+  await page.evaluate(history => {
+    const card = document.querySelector('plant-care-card');
+    card._history['sensor.qa_soil_a|7'] = {
+      points: history.points, start: Date.parse(history.start), end: Date.parse(history.end),
+      loading: false, fetchedAt: Date.now(), includesInitialState: true,
+    };
+  }, history);
+  const tile = TILE + '[data-entity="sensor.qa_plant_a"]';
+  await page.locator(tile).click();
+  await page.locator(DIALOG + ' [data-action="range"][data-days="7"]').click();
+  await verifyGraph(page, history, {});
+  await page.locator(GRAPH).press('Home');
+  await assertPoint(page, {time: start, value: 41});
+  await closeWithEscape(page, tile);
+}
+
+async function verifyDynamicDiscovery(page, fixture) {
+  await page.evaluate(fixture => {
+    const card = document.querySelector('plant-care-card');
+    const second = fixture.states['sensor.qa_plant_b'];
+    const third = structuredClone(second);
+    third.entity_id = 'sensor.qa_plant_c';
+    third.attributes = {...third.attributes, plant_name: 'Тестовое растение C',
+      entry_id: 'qa-entry-c', source_entity: 'sensor.qa_soil_c'};
+    const history = fixture.histories['sensor.qa_soil_b|7'];
+    card._history['sensor.qa_soil_c|7'] = {
+      points: structuredClone(history.points), start: Date.parse(history.start),
+      end: Date.parse(history.end), loading: false, fetchedAt: Date.now(), includesInitialState: false,
+    };
+    card.setConfig({});
+    card.hass = {states: {[second.entity_id]: second, [third.entity_id]: third,
+      'input_boolean.plant_care_voice_enabled': {state: 'off'}}};
+  }, fixture);
+  assert.deepEqual(await page.locator(TILE).evaluateAll(tiles => tiles.map(tile => tile.dataset.entity)),
+    ['sensor.qa_plant_b', 'sensor.qa_plant_c']);
+  assert.equal(await page.locator(TILE + ' img.photo').count(), 2);
+  const second = TILE + '[data-entity="sensor.qa_plant_b"]';
+  await page.locator(second).click();
+  await page.locator(GRAPH).press('Home');
+  await page.waitForFunction(() => [...document.querySelector('plant-care-card').shadowRoot.querySelectorAll('img.photo')]
+    .every(image => image.complete && image.naturalWidth > 0));
+  await page.locator(second).evaluate(tile => { window.__plantQADiscoveryTile = tile; });
+  const disclosure = await prepareStabilityProbe(page);
+  try {
+    await page.evaluate(first => {
+      const card = document.querySelector('plant-care-card');
+      card.hass = {...card.hass, states: {...card.hass.states, [first.entity_id]: first}};
+    }, fixture.states['sensor.qa_plant_a']);
+    await assertStableAfterUpdate(page);
+    assert.deepEqual(await page.locator(TILE).evaluateAll(tiles => tiles.map(tile => tile.dataset.entity)),
+      ['sensor.qa_plant_a', 'sensor.qa_plant_b', 'sensor.qa_plant_c']);
+    assert.equal(await page.locator(second).evaluate(tile => tile === window.__plantQADiscoveryTile), true);
+    assert.equal(await page.locator(DIALOG + ' .plant').getAttribute('data-entity'), 'sensor.qa_plant_b');
+    assert.equal(await page.locator(TILE + ' img.photo').count(), 3);
+  } finally {
+    await stopStabilityProbe(page, disclosure);
+  }
+  await closeWithEscape(page, second);
+  await page.evaluate(() => { delete window.__plantQADiscoveryTile; });
+}
+
+async function verifyEmptyHistoryFailure(page, fixture) {
+  const recovered = structuredClone(fixture.histories['sensor.qa_soil_b|7']);
+  // With skip_initial_state this boundary point is an actual observation.
+  recovered.points.unshift({state: '88', last_changed: recovered.start});
+  await page.evaluate(recovered => {
+    const card = document.querySelector('plant-care-card');
+    card._history['sensor.qa_soil_b|7'] = {
+      points: [], start: Date.parse(recovered.start), end: Date.parse(recovered.end),
+      loading: false, fetchedAt: Date.now() - 300001, includesInitialState: false,
+    };
+    window.__plantQAHistoryRequest = [];
+    window.__plantQAHistoryResponse = null;
+    card.hass = {...card.hass, callApi: (method, url) => {
+      window.__plantQAHistoryRequest.push({method, url});
+      if (window.__plantQAHistoryResponse) return Promise.resolve([window.__plantQAHistoryResponse]);
+      return new Promise((_resolve, reject) => { window.__plantQARejectHistory = reject; });
+    }};
+  }, recovered);
+  const second = TILE + '[data-entity="sensor.qa_plant_b"]';
+  await page.locator(second).click();
+  await page.waitForFunction(() => window.__plantQAHistoryRequest.length === 1);
+  const request = await page.evaluate(() => window.__plantQAHistoryRequest[0]);
+  assert.equal(request.method, 'GET');
+  assert.ok(new URL(request.url, 'https://synthetic.invalid/').searchParams.has('skip_initial_state'));
+  await page.evaluate(() => window.__plantQARejectHistory(new Error('Synthetic Recorder refresh failure')));
+  const retry = page.locator(DIALOG + ' [data-action="retry"]');
+  await retry.waitFor({state: 'visible'});
+  const message = await page.locator(DIALOG + ' .graph-message').innerText();
+  assert.match(message, /Не удалось загрузить историю/);
+  assert.doesNotMatch(message, /Нет записей влажности/);
+  assert.equal(await page.locator(GRAPH).count(), 0);
+  await page.evaluate(points => { window.__plantQAHistoryResponse = points; }, recovered.points);
+  await retry.click();
+  await page.locator(GRAPH).waitFor({state: 'visible'});
+  assert.equal(await page.evaluate(() => window.__plantQAHistoryRequest.length), 2);
+  await page.locator(GRAPH).press('Home');
+  await assertPoint(page, historyPoints(recovered).points[0]);
+  await closeWithEscape(page, second);
 }
 
 async function verifySyntheticCardInteractions(page) {
   return recordedRun('synthetic-two-plant', async (report, check) => {
     assert.equal(await page.locator(HOST).count(), 0, 'Synthetic checks require a separate empty page');
     const fixture = syntheticFixture();
+    await page.route(SYNTHETIC_PHOTO_URL, route => route.fulfill({
+      status: 200, contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6" fill="#39785b"/></svg>',
+    }));
     await page.clock.setFixedTime(new Date(fixture.now));
     await page.evaluate(fixture => {
       const card = document.createElement('plant-care-card');
@@ -365,7 +485,7 @@ async function verifySyntheticCardInteractions(page) {
       card.setConfig({entities: fixture.definitions.map(item => item.id)});
       for (const [key, history] of Object.entries(fixture.histories)) card._history[key] = {
         points: history.points, start: Date.parse(history.start), end: Date.parse(history.end),
-        loading: false, fetchedAt: fixture.now,
+        loading: false, fetchedAt: fixture.now, includesInitialState: history.include_initial_state,
       };
       card.hass = {states: {...fixture.states,
         'input_boolean.plant_care_voice_enabled': {state: 'off'}}};
@@ -425,13 +545,24 @@ async function verifySyntheticCardInteractions(page) {
         await assertPoint(page, firstSelection);
         await closeWithEscape(page, first);
       });
+      await check('legacy query boundary is not offered as a recorded measurement',
+        () => verifyLegacyBoundary(page, fixture));
+      await check('discovery preserves tiles, photos, open detail and focus return',
+        () => verifyDynamicDiscovery(page, fixture));
+      await check('failed refresh of cached empty history exposes retry and recovers real observations',
+        () => verifyEmptyHistoryFailure(page, fixture));
       report.actualScreenshotsAllowed = false;
     } finally {
       await page.evaluate(() => {
         window.__plantQAProbe?.observer.disconnect();
         delete window.__plantQAProbe;
+        delete window.__plantQADiscoveryTile;
+        delete window.__plantQAHistoryRequest;
+        delete window.__plantQARejectHistory;
+        delete window.__plantQAHistoryResponse;
         document.querySelector('plant-care-card[data-qa-scenario="synthetic-two-plant"]')?.remove();
       });
+      await page.unroute(SYNTHETIC_PHOTO_URL);
     }
   });
 }

@@ -38,8 +38,8 @@ from homeassistant.helpers.service import (
 )
 from homeassistant.util import dt as dt_util
 
-from .analytics import analyze
-from .calibration_policy import ADC_MAX
+from .analytics import RETENTION_SECONDS, analyze, normalize_adc_points
+from .calibration_policy import ADC_MAX, canonical_digest
 from .calibration_runtime import CalibrationRuntime, RuntimeHooks, collect_witnesses
 from .const import (
     APPLY_CALIBRATION_SERVICE,
@@ -877,8 +877,7 @@ class CareManager:
         record = self.records.setdefault(entry_id, {})
         identity = (entry_id, raw_id, source)
         if "adc_identity" in record and record["adc_identity"] != raw_id:
-            record["adc_samples"] = []
-            record.pop("adc_calibration", None)
+            self._reset_adc_samples(record)
             self.history_loaded.discard(identity)
             self.history_attempts.pop(identity, None)
         record["adc_identity"] = raw_id
@@ -908,14 +907,8 @@ class CareManager:
                 )
             )
             self.calibration.seed_history(entry_id, states.get(raw_id, []), record, now)
-            points = []
-            for state in states.get(raw_id, []):
-                stamp = timestamp(state.attributes.get("sampled_at"))
-                value = finite(state.state)
-                if stamp is not None and value is not None:
-                    points.append([stamp, value])
             record = self.records.setdefault(entry_id, {})
-            record["adc_samples"] = record.get("adc_samples", []) + points
+            self._merge_adc_states(record, states.get(raw_id, []), now)
             # Restarts and unavailable->same-value states are not numeric changes.
             # Recorder's bounded initial state supplies a conservative lower bound.
             record["value_history_source"] = source
@@ -975,6 +968,17 @@ class CareManager:
         return calibration
 
     @staticmethod
+    def _reset_adc_samples(current: dict) -> None:
+        for key in (
+            "adc_samples",
+            "adc_bursts",
+            "watering_conflicts",
+            "watering_interruptions",
+        ):
+            current[key] = []
+        current.pop("adc_calibration", None)
+
+    @staticmethod
     def _collect_adc_samples(
         current: dict[str, Any],
         raw_id: str | None,
@@ -982,46 +986,59 @@ class CareManager:
         calibration: list[float] | None,
         now: float,
     ) -> None:
-        """Retain independent physical samples for the active calibration."""
-        points = current.get("adc_samples", [])
-        conflicts = set(current.get("watering_conflicts", []))
-        if "adc_identity" in current and current["adc_identity"] != raw_id:
-            points = []
-            conflicts.clear()
-            current.pop("adc_calibration", None)
+        """Retain physical observations and their provenance across ordinary polls."""
         previous_calibration = current.get("adc_calibration")
+        source_changed = "adc_identity" in current and current["adc_identity"] != raw_id
+        calibration_changed = (
+            calibration is not None
+            and previous_calibration is not None
+            and previous_calibration != calibration
+        )
+        if source_changed or calibration_changed:
+            CareManager._reset_adc_samples(current)
         if calibration is not None:
-            if previous_calibration is not None and previous_calibration != calibration:
-                points = []
-                conflicts.clear()
             current["adc_calibration"] = calibration
         current["adc_identity"] = raw_id
-        if raw is not None:
-            stamp = timestamp(raw.attributes.get("sampled_at"))
-            value = finite(raw.state)
-            if (
-                stamp is not None
-                and value is not None
-                and stamp <= now + MAX_SAMPLE_SKEW_SECONDS
-            ):
-                points = [*points, [stamp, value]]
-        current["adc_samples"], current["watering_conflicts"] = (
-            CareManager._deduplicate_adc(points, conflicts, now)
+        CareManager._merge_adc_states(current, [raw] if raw is not None else [], now)
+
+    @staticmethod
+    def _merge_adc_states(current: dict, states: list, now: float) -> None:
+        """Keep burst contradictions and actual state interruptions with raw history."""
+        points = list(current.get("adc_samples", []))
+        conflicts = set(current.get("watering_conflicts", []))
+        bursts = dict(current.get("adc_bursts", []))
+        interruptions = set(current.get("watering_interruptions", []))
+        for state in states:
+            stamp = timestamp(state.attributes.get("sampled_at"))
+            value = finite(state.state)
+            if stamp is None or value is None:
+                interrupted_at = timestamp(getattr(state, "last_updated", None))
+                if interrupted_at is not None:
+                    interruptions.add(interrupted_at)
+                continue
+            points.append([stamp, value])
+            CareManager._retain_adc_burst(bursts, conflicts, state, stamp)
+        current["adc_samples"], current["watering_conflicts"] = normalize_adc_points(
+            points, now, conflicts=conflicts
+        )
+        retained = {point[0] for point in current["adc_samples"]}
+        current["adc_bursts"] = [
+            [stamp, bursts[stamp]] for stamp in sorted(bursts) if stamp in retained
+        ]
+        current["watering_interruptions"] = sorted(
+            stamp for stamp in interruptions if now - RETENTION_SECONDS <= stamp <= now
         )
 
     @staticmethod
-    def _deduplicate_adc(points: list, conflicts: set, now: float) -> tuple[list, list]:
-        """Keep contradictory timestamps visible instead of choosing a trusted value."""
-        unique = {}
-        for stamp, value in points:
-            if now - 14 * 86400 <= stamp <= now + MAX_SAMPLE_SKEW_SECONDS:
-                if stamp in unique and unique[stamp] != value:
-                    conflicts.add(stamp)
-                unique.setdefault(stamp, value)
-        return (
-            [[stamp, unique[stamp]] for stamp in sorted(unique)],
-            sorted(stamp for stamp in conflicts if now - 14 * 86400 <= stamp <= now),
-        )
+    def _retain_adc_burst(
+        bursts: dict, conflicts: set, state: Any, stamp: float
+    ) -> None:
+        burst = state.attributes.get("samples")
+        if not isinstance(burst, (list, tuple)):
+            return
+        fingerprint = canonical_digest([finite(item) for item in burst])
+        if bursts.setdefault(stamp, fingerprint) != fingerprint:
+            conflicts.add(stamp)
 
     @staticmethod
     def _observed_day(value: Any) -> Any:

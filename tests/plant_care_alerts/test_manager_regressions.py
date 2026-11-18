@@ -47,7 +47,7 @@ class TestManagerRegressions(unittest.IsolatedAsyncioTestCase):
             ),
             config_entries=SimpleNamespace(async_get_entry=Mock(return_value=object())),
         )
-        with patch(f"{MODULE}.Store"):
+        with patch(f"{MODULE}.new_store"):
             self.manager = CareManager(
                 self.hass,
                 {

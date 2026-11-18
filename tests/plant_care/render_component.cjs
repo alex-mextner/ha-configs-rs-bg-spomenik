@@ -106,10 +106,12 @@ function historyEntry(snapshot) {
   const history = snapshot.history;
   assert.equal(history.entity_id, snapshot.plant.attributes.source_entity);
   assert.ok(Array.isArray(history.points) && history.points.length <= 2500);
+  if (Object.hasOwn(history, 'include_initial_state')) assert.equal(typeof history.include_initial_state, 'boolean');
   const start = Date.parse(history.start);
   const end = Date.parse(history.end);
   assert.ok(Number.isFinite(start) && Number.isFinite(end) && start < end);
-  return {points: history.points, start, end, loading: false, fetchedAt: Date.parse(snapshot.observed_at)};
+  return {points: history.points, start, end, includesInitialState: history.include_initial_state !== false,
+    loading: false, fetchedAt: Date.parse(snapshot.observed_at)};
 }
 function readPhotoManifest(filename) {
   if (!filename) return {hash: null, assets: []};
@@ -259,10 +261,13 @@ async function runSynthetic(browser, viewport, snapshot, cardPath, output) {
     hasTouch: viewport.touch, locale: 'ru-RU', timezoneId: snapshot.time_zone});
   page.setDefaultTimeout(15000);
   try {
-    await page.route('**/*', route => route.abort());
-    await page.setContent('<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1">'
+    const harnessHTML = '<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1">'
       + '<style>body{margin:20px;font-family:Arial,sans-serif}plant-care-card{display:block;max-width:720px}</style>'
-      + '</head><body><h1>Synthetic interaction harness — no screenshots</h1></body></html>');
+      + '</head><body><h1>Synthetic interaction harness — no screenshots</h1></body></html>';
+    await page.route('**/*', route => route.request().url() === ORIGIN + '/synthetic'
+      ? route.fulfill({status: 200, contentType: 'text/html; charset=utf-8', body: harnessHTML})
+      : route.abort());
+    await page.goto(ORIGIN + '/synthetic', {waitUntil: 'domcontentloaded'});
     await page.addScriptTag({path: cardPath});
     const report = await verifySyntheticCardInteractions(page);
     return archiveInteractionLog(report, output, 'synthetic-' + viewport.name + '.log');

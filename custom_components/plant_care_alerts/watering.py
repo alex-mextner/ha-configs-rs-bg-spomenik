@@ -74,12 +74,22 @@ def _sustained(points: list, baseline: float, threshold: float) -> bool:
     ):
         return False
     values = [value for _, value in points]
-    third = len(points) // 3
-    blocks = (points[:third], points[third : 2 * third], points[2 * third :])
+    first = points[0][0]
+    block_seconds = CONFIRM_SECONDS / 3
+    blocks = [
+        [
+            point
+            for point in points
+            if min(int((point[0] - first) / block_seconds), 2) == block
+        ]
+        for block in range(3)
+    ]
     return (
         _median(points) - baseline >= threshold
         and _quantile(values, 0.2) - baseline >= threshold * 0.6
-        and all(_median(block) - baseline >= threshold * 0.6 for block in blocks)
+        and all(
+            block and _median(block) - baseline >= threshold * 0.6 for block in blocks
+        )
     )
 
 
@@ -109,6 +119,8 @@ def _candidate(
         "window_start": start,
         "window_end": first,
         "confirmed_at": after[-1][0],
+        "evidence_start": before[0][0],
+        "evidence_end": after[-1][0],
         "evidence": {
             "baseline_median": level,
             "wet_median": _median(after),
@@ -135,6 +147,17 @@ def _select_event(result: dict, event: dict) -> None:
     result["last_watering_note"] = event.get("note")
 
 
+def _blocked_intervals(result: dict) -> list:
+    return [
+        *(result.get("reliability_invalid_intervals") or []),
+        *[
+            [stamp, stamp]
+            for key in ("watering_conflicts", "watering_interruptions")
+            for stamp in result.get(key, [])
+        ],
+    ]
+
+
 def detect_watering(
     result: dict, points: list, now: float, stale_seconds: float
 ) -> None:
@@ -148,10 +171,7 @@ def detect_watering(
         "monitoring" if len(points) >= MIN_BASELINE_SAMPLES else "insufficient_history"
     )
     settings = {
-        "blocked": [
-            *(result.get("reliability_invalid_intervals") or []),
-            *[[stamp, stamp] for stamp in result.get("watering_conflicts", [])],
-        ],
+        "blocked": _blocked_intervals(result),
         "max_gap": min(stale_seconds, MAX_GAP_SECONDS),
         "stale_seconds": stale_seconds,
     }
@@ -211,8 +231,7 @@ def retract_untrusted_history(
     result: dict, now: float, unreliable_since: float | None
 ) -> None:
     """Retract all affected estimates even when a user report is currently latest."""
-    intervals = list(result.get("reliability_invalid_intervals") or [])
-    intervals.extend([stamp, stamp] for stamp in result.get("watering_conflicts", []))
+    intervals = _blocked_intervals(result)
     if unreliable_since is not None:
         intervals.append([unreliable_since, None])
     for event in list(result.get("watering_history", [])):
@@ -224,8 +243,13 @@ def retract_untrusted_history(
 def _untrusted_event(event: dict, intervals: list, now: float) -> bool:
     if event.get("source") != "auto" or not event.get("valid", True):
         return False
-    start = event.get("window_start", event["at"])
-    end = event.get("confirmed_at", event["at"])
+    start = event.get(
+        "evidence_start",
+        event["at"] - BASELINE_SECONDS
+        if event.get("precision") == "interval"
+        else event.get("window_start", event["at"]),
+    )
+    end = event.get("evidence_end", event.get("confirmed_at", event["at"]))
     return any(
         left <= end and (right if right is not None else now) >= start
         for left, right in intervals

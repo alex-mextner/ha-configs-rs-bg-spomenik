@@ -1391,6 +1391,10 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.before_write = self.manager.stop_writes
         await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
         self.assertEqual(self.hass.services.writes, [])
+        pending = self.store.data["records"]["sensor.smooth"]
+        self.assertEqual(pending["attempts"], [])
+        self.assertIsNotNone(pending["pending"])
+        await self.manager.async_save_final()
         record = self.store.data["records"]["sensor.smooth"]
         self.assertEqual(record["history"], [])
         self.assertEqual(record["attempts"][-1]["outcome"], "aborted")

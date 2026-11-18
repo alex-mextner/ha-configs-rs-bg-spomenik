@@ -5,6 +5,7 @@
 """Run in the installed Home Assistant container; no live service calls."""
 
 import importlib.util
+import json
 import unittest
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
@@ -139,6 +140,92 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             current, "sensor.raw", raw, [67, 1298], self.now
         )
         self.assertEqual(current["watering_conflicts"], [self.now])
+
+    def test_same_median_conflicting_burst_cannot_support_watering(self) -> None:
+        from custom_components.plant_care_alerts.analytics import analyze
+
+        start = self.now - 5400
+        points = [
+            [start + index * 300, 300 if index < 12 else 340] for index in range(19)
+        ]
+        current = {"adc_identity": "sensor.raw", "adc_samples": points}
+        sample_at = datetime.fromtimestamp(start + 300, UTC)
+        for burst in ([300] * 5, [299, 300, 300, 300, 301]):
+            raw = SimpleNamespace(
+                state="300",
+                attributes={"sampled_at": sample_at.isoformat(), "samples": burst},
+                last_updated=sample_at,
+            )
+            self.manager._collect_adc_samples(
+                current, "sensor.raw", raw, [67, 1298], self.now
+            )
+            restored = json.loads(json.dumps(current))
+            self.assertEqual(restored, current)
+            current = restored
+        result = analyze(
+            current, current["adc_samples"], self.now, calibration=[67, 1298]
+        )
+        self.assertNotEqual(result.get("last_watering_source"), "auto")
+        self.assertIn(start + 300, current["watering_conflicts"])
+
+    async def test_recorder_outage_cannot_be_stitched_into_watering(self) -> None:
+        from custom_components.plant_care_alerts.analytics import analyze
+
+        start = self.now - 5400
+        raw_states = [
+            SimpleNamespace(
+                state=str(300 if index < 12 else 340),
+                attributes={
+                    "sampled_at": datetime.fromtimestamp(
+                        start + index * 300, UTC
+                    ).isoformat(),
+                    "samples": [300 if index < 12 else 340] * 5,
+                },
+                last_updated=datetime.fromtimestamp(start + index * 300, UTC),
+            )
+            for index in range(19)
+        ]
+        # Unavailability retained the preceding sample clock: the interruption
+        # belongs to the actual state transition, not that stale physical clock.
+        raw_states.insert(
+            12,
+            SimpleNamespace(
+                state="unavailable",
+                attributes={"sampled_at": raw_states[11].attributes["sampled_at"]},
+                last_updated=datetime.fromtimestamp(start + 3450, UTC),
+            ),
+        )
+        recorded = {
+            "sensor.raw": raw_states,
+            "sensor.smooth": [
+                SimpleNamespace(
+                    state="50", last_updated=datetime.fromtimestamp(self.now, UTC)
+                )
+            ],
+        }
+        recorder = SimpleNamespace(
+            async_add_executor_job=AsyncMock(return_value=recorded)
+        )
+        with (
+            patch(
+                "custom_components.plant_care_alerts.get_instance",
+                return_value=recorder,
+            ),
+            patch(
+                "custom_components.plant_care_alerts.dt_util.utcnow",
+                return_value=datetime.fromtimestamp(self.now, UTC),
+            ),
+        ):
+            await self.manager._load_history("a", self.plant, self.now)
+        current = self.manager.records["a"]
+        self.manager._collect_adc_samples(
+            current, "sensor.raw", raw_states[-1], [67, 1298], self.now
+        )
+        result = analyze(
+            current, current["adc_samples"], self.now, calibration=[67, 1298]
+        )
+        self.assertNotEqual(result.get("last_watering_source"), "auto")
+        self.assertIn(start + 3450, current["watering_interruptions"])
 
     async def test_user_refresh_does_not_inherit_background_write_authority(
         self,

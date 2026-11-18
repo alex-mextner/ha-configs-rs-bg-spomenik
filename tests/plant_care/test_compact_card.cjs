@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const test = require('node:test');
 let Card;
 const context = {
   HTMLElement: class { attachShadow() { this.shadowRoot = {innerHTML: '', querySelectorAll: () => []}; } },
@@ -51,7 +52,7 @@ assert.doesNotMatch(card._wateringFact(plant.attributes), /00:00|12:00/);
 const start = Date.parse('2026-11-18T12:00:00Z');
 const stamp = minutes => new Date(start + minutes * 60000).toISOString();
 card._history['sensor.moisture|7'] = {
-  start, end: start + 3600000, loading: false, fetchedAt: start,
+  start, end: start + 3600000, loading: false, fetchedAt: start, includesInitialState: false,
   points: [
     {state: '20', last_changed: stamp(0)},
     {state: '25', last_changed: stamp(15)},
@@ -71,4 +72,80 @@ assert.match(graph, /tabindex="0"/);
 assert.match(graph, /role="slider"/);
 assert.match(graph, /class="graph-inspection"/);
 assert.match(graph, /aria-live="polite"/);
+test('legacy boundary is drawn but only actual observations can be selected', () => {
+  const h = {start, end: start + 3600000, includesInitialState: true, points: [
+    {state: '61', last_changed: stamp(0)},
+    {state: '62', last_changed: stamp(0)},
+    {state: '65', last_changed: stamp(15)},
+  ]};
+  assert.deepEqual(Array.from(card._historyPoints(h), point => point.value), [62,65]);
+  assert.equal(card._historyShapes(h).count, 3, 'Carry-forward remains drawing context');
+  h.includesInitialState = false;
+  assert.deepEqual(Array.from(card._historyPoints(h), point => point.value), [61,62,65]);
+});
+
+test('normalization is reused and refreshed when the history response changes', () => {
+  const h = {start, end: start + 3600000, includesInitialState: false,
+    points: [{state: '20', last_changed: stamp(15)}]};
+  const first = card._historyPoints(h);
+  assert.strictEqual(card._historyPoints(h), first);
+  h.points = [{state: '40', last_changed: stamp(20)}];
+  const refreshed = card._historyPoints(h);
+  assert.notStrictEqual(refreshed, first);
+  assert.equal(refreshed[0].value, 40);
+});
+
+test('failed refresh of an empty cached response exposes error and retry', () => {
+  card._history['sensor.moisture|7'] = {start, end: start + 3600000, points: [], error: true};
+  const failed = card._graph(plant.attributes, plant.entity_id);
+  assert.match(failed, /Не удалось загрузить историю/);
+  assert.match(failed, /data-action="retry"/);
+  assert.doesNotMatch(failed, /Нет записей/);
+});
+
+test('live Recorder requests omit synthetic start-of-period state', () => {
+  const fresh = new Card(); let requested;
+  fresh._selectedEntity = plant.entity_id;
+  fresh._hass = {states: {[plant.entity_id]: plant}, callApi: (_method, endpoint) => {
+    requested = endpoint; return new Promise(() => {});
+  }};
+  fresh._loadHistory();
+  assert.match(requested, /(?:[?&])skip_initial_state(?:&|$)/);
+});
+
+test('drag and keyboard selection update only inspection and skip the same observation', () => {
+  const fresh = new Card(); let writes = 0;
+  const node = () => ({attributes: {}, setAttribute(name, value) {
+    this.attributes[name] = String(value); writes++;
+  }});
+  const chart = node(), line = node(), marker = node(), output = node(), time = node(), value = node();
+  chart.getBoundingClientRect = () => ({left: 0, width: 1000});
+  chart.matches = () => true;
+  chart.closest = () => chart;
+  chart.querySelector = selector => ({'.inspection-line': line, '.inspection-point': marker})[selector];
+  output.querySelector = selector => ({time, '[data-reading-value]': value})[selector];
+  fresh.shadowRoot.querySelector = selector => ({'.chart': chart, '.graph-inspection': output})[selector];
+  fresh._selectedEntity = plant.entity_id;
+  fresh._hass = {states: {[plant.entity_id]: plant}};
+  fresh._history['sensor.moisture|7'] = {start, end: start + 3600000, includesInitialState: false,
+    points: [{state: '20', last_changed: stamp(15)}, {state: '70', last_changed: stamp(45)}]};
+  fresh._selectedPoints.set(`${plant.entity_id}|7`, start + 15 * 60000);
+  fresh._render = () => assert.fail('Selection must not rebuild detail markup');
+  fresh._inspectPointer({target: chart, clientX: 250});
+  assert.equal(writes, 0, 'Selecting the existing point performs no DOM work');
+  fresh._inspectPointer({target: chart, clientX: 750});
+  assert.equal(chart.attributes['aria-valuenow'], '1');
+  assert.equal(line.attributes.x1, '750');
+  assert.equal(marker.attributes.cy, '30');
+  assert.equal(output.attributes['data-value'], '70');
+  assert.equal(time.attributes.datetime, stamp(45));
+  assert.equal(value.textContent, '70 %');
+  const afterMove = writes;
+  fresh._inspectPointer({target: chart, clientX: 749});
+  assert.equal(writes, afterMove, 'Movement within the same nearest observation is inert');
+  fresh._inspectKeyboard({target: chart, key: 'Home', preventDefault() {}});
+  assert.equal(chart.attributes['aria-valuenow'], '0');
+  assert.equal(time.attributes.datetime, stamp(15));
+});
+
 console.log('PASS: compact truthful tiles, approximate day labels and selection of real history points');

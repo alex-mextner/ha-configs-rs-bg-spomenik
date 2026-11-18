@@ -51,7 +51,7 @@ class TestManagerPermissions(unittest.IsolatedAsyncioTestCase):
                 async_listen_once=Mock(),
             ),
         )
-        with patch(f"{MODULE}.Store"):
+        with patch(f"{MODULE}.new_store"):
             self.manager = CareManager(
                 self.hass,
                 {

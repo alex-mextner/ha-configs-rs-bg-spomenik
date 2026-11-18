@@ -27,19 +27,11 @@ if not HA_AVAILABLE and os.environ.get("PLANT_NATIVE_HA_REQUIRED") == "1":
     message = "Native Home Assistant is required by this CI job"
     raise RuntimeError(message)
 if HA_AVAILABLE:
-    from homeassistant import auth, config_entries, loader
+    from homeassistant import auth, bootstrap, config_entries, loader
     from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_READ_ONLY
     from homeassistant.const import EVENT_CALL_SERVICE, EVENT_STATE_CHANGED
     from homeassistant.core import Context, HomeAssistant, State, callback
     from homeassistant.exceptions import Unauthorized
-    from homeassistant.helpers import (
-        area_registry,
-        device_registry,
-        entity_registry,
-        floor_registry,
-        issue_registry,
-        label_registry,
-    )
     from homeassistant.setup import async_setup_component
     from homeassistant.util.file import WriteError
 
@@ -110,19 +102,11 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.hass = HomeAssistant(config_dir.name)
         self.addAsyncCleanup(self.hass.async_stop, force=True)
         loader.async_setup(self.hass)
-        device_registry.async_setup(self.hass)
-        await device_registry.async_load(self.hass)
-        self.hass.auth = await auth.auth_manager_from_config(self.hass, [], [])
         self.hass.config_entries = config_entries.ConfigEntries(self.hass, {})
-        await self.hass.config_entries.async_initialize()
-        for registry in (
-            floor_registry,
-            label_registry,
-            area_registry,
-            entity_registry,
-            issue_registry,
-        ):
-            await registry.async_load(self.hass)
+        # Match native HA's eager registry/bootstrap ordering before AuthStore
+        # requests the loaded device registry. Do not create partial registries.
+        self.assertTrue(await bootstrap.async_load_base_functionality(self.hass))
+        self.hass.auth = await auth.auth_manager_from_config(self.hass, [], [])
         configured = await async_setup_component(
             self.hass,
             "input_number",

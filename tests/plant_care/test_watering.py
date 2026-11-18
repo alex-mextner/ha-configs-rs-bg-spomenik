@@ -145,6 +145,36 @@ class WateringTests(unittest.TestCase):
         self.assertFalse(result["watering_history"][0]["valid"])
         self.assertEqual(result["watering_history"][0]["retracted_at"], START + 5500)
 
+    def test_late_baseline_conflict_retracts_full_evidence_window(self) -> None:
+        points = measured_rise()
+        first = analytics.analyze({}, points, points[-1][0], calibration=CALIBRATION)
+        self.assertEqual(first["last_watering_source"], "auto")
+        for contradiction in (
+            {"watering_conflicts": [START + 300]},
+            {"reliability_invalid_intervals": [[START + 300, START + 600]]},
+        ):
+            with self.subTest(contradiction=contradiction):
+                prior = {**json.loads(json.dumps(first)), **contradiction}
+                result = analytics.analyze(
+                    prior, points, START + 5500, calibration=CALIBRATION
+                )
+                self.assertFalse(result["watering_history"][0]["valid"])
+                self.assertNotEqual(result["last_watering_source"], "auto")
+                self.assertEqual(result["watering_history"][0]["evidence_start"], START)
+                self.assertEqual(
+                    result["watering_history"][0]["window_start"], START + 3300
+                )
+
+    def test_clustered_short_excursion_does_not_confirm_thirty_minute_rise(
+        self,
+    ) -> None:
+        points = measured_rise()[:12]
+        points.extend([START + 3600 + i * 15, 540] for i in range(13))
+        points.extend([START + 3600 + offset, 300] for offset in (600, 1200, 1800))
+        result = analytics.analyze({}, points, START + 5400, calibration=CALIBRATION)
+        self.assertNotEqual(result.get("last_watering_source"), "auto")
+        self.assertEqual(result["watering_history"], [])
+
     def test_new_approximate_report_preserves_known_older_day_without_fake_time(
         self,
     ) -> None:

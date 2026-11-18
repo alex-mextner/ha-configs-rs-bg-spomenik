@@ -27,8 +27,8 @@
 	url = https://github.com/dext0r/yandex_smart_home.git
 [submodule "submodules/YandexStation"]
 	path = submodules/YandexStation
-	url = https://github.com/AlexxIT/YandexStation.git
-	branch = master
+	url = https://github.com/alex-mextner/YandexStation.git
+	branch = local/ha-3.22.3-remote-announcements-20261118
 [submodule "submodules/hass-ingress-fork"]
 	path = submodules/hass-ingress-fork
 	url = https://github.com/alex-mextner/hass_ingress.git

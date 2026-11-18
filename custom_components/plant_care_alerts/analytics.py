@@ -37,8 +37,12 @@ class AnalysisSettings:
     unreliable_since: float | None = None
 
 
-def _valid_points(samples: list, now: float) -> tuple[list, set]:
-    valid, conflicts = {}, set()
+def normalize_adc_points(
+    samples: list, now: float, *, conflicts: set | None = None
+) -> tuple[list, list]:
+    """Retain JSON-native points and contradictions for every raw-data consumer."""
+    valid = {}
+    conflicts = set(conflicts or [])
     for point in samples:
         try:
             stamp, value = float(point[0]), float(point[1])
@@ -52,7 +56,10 @@ def _valid_points(samples: list, now: float) -> tuple[list, set]:
                 valid.setdefault(stamp, value)
         except (ValueError, TypeError, IndexError):
             continue
-    return sorted(valid.items()), conflicts
+    return (
+        [[stamp, valid[stamp]] for stamp in sorted(valid)],
+        sorted(stamp for stamp in conflicts if now - RETENTION_SECONDS <= stamp <= now),
+    )
 
 
 def _quarantined(segment: list, intervals: list, now: float) -> bool:
@@ -234,10 +241,8 @@ def analyze(previous: dict, samples: list, now: float, **options: Any) -> dict:
     settings = AnalysisSettings(**options)
     calibration, stale_seconds = settings.calibration, settings.stale_seconds
     result = dict(previous)
-    points, conflicts = _valid_points(samples, now)
-    conflicts.update(result.get("watering_conflicts", []))
-    result["watering_conflicts"] = sorted(
-        stamp for stamp in conflicts if now - RETENTION_SECONDS <= stamp <= now
+    points, result["watering_conflicts"] = normalize_adc_points(
+        samples, now, conflicts=set(result.get("watering_conflicts", []))
     )
     retract_untrusted_history(result, now, settings.unreliable_since)
     result.update(

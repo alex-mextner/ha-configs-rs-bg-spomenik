@@ -69,11 +69,20 @@ class ArmedWrite:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ReconciliationResult:
+    """Name the observed changes and uncertainty retained during reconciliation."""
+
+    changes: list[dict]
+    own_effect_seen: bool
+    unbound_observations_retained: bool
+
+
+@dataclass(frozen=True, kw_only=True)
 class RuntimeHooks:
     """Supply HA effects and current preflight observations at the boundary."""
 
     read_persisted: Callable[[], Awaitable[dict | None]]
-    confirm_witnesses: Callable[[str, dict], Awaitable[None]]
+    confirm_witnesses: Callable[[str, dict | None], Awaitable[None]]
     context_factory: Callable[[], Any] | None = None
     log_event: Callable[[dict], None] | None = None
     clock: Callable[[], float] = time.time
@@ -1383,7 +1392,7 @@ class CalibrationRuntime:
 
     def _pending_events(
         self, record: dict, pending: dict, now: float
-    ) -> tuple[list, bool, bool]:
+    ) -> ReconciliationResult:
         changes, own_seen = [], False
         ordered, retained = self._drain_helper_events(record, now)
         for event in ordered or []:
@@ -1399,7 +1408,11 @@ class CalibrationRuntime:
                 change = self._record_manual(record, event, now)
             if change:
                 changes.append(change)
-        return changes, own_seen, retained
+        return ReconciliationResult(
+            changes=changes,
+            own_effect_seen=own_seen,
+            unbound_observations_retained=retained,
+        )
 
     def _observed_effect(
         self, record: dict, pending: dict, event: dict, now: float
@@ -1457,18 +1470,19 @@ class CalibrationRuntime:
         if not pending:
             return []
         record["pending"] = None
-        changes, own_seen, retained = self._pending_events(record, pending, now)
-        if own_seen:
+        result = self._pending_events(record, pending, now)
+        changes = result.changes
+        if result.own_effect_seen:
             return changes
         if (
             confirmed
             and not changes
-            and not retained
+            and not result.unbound_observations_retained
             and list(endpoints) == pending["target"]
         ):
             event = self._complete_pending(record, pending, now, now)
             return [event] if event else []
-        if confirmed is False and not retained:
+        if confirmed is False and not result.unbound_observations_retained:
             self._record_attempt(record, pending, endpoints, now, ABORTED_OUTCOME)
             record["status"] = "concurrent_change"
             return changes
