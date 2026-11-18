@@ -55,10 +55,11 @@ script:
       - variables:
           reply_target: "{{ reply_target | default('', true) }}"
       - if: >-
+          {% set reply_entry = config_entry_id(reply_target)
+             if reply_target is string and reply_target.startswith('media_player.') else none %}
           {{ speak | default(true) | bool
-             and (reply_target is not string
-                  or not reply_target.startswith('media_player.')
-                  or reply_target not in integration_entities('yandex_station')
+             and (not reply_entry
+                  or config_entry_attr(reply_entry, 'domain') != 'yandex_station'
                   or not has_value(reply_target)) }}
         then:
           - stop: "Для ответа нужна доступная Станция, которой задан вопрос."
@@ -159,9 +160,10 @@ automation:
     conditions:
       - condition: template
         value_template: >-
-          {{ reply_target is string
-             and reply_target.startswith('media_player.')
-             and reply_target in integration_entities('yandex_station')
+          {% set reply_entry = config_entry_id(reply_target)
+             if reply_target is string and reply_target.startswith('media_player.') else none %}
+          {{ reply_entry
+             and config_entry_attr(reply_entry, 'domain') == 'yandex_station'
              and has_value(reply_target) }}
     actions:
       - action: script.plant_care_status

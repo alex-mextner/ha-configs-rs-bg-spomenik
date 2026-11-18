@@ -10,24 +10,26 @@ import unittest
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import yaml
 from homeassistant import loader
 from homeassistant.components import automation, trace
 from homeassistant.components.automation import config as automation_config
-from homeassistant.config_entries import ConfigEntries
+from homeassistant.config_entries import ConfigEntries, ConfigEntry
 from homeassistant.core import Context, CoreState, HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame, restore_state
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import trigger as trigger_helper
 from homeassistant.helpers.entity import entity_sources
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.template import Template
-from homeassistant.helpers.trace import script_execution_get, trace_clear, trace_get
+from homeassistant.helpers.trace import script_execution_get, trace_clear
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = yaml.safe_load((ROOT / "packages/plant_care_yandex.yaml").read_text())
@@ -42,6 +44,7 @@ CALIBRATED = "input_boolean.strelitzia_soil_dry_calibrated"
 STATION_A = "media_player.living_room_station"
 STATION_B = "media_player.bedroom_renamed"
 OTHER_PLAYER = "media_player.yandex_station_impostor"
+ORPHAN_PLAYER = "media_player.unlinked_station"
 NON_PLAYER = "sensor.station_diagnostic"
 TEST_TIMEOUT = 5
 
@@ -61,22 +64,62 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
             "plant_care_alerts", "announce", self.announce
         )
         self.hass.config_entries = ConfigEntries(self.hass, {})
+        await self.hass.config_entries.async_initialize()
         dr.async_setup(self.hass)
         await dr.async_load(self.hass, load_empty=True)
         await er.async_load(self.hass, load_empty=True)
+        await ir.async_load(self.hass, load_empty=True)
+        self.station_entry = ConfigEntry(
+            domain="yandex_station",
+            title="Household Stations",
+            data={},
+            options={},
+            source="user",
+            unique_id="test-stations",
+            version=1,
+            minor_version=1,
+            discovery_keys=MappingProxyType({}),
+            subentries_data=None,
+        )
+        self.cast_entry = ConfigEntry(
+            domain="cast",
+            title="Cast player",
+            data={},
+            options={},
+            source="user",
+            unique_id="test-cast",
+            version=1,
+            minor_version=1,
+            discovery_keys=MappingProxyType({}),
+            subentries_data=None,
+        )
+        # Keep native registration/persistence; only hardware integration startup
+        # is external to these routing tests.
+        with patch.object(
+            self.hass.config_entries, "async_setup", new=AsyncMock(return_value=True)
+        ):
+            await self.hass.config_entries.async_add(self.station_entry)
+            await self.hass.config_entries.async_add(self.cast_entry)
         registry = er.async_get(self.hass)
-        for entity_id, platform in (
-            (STATION_A, "yandex_station"),
-            (STATION_B, "yandex_station"),
-            (OTHER_PLAYER, "cast"),
-            (NON_PLAYER, "yandex_station"),
+        for entity_id, platform, config_entry in (
+            (STATION_A, "yandex_station", self.station_entry),
+            (STATION_B, "yandex_station", self.station_entry),
+            (OTHER_PLAYER, "cast", self.cast_entry),
+            (NON_PLAYER, "yandex_station", self.station_entry),
+            (ORPHAN_PLAYER, "yandex_station", None),
         ):
             domain, object_id = entity_id.split(".", 1)
             entry = registry.async_get_or_create(
-                domain, platform, object_id, suggested_object_id=object_id
+                domain,
+                platform,
+                object_id,
+                suggested_object_id=object_id,
+                config_entry=config_entry,
             )
-            # Native integration_entities() reads loaded entity source metadata.
-            entity_sources(self.hass)[entry.entity_id] = {"domain": platform}
+            source = {"domain": platform}
+            if config_entry is not None:
+                source["config_entry"] = config_entry.entry_id
+            entity_sources(self.hass)[entry.entity_id] = source
             self.hass.states.async_set(
                 entry.entity_id, "idle", {"supported_features": 512}
             )
@@ -269,6 +312,7 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
             ("null", {"reply_target": None}, "idle"),
             ("absent entity", {"reply_target": "media_player.absent"}, "idle"),
             ("wrong integration", {"reply_target": OTHER_PLAYER}, "idle"),
+            ("missing config entry", {"reply_target": ORPHAN_PLAYER}, "idle"),
             ("wrong domain", {"reply_target": NON_PLAYER}, "idle"),
             ("unavailable", {"reply_target": STATION_B}, "unavailable"),
             ("unknown", {"reply_target": STATION_B}, "unknown"),
@@ -282,22 +326,39 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
                 self.announce.reset_mock()
                 self.refresh.reset_mock()
                 # A native top-level error stop returns an aborted run, not an
-                # exception; verify both that outcome and the error-stop trace.
+                # exception. It must reject the call before refresh or delivery.
                 trace_clear()
                 result = await self.script.async_run(variables, Context())
                 self.assertIsNotNone(result)
                 self.assertIsNone(result.service_response)
                 self.assertEqual(script_execution_get(), "aborted")
-                stops = [
-                    entry.as_dict()["result"]
-                    for entries in (trace_get() or {}).values()
-                    for entry in entries
-                    if "stop" in entry.as_dict().get("result", {})
-                ]
-                self.assertEqual(len(stops), 1)
-                self.assertTrue(stops[0]["error"])
                 self.refresh.assert_not_awaited()
                 self.assert_no_speech()
+
+    async def test_entry_title_cannot_impersonate_the_station_integration(self) -> None:
+        """A Cast entry named yandex_station cannot replace the actual domain."""
+        self.hass.config_entries.async_update_entry(
+            self.cast_entry, title="yandex_station"
+        )
+        for target in (STATION_A, STATION_B):
+            with self.subTest(target=target):
+                self.deliveries.clear()
+                report = await self.report({"reply_target": target})
+                self.assertEqual(self.delivered_targets(), [(target,)])
+                self.assertEqual(
+                    self.deliveries[0][0]["media_content_id"], report["message"]
+                )
+                self.announce.assert_not_called()
+
+        self.deliveries.clear()
+        self.refresh.reset_mock()
+        trace_clear()
+        result = await self.script.async_run({"reply_target": OTHER_PLAYER}, Context())
+        self.assertIsNotNone(result)
+        self.assertIsNone(result.service_response)
+        self.assertEqual(script_execution_get(), "aborted")
+        self.refresh.assert_not_awaited()
+        self.assert_no_speech()
 
     async def test_silent_report_requires_no_valid_speaker(self) -> None:
         """Diagnostics return plant data even with no usable reply destination."""
@@ -353,6 +414,9 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_station_event_marker_filters_commands_and_tts_echoes(self) -> None:
         """Only the dedicated request event may invoke the plant report."""
+        self.hass.config_entries.async_update_entry(
+            self.cast_entry, title="yandex_station"
+        )
         self.hass.config.skip_pip = True
         await restore_state.async_load(self.hass, load_empty=True)
         self.assertTrue(await trace.async_setup(self.hass, {}))
