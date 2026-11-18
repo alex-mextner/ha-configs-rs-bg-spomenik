@@ -83,6 +83,7 @@ class PowerPair:
         self._deadline = 0.0
         self._future: asyncio.Future[None] | None = None
         self._worker: asyncio.Task[None] | None = None
+        self._command_batch: asyncio.Future | None = None
         self._wake = asyncio.Event()
 
     @property
@@ -141,7 +142,11 @@ class PowerPair:
         # An older requested ON can arrive after a newer OFF was requested.
         # It is confirmation of that old command, not a new human request.
         if expected and expected[1] >= asyncio.get_running_loop().time():
-            if self.last_intent is not None and value != self.last_intent:
+            if value is self.last_intent:
+                # A current acknowledgement satisfies any retry queued by an
+                # older opposite acknowledgement while this command was pending.
+                self._retry_sides.discard(side)
+            elif self.last_intent is not None:
                 if self.target is None:
                     self._sync_to(target=self.last_intent)
                 else:
@@ -173,8 +178,17 @@ class PowerPair:
                 )
             )
         self._generation += 1
-        self._retry_sides.clear()
+        # An opposite frame may already be in flight while feedback still looks
+        # correct. Send the new absolute intent before accepting that snapshot.
+        now = asyncio.get_running_loop().time()
+        self._retry_sides = {
+            side
+            for (side, expected), (_, deadline) in self._expected.items()
+            if expected is not target and deadline >= now
+        }
         self.target = target
+        if self._command_batch is not None and not self._command_batch.done():
+            self._command_batch.cancel()
         self.last_error = None
         self._deadline = asyncio.get_running_loop().time() + self.timeout
         self._future = asyncio.get_running_loop().create_future()
@@ -220,7 +234,9 @@ class PowerPair:
                 values = {
                     side: endpoint.read() for side, endpoint in self.endpoints.items()
                 }
-                if all(value is target for value in values.values()):
+                if not self._retry_sides and all(
+                    value is target for value in values.values()
+                ):
                     self._finish(generation)
                     continue
                 remaining = self._deadline - asyncio.get_running_loop().time()
@@ -255,7 +271,7 @@ class PowerPair:
                 and not self.endpoints["display"].allow_unknown_command
             ):
                 break
-            if values[side] is target:
+            if values[side] is target and side not in self._retry_sides:
                 continue
             if (generation, side) in attempted and side not in self._retry_sides:
                 continue
@@ -273,11 +289,24 @@ class PowerPair:
     async def _async_run_commands(
         self, commands: list[Awaitable[None]], generation: int, remaining: float
     ) -> None:
+        self._command_batch = asyncio.gather(*commands, return_exceptions=True)
         try:
             async with asyncio.timeout(remaining):
-                results = await asyncio.gather(*commands, return_exceptions=True)
+                results = await self._command_batch
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if (
+                generation != self._generation
+                and self._started
+                and not caller.cancelling()
+            ):
+                # Keep the one driver alive; only this obsolete batch ended.
+                return
+            raise
         except TimeoutError:
             results = [HomeAssistantError("Power command confirmation timed out")]
+        finally:
+            self._command_batch = None
         if generation != self._generation:
             return
         failures = [result for result in results if isinstance(result, BaseException)]

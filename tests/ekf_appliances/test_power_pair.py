@@ -75,6 +75,39 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         await pending
         self.assertEqual(self.pair.target, None)
 
+    async def test_opposite_request_dispatches_before_old_confirmation_finishes(
+        self,
+    ) -> None:
+        self.hold["display"] = asyncio.Event()
+        old = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        latest = asyncio.create_task(self.pair.request(target=False))
+        try:
+            await self.settle()
+            self.assertIn(("display", False), self.calls)
+            self.assertIn(("player", False), self.calls)
+            self.assertFalse(self.hold["display"].is_set())
+        finally:
+            self.hold["display"].set()
+            await asyncio.gather(old, latest, return_exceptions=True)
+        self.assertEqual(self.states, {"display": False, "player": False})
+        self.assertIs(self.pair.last_intent, expr2=False)
+
+    async def test_owner_cancellation_wins_over_an_obsolete_batch(self) -> None:
+        self.hold["display"] = asyncio.Event()
+        old = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        latest = self.pair._request(target=False)
+        worker = self.pair._worker
+        worker.cancel()
+        try:
+            await self.settle()
+            self.assertTrue(worker.cancelled())
+            self.assertEqual(self.calls, [("display", True), ("player", True)])
+        finally:
+            await self.pair.close()
+            await asyncio.gather(old, latest, return_exceptions=True)
+
     async def test_duplicate_request_and_echo_do_not_duplicate_commands(self) -> None:
         self.hold["display"] = asyncio.Event()
         a = asyncio.create_task(self.pair.request(target=True))
@@ -212,7 +245,8 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
                 ("display", True),
                 ("player", True),
                 ("display", False),
-                ("player", False),
+                ("player", False),  # Cancel the still-unconfirmed ON immediately.
+                ("player", False),  # Reassert OFF if that old ON arrives late.
             ],
         )
         self.assertIs(self.pair.last_intent, expr2=False)
@@ -272,6 +306,35 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls.count(("player", False)), 2)
         self.assertEqual(self.calls.count(("display", True)), 1)
 
+    async def test_late_on_during_off_does_not_mask_later_native_off(self) -> None:
+        pending_on, pending_off = asyncio.Event(), asyncio.Event()
+
+        async def display_power(target) -> None:
+            self.calls.append(("display", target))
+            if self.calls.count(("display", target)) == 1:
+                await (pending_on if target else pending_off).wait()
+            self.states["display"] = target
+            self.pair.observe()
+
+        self.pair.endpoints["display"] = PowerEndpoint(
+            lambda: self.states["display"], display_power
+        )
+        old = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        latest = asyncio.create_task(self.pair.request(target=False))
+        await self.settle()
+        await self.physical("display", value=True)
+        pending_on.set()
+        pending_off.set()
+        await asyncio.gather(old, latest, return_exceptions=True)
+        await self.settle()
+        self.assertEqual(self.states, {"display": False, "player": False})
+        await self.physical("display", value=True)
+        self.assertEqual(self.states, {"display": True, "player": True})
+        await self.physical("display", value=False)
+        self.assertEqual(self.states, {"display": False, "player": False})
+        self.assertIs(self.pair.last_intent, expr2=False)
+
     async def test_physical_player_off_during_tv_boot_is_latest_intent(self) -> None:
         self.hold["display"] = asyncio.Event()
         old = asyncio.create_task(self.pair.request(target=True))
@@ -301,7 +364,7 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.states, {"display": True, "player": True})
         self.assertIsNone(self.pair.target)
 
-    async def test_latest_on_supersedes_an_unexecuted_off_without_extra_commands(
+    async def test_latest_on_supersedes_an_off_without_losing_the_driver(
         self,
     ) -> None:
         self.hold["display"] = asyncio.Event()
@@ -317,8 +380,19 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HomeAssistantError):
             await old_off
         await latest_on
-        self.assertEqual(self.calls, [("display", True), ("player", True)])
+        self.assertEqual(
+            self.calls,
+            [
+                ("display", True),
+                ("player", True),
+                ("display", False),
+                ("player", False),
+                ("display", True),
+                ("player", True),
+            ],
+        )
         self.assertEqual(self.states, {"display": True, "player": True})
+        self.assertIsNone(self.pair.target)
         self.assertIsNone(self.pair.last_error)
 
     async def test_intent_revision_survives_completion_and_ignores_unchanged_feedback(

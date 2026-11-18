@@ -369,9 +369,12 @@ class RemoteController:
     async def async_power(self, data: Mapping[str, Any]) -> dict[str, str | bool]:
         """Authorize and dispatch one power action with immediate shutdown guarding."""
         route = self.resolve(data)
-        entity = PROJECTOR if route["pair"] == "projector" else TV
+        # Navigation may fall back during shutdown; captured power intent must
+        # never cross to the other display while waiting for dispatch.
+        pair = data.get("pair", route["pair"])
+        entity = PROJECTOR if pair == "projector" else TV
         await self._async_check_control(entity)
-        if route["pair"] == "projector":
+        if pair == "projector":
             self.refresh()
             if self.runtime.projector_shutting_down:
                 return {"sent": False, "blocked": "projector_shutting_down"}
@@ -418,6 +421,16 @@ class RemoteController:
         if projector_action and self.runtime.projector_shutting_down:
             self.mode.resolve("projector", native=False)
             return {"sent": False, "blocked": "projector_shutting_down"}
+        if (
+            data.get("pair") == "tv"
+            and domain in {"remote", "androidtv_remote", "media_player"}
+            and service
+            not in {"turn_on", "turn_off", "toggle", "select_source", "play_media"}
+            and (self._tv_power_state() is False or self.mode.targets["tv"] is False)
+        ):
+            # Ordinary keys can wake Chromecast through HDMI-CEC. Only an
+            # explicit power/source/app action may wake a stopped TV pair.
+            return {"sent": False, "blocked": "tv_off"}
         token = UNIVERSAL_PROJECTOR_COMMAND.set(projector_action)
         task = asyncio.current_task()
         if projector_action:

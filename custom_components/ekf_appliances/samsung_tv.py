@@ -155,6 +155,7 @@ class SamsungTvMediaPlayer(
         self._power_lock = asyncio.Lock()
         self._power_task: asyncio.Task | None = None
         self._power_target: bool | None = None
+        self._power_generation = 0
         self._copy_native_attributes()
 
     @property
@@ -357,42 +358,71 @@ class SamsungTvMediaPlayer(
         await self._async_pair_power(target=False)
 
     async def async_toggle(self) -> None:
-        """Toggle known power or send one guarded unknown-state toggle."""
+        """Reverse pending intent, or turn off any known-on member of the pair."""
         observed = self.coordinator.data
+        pair = self.runtime.tv_power_pair
+        if pair is not None and pair.target is not None:
+            observed = pair.target
+        elif (
+            self._power_task is not None
+            and not self._power_task.done()
+            and self._power_target is not None
+        ):
+            observed = self._power_target
+        elif pair is not None and pair.endpoints["player"].read() is True:
+            observed = True
         if observed is None:
             await self._async_power(None)
         else:
             await self._async_pair_power(target=not observed)
 
     async def _async_power(self, turn_on: bool | None) -> None:  # noqa: FBT001 - PowerEndpoint invokes this bool callback positionally.
-        retry_after = False
         async with self._power_lock:
             task = self._power_task
-            if task is not None and not task.done():
-                retry_after = turn_on is not None and turn_on != self._power_target
-            else:
+            superseding = (
+                task is not None
+                and not task.done()
+                and turn_on is not None
+                and turn_on != self._power_target
+            )
+            if superseding:
+                # Discrete OFF must not wait through an earlier ON confirmation.
+                # The transport retains its frame deadline across cancellation.
+                self._power_generation += 1
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+            if task is None or task.done():
                 observed = self.coordinator.data
                 target = self._requested_power(turn_on=turn_on, observed=observed)
-                if observed is not None and target == observed:
+                if observed is not None and target == observed and not superseding:
                     return
                 if not self.runtime.available:
                     error_message = (
                         f"IR transmitter {self.runtime.remote_entity_id} is unavailable"
                     )
                     raise HomeAssistantError(error_message)
+                self._power_generation += 1
                 self._power_target = target
                 task = self._power_task = self.runtime.hass.async_create_task(
                     self._async_transition(target=target),
                     "EKF Samsung power transition",
                 )
+            generation = self._power_generation
         # Caller cancellation cannot release the guard while the TV is booting.
         try:
             await asyncio.shield(task)
-        except HomeAssistantError:
-            if not retry_after:
-                raise
-        if retry_after:
-            await self._async_power(turn_on)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if generation != self._power_generation and not caller.cancelling():
+                error_message = (
+                    "Samsung power request was superseded by a newer request"
+                )
+                raise HomeAssistantError(error_message) from None
+            raise
 
     @staticmethod
     def _requested_power(*, turn_on: bool | None, observed: bool | None) -> bool | None:

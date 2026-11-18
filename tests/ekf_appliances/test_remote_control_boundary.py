@@ -209,10 +209,85 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             self.device_calls()[0][:3],
             ("media_player", "turn_off", {"entity_id": "media_player.projector"}),
         )
-        await self.controller.async_power({"pair": "projector"})
+        result = await self.controller.async_power({"pair": "projector"})
+        self.assertEqual(result, {"sent": False, "blocked": "projector_shutting_down"})
+        self.assertEqual(len(self.device_calls()), 1)
+
+    async def test_fresh_tv_power_remains_available_during_projector_shutdown(
+        self,
+    ) -> None:
+        self.runtime.note_projector_off_requested()
+        route = await self.controller.async_select({"pair": "tv"})
+        await self.controller.async_power(route)
         self.assertEqual(
-            self.device_calls()[-1][:3],
+            self.device_calls()[0][:3],
             ("media_player", "toggle", {"entity_id": controller_module.TV}),
+        )
+
+    async def test_tv_navigation_cannot_wake_a_confirmed_off_fallback(self) -> None:
+        self.runtime.note_projector_off_requested()
+        for remote in ("remote.televizor", "remote.ue48j5500_ue48j5500"):
+            with self.subTest(remote=remote):
+                result = await self.controller.async_dispatch(
+                    {
+                        "pair": "tv",
+                        "domain": "remote",
+                        "service": "send_command",
+                        "service_data": {
+                            "entity_id": remote,
+                            "command": "KEYCODE_BACK",
+                        },
+                    }
+                )
+                self.assertEqual(result, {"sent": False, "blocked": "tv_off"})
+        self.assertEqual(self.device_calls(), [])
+
+    async def test_tv_navigation_rechecks_accepted_off_before_feedback_arrives(
+        self,
+    ) -> None:
+        self.hass.states.set(controller_module.TV, "on")
+        self.runtime.tv_power_pair = SimpleNamespace(
+            endpoints={"display": SimpleNamespace(read=lambda: True)},
+            intent_revision="tv:1",
+            last_intent=False,
+            target=False,
+        )
+        result = await self.controller.async_dispatch(
+            {
+                "pair": "tv",
+                "domain": "remote",
+                "service": "send_command",
+                "service_data": {
+                    "entity_id": "remote.televizor",
+                    "command": "KEYCODE_BACK",
+                },
+            }
+        )
+        self.assertEqual(result, {"sent": False, "blocked": "tv_off"})
+        self.assertEqual(self.device_calls(), [])
+
+    async def test_tv_navigation_still_dispatches_to_a_confirmed_on_display(
+        self,
+    ) -> None:
+        self.hass.states.set(controller_module.TV, "on")
+        await self.controller.async_dispatch(
+            {
+                "pair": "tv",
+                "domain": "remote",
+                "service": "send_command",
+                "service_data": {
+                    "entity_id": "remote.televizor",
+                    "command": "KEYCODE_BACK",
+                },
+            }
+        )
+        self.assertEqual(
+            self.device_calls()[0][:3],
+            (
+                "remote",
+                "send_command",
+                {"entity_id": "remote.televizor", "command": "KEYCODE_BACK"},
+            ),
         )
 
     async def test_projector_dispatch_marks_transport_context_and_returns_native_response(

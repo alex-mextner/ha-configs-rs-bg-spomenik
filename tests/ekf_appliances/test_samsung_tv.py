@@ -530,20 +530,19 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_duplicate_and_toggle_during_boot_share_one_frame(self) -> None:
+    async def test_duplicate_during_boot_shares_one_frame(self) -> None:
         with patch(
             "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5
         ):
             first = asyncio.create_task(self.player.async_turn_on())
             await self.sent.wait()
             duplicate = asyncio.create_task(self.player.async_turn_on())
-            toggle = asyncio.create_task(self.player.async_toggle())
             await self.real_sleep(0.01)
             self.assertEqual(len(self.commands), 1)
             self.assertEqual(self.player.state, "off")
             self.assertFalse(first.done())
             self.set_native("on")
-            await asyncio.gather(first, duplicate, toggle)
+            await asyncio.gather(first, duplicate)
         self.assertEqual(len(self.commands), 1)
         self.assertEqual(self.native_calls, [])
 
@@ -577,21 +576,110 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native_calls, [])
         self.assertEqual(self.player.state, "on")
 
-    async def test_opposite_request_waits_for_boot_then_sends_one_off(self) -> None:
-        with patch(
-            "custom_components.ekf_appliances.samsung_tv.TV_TRANSITION_TIMEOUT", 0.5
-        ):
-            first = asyncio.create_task(self.player.async_turn_on())
-            await self.sent.wait()
-            opposite = asyncio.create_task(self.player.async_turn_off())
+    async def test_opposite_request_sends_off_before_boot_confirmation(self) -> None:
+        first = asyncio.create_task(self.player.async_turn_on())
+        await self.sent.wait()
+        opposite = asyncio.create_task(self.player.async_turn_off())
+        try:
             await self.real_sleep(0.01)
-            self.assertEqual(len(self.commands), 1)
+            self.assertEqual(
+                [wire_code(call["command"]) for call in self.commands],
+                [0xE0E09966, 0xE0E019E6],
+            )
+            await asyncio.wait_for(opposite, 0.1)
+            with self.assertRaisesRegex(HomeAssistantError, "superseded"):
+                await first
+            self.assertEqual(self.player.state, "off")
+        finally:
+            await self.player.async_cancel_power()
+            await asyncio.gather(first, opposite, return_exceptions=True)
+
+    async def test_paired_toggle_cancels_incomplete_on_and_rejects_late_on_feedback(
+        self,
+    ) -> None:
+        player_state = [False]
+        player_calls = []
+
+        async def player_power(target) -> None:
+            player_calls.append(target)
+            player_state[0] = target
+            pair.observe()
+
+        pair = PowerPair(
+            "TV cancellation test",
+            PowerEndpoint(
+                lambda: self.coordinator.data,
+                self.player._async_power,
+                allow_unknown_command=True,
+            ),
+            PowerEndpoint(lambda: player_state[0], player_power),
+        )
+        self.runtime.tv_power_pair = pair
+        unsubscribe = self.coordinator.async_add_listener(pair.observe)
+        pair.start()
+        old = asyncio.create_task(self.player.async_turn_on())
+        await self.sent.wait()
+        await self.real_sleep(0)
+        latest = asyncio.create_task(self.player.async_toggle())
+        try:
+            await self.real_sleep(0.01)
+            self.assertIs(pair.last_intent, expr2=False)
+            self.assertEqual(
+                [wire_code(call["command"]) for call in self.commands],
+                [0xE0E09966, 0xE0E019E6],
+            )
+            await asyncio.wait_for(latest, 0.1)
+            with self.assertRaisesRegex(HomeAssistantError, "superseded"):
+                await old
+            self.assertEqual(player_calls, [True, False])
+            completed_revision = pair.intent_revision
             self.feedback = True
             self.set_native("on")
-            await asyncio.gather(first, opposite)
-        self.assertEqual(len(self.commands), 2)
-        self.assertEqual(wire_code(self.commands[-1]["command"]), 0xE0E019E6)
-        self.assertEqual(self.player.state, "off")
+            await self.real_sleep(0.01)
+            self.assertEqual(wire_code(self.commands[-1]["command"]), 0xE0E019E6)
+            self.assertEqual(len(self.commands), 3)
+            self.assertFalse(player_state[0])
+            self.assertEqual(player_calls, [True, False])
+            self.assertEqual(pair.intent_revision, completed_revision)
+            self.assertIs(pair.last_intent, expr2=False)
+        finally:
+            unsubscribe()
+            await pair.close()
+            await self.player.async_cancel_power()
+            await asyncio.gather(old, latest, return_exceptions=True)
+
+    async def test_paired_toggle_turns_off_a_player_when_the_display_is_off(
+        self,
+    ) -> None:
+        player_state = [False]
+        player_calls = []
+
+        async def player_power(target) -> None:
+            player_calls.append(target)
+            player_state[0] = target
+            pair.observe()
+
+        pair = PowerPair(
+            "TV partial pair test",
+            PowerEndpoint(
+                lambda: self.coordinator.data,
+                self.player._async_power,
+                allow_unknown_command=True,
+            ),
+            PowerEndpoint(lambda: player_state[0], player_power),
+            timeout=0.03,
+        )
+        self.runtime.tv_power_pair = pair
+        pair.start()
+        player_state[0] = True
+        self.feedback = True
+        try:
+            await self.player.async_toggle()
+            self.assertEqual(player_calls, [False])
+            self.assertEqual(self.commands, [])
+            self.assertIs(pair.last_intent, expr2=False)
+        finally:
+            await pair.close()
 
     async def test_failed_on_does_not_discard_queued_off(self) -> None:
         release = asyncio.Event()
@@ -660,6 +748,56 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             self.set_native("on")
             await second
         self.assertEqual(len(self.commands), 1)
+
+    async def test_caller_cancellation_during_supersession_does_not_send_an_inverse(
+        self,
+    ) -> None:
+        cleaning_up, release_cleanup = asyncio.Event(), asyncio.Event()
+
+        async def old_transition() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleaning_up.set()
+                await release_cleanup.wait()
+                raise
+
+        old = asyncio.create_task(old_transition())
+        self.player._power_task = old
+        self.player._power_target = True
+        await self.real_sleep(0)
+        latest = asyncio.create_task(self.player.async_turn_off())
+        await cleaning_up.wait()
+        latest.cancel()
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await latest
+            self.assertEqual(self.commands, [])
+        finally:
+            release_cleanup.set()
+            await self.player.async_cancel_power()
+            await asyncio.gather(old, latest, return_exceptions=True)
+
+    async def test_unknown_pending_toggle_uses_fresh_power_to_send_off(self) -> None:
+        self.set_native("unknown")
+        old = asyncio.create_task(self.player.async_toggle())
+        await self.sent.wait()
+        self.set_native("on")
+        self.feedback = True
+        latest = asyncio.create_task(self.player.async_toggle())
+        try:
+            await self.real_sleep(0.01)
+            self.assertEqual(
+                [wire_code(call["command"]) for call in self.commands],
+                [0xE0E040BF, 0xE0E019E6],
+            )
+            await asyncio.wait_for(latest, 0.1)
+            with self.assertRaisesRegex(HomeAssistantError, "superseded"):
+                await old
+            self.assertEqual(self.player.state, "off")
+        finally:
+            await self.player.async_cancel_power()
+            await asyncio.gather(old, latest, return_exceptions=True)
 
     async def test_unknown_explicit_toggle_sends_one_frame_and_coalesces(self) -> None:
         self.set_native("unknown")

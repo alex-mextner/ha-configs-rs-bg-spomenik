@@ -15,6 +15,18 @@ the first INPUT of a single, and every accepted universal-remote action renews i
 Display OFF or projector shutdown invalidates stale pending input and affected
 manual focus. Unknown observations never mean OFF.
 
+Power remains bound to the display captured for that press, even if navigation
+falls back during projector shutdown. TV Power reverses an active paired-power
+request; otherwise either known-on member of the TV/Chromecast pair makes it an
+OFF request. A newer opposite request cancels the old confirmation wait and sends
+the discrete inverse without waiting for startup. Late acknowledgements retain
+the latest intent only within the existing bounded confirmation window.
+
+Ordinary TV navigation, volume and transport keys are dropped when the display
+is confirmed OFF or an OFF request is still active. An automatic fallback must
+not wake Chromecast through HDMI-CEC. Explicit Power, INPUT and app selection
+remain the wake controls.
+
 The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded
 256-entry cache and cannot replay the press. Only that receiver supplies trusted

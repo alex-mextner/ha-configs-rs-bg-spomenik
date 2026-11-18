@@ -325,13 +325,25 @@ script:
                         method: "{{ kodi_map[direction] }}"
           - conditions: "{{ selected_native }}"
             sequence:
-              - action: remote.send_command
-                target: { entity_id: remote.ue48j5500_ue48j5500 }
-                data: { command: "{{ samsung_map[direction] }}", delay_secs: 0 }
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: [remote.ue48j5500_ue48j5500]
+                    command: "{{ samsung_map[direction] }}"
+                    delay_secs: 0
         default:
-          - action: remote.send_command
-            target: { entity_id: remote.televizor }
-            data: { command: "{{ atv_map[direction] }}", delay_secs: 0 }
+          - action: ekf_appliances.remote_dispatch
+            data:
+              domain: remote
+              service: send_command
+              pair: tv
+              service_data:
+                entity_id: [remote.televizor]
+                command: "{{ atv_map[direction] }}"
+                delay_secs: 0
 
   remote_volume:
     alias: Remote volume dispatcher
@@ -376,11 +388,15 @@ script:
                     - "{{ projector_buttons[command] }}"
           - conditions: "{{ selected_pair == 'tv' and selected_native }}"
             sequence:
-              - action: remote.send_command
-                target: { entity_id: remote.ue48j5500_ue48j5500 }
+              - action: ekf_appliances.remote_dispatch
                 data:
-                  command: "{{ {'volume_up': 'KEY_VOLUP', 'volume_down': 'KEY_VOLDOWN', 'mute': 'KEY_MUTE'}[command] }}"
-                  delay_secs: 0
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: [remote.ue48j5500_ue48j5500]
+                    command: "{{ {'volume_up': 'KEY_VOLUP', 'volume_down': 'KEY_VOLDOWN', 'mute': 'KEY_MUTE'}[command] }}"
+                    delay_secs: 0
           - conditions: "{{ command == 'mute' }}"
             sequence:
               - if: "{{ state_attr(target_player, 'is_volume_muted') is not boolean }}"
@@ -623,9 +639,15 @@ script:
                 then:
                   - stop: This projector has no verified numeric keypad
                     error: true
-              - action: remote.send_command
-                target: { entity_id: remote.ue48j5500_ue48j5500 }
-                data: { command: "KEY_{{ digit }}", delay_secs: 0 }
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: [remote.ue48j5500_ue48j5500]
+                    command: "KEY_{{ digit }}"
+                    delay_secs: 0
           - conditions: "{{ source == 'chromecast' }}"
             sequence:
               # One ordered relative input batch per physical operation. Keeping text
@@ -1025,13 +1047,16 @@ automation:
                           native: false
                   - conditions: "{{ route.pair == 'tv' and not route.native }}"
                     sequence:
-                      - action: remote.send_command
-                        target:
-                          entity_id: remote.televizor
+                      - action: ekf_appliances.remote_dispatch
                         data:
-                          command: DPAD_CENTER
-                          delay_secs: 0
-                          hold_secs: 2
+                          domain: remote
+                          service: send_command
+                          pair: tv
+                          service_data:
+                            entity_id: [remote.televizor]
+                            command: DPAD_CENTER
+                            delay_secs: 0
+                            hold_secs: 2
           - conditions: "{{ button in ['play','prev','next'] }}"
             sequence:
               - action: script.remote_media

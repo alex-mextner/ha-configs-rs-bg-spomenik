@@ -716,6 +716,9 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     any(x[0] == "script.music_remote_command" for x in self.calls)
                 )
                 calls = self.appliance_calls()
+                if pair == "tv" and state == "off":
+                    self.assertEqual(calls, [])
+                    continue
                 self.assertEqual(len(calls), 1)
                 target = self.expected_transport_target(pair, native, button)
                 self.assertEqual(calls[0][1].get("entity_id"), [target])
@@ -892,6 +895,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(pair=pair, native=native):
                 self.reset()
+                self.hass.states.async_set(TV, "on")
                 await self.scripts["remote_nav"].async_run(
                     {"direction": direction, "pair": pair, "native": native},
                     context=Context(),
@@ -1083,6 +1087,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 {"command": "mute", "pair": pair, "native": False}, context=Context()
             )
             self.assertEqual(self.appliance_calls(), [])
+        self.hass.states.async_set(TV, "on")
         await self.scripts["remote_volume"].async_run(
             {"command": "mute", "pair": "tv", "native": True}, context=Context()
         )
@@ -1390,26 +1395,17 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.appliance_calls(), [])
         self.assertEqual(self.controller.mode.target, "chromecast")
 
-    async def test_stale_projector_native_route_resolves_to_chromecast(self) -> None:
-        self.reset(("projector", "off", "on"))
-        self.set_power_pair("off", "on")
-        self.runtime.note_projector_off_requested()
-        await self.scripts["remote_nav"].async_run(
-            {"pair": "projector", "native": True, "direction": "up"}, context=Context()
-        )
-        self.assertEqual(
-            self.appliance_calls(),
-            [
-                (
-                    "remote.send_command",
-                    {
-                        "entity_id": ["remote.televizor"],
-                        "command": "KEYCODE_DPAD_UP",
-                        "delay_secs": 0,
-                    },
-                )
-            ],
-        )
+    async def test_shutdown_fallback_does_not_wake_the_other_display_with_navigation(
+        self,
+    ) -> None:
+        for button in ("back", "up", "ok_hold"):
+            with self.subTest(button=button):
+                self.reset(("projector", "off", "on"))
+                self.set_power_pair("off", "on")
+                self.runtime.note_projector_off_requested()
+                await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(self.controller.mode.target, "chromecast")
 
     async def test_shutdown_between_resolve_and_dispatch_drops_the_actual_command(
         self,
