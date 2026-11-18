@@ -1,7 +1,10 @@
+# Copyright (c) 2026 Alex Ultra
+# SPDX-License-Identifier: MIT
 """Render the deployed Alice package with native HA templates and script actions."""
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -11,21 +14,32 @@ from unittest.mock import AsyncMock
 
 import yaml
 from homeassistant import loader
+from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame
+from homeassistant.helpers.entity import entity_sources
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.template import Template
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = yaml.safe_load((ROOT / "packages/plant_care_yandex.yaml").read_text())
 SENSOR = PACKAGE["template"][0]["sensor"][0]
-SEQUENCE = PACKAGE["script"]["plant_care_status"]["sequence"]
+SCRIPT_CONFIG = PACKAGE["script"]["plant_care_status"]
+SEQUENCE = SCRIPT_CONFIG["sequence"]
 CARE = "sensor.strelitsiia_poliv"
 RAW = "sensor.strelitzia_soil_adc"
 DRY = "input_number.strelitzia_soil_dry_adc"
 WET = "input_number.strelitzia_soil_wet_adc"
 CALIBRATED = "input_boolean.strelitzia_soil_dry_calibrated"
+STATION_A = "media_player.living_room_station"
+STATION_B = "media_player.bedroom_renamed"
+OTHER_PLAYER = "media_player.yandex_station_impostor"
+NON_PLAYER = "sensor.station_diagnostic"
+TEST_TIMEOUT = 5
 
 
 class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -41,6 +55,42 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_register("plant_care_alerts", "refresh", self.refresh)
         self.hass.services.async_register(
             "plant_care_alerts", "announce", self.announce
+        )
+        self.hass.config_entries = ConfigEntries(self.hass, {})
+        dr.async_setup(self.hass)
+        await dr.async_load(self.hass, load_empty=True)
+        await er.async_load(self.hass, load_empty=True)
+        registry = er.async_get(self.hass)
+        for entity_id, platform in (
+            (STATION_A, "yandex_station"),
+            (STATION_B, "yandex_station"),
+            (OTHER_PLAYER, "cast"),
+            (NON_PLAYER, "yandex_station"),
+        ):
+            domain, object_id = entity_id.split(".", 1)
+            entry = registry.async_get_or_create(
+                domain, platform, object_id, suggested_object_id=object_id
+            )
+            # Native integration_entities() reads loaded entity source metadata.
+            entity_sources(self.hass)[entry.entity_id] = {"domain": platform}
+            self.hass.states.async_set(
+                entry.entity_id, "idle", {"supported_features": 512}
+            )
+        self.deliveries: list[tuple[dict[str, Any], Context]] = []
+
+        async def deliver(call) -> None:
+            # The external speaker boundary is recorded, never contacted.
+            self.deliveries.append((dict(call.data), call.context))
+
+        self.hass.services.async_register("media_player", "play_media", deliver)
+        self.script = Script(
+            self.hass,
+            cv.SCRIPT_SCHEMA(SEQUENCE),
+            "Plant status",
+            "script",
+            script_mode=SCRIPT_CONFIG.get("mode", "single"),
+            max_runs=SCRIPT_CONFIG.get("max", 10),
+            max_exceeded=SCRIPT_CONFIG.get("max_exceeded", "WARNING"),
         )
         self.reset_states()
 
@@ -72,11 +122,25 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
         current = self.hass.states.get(CARE)
         self.hass.states.async_set(CARE, state, {**current.attributes, **attributes})
 
-    async def report(self, variables=None) -> dict[str, Any]:
-        script = Script(self.hass, cv.SCRIPT_SCHEMA(SEQUENCE), "Plant status", "script")
-        result = await script.async_run(variables or {"speak": False}, Context())
+    async def report(
+        self, variables=None, context: Context | None = None
+    ) -> dict[str, Any]:
+        result = await self.script.async_run(
+            {"speak": False} if variables is None else variables, context or Context()
+        )
         self.assertIsNotNone(result)
         return result.service_response
+
+    def delivered_targets(self) -> list[tuple[str, ...]]:
+        targets = []
+        for data, _context in self.deliveries:
+            value = data.get("entity_id", [])
+            targets.append((value,) if isinstance(value, str) else tuple(value))
+        return targets
+
+    def assert_no_speech(self) -> None:
+        self.assertEqual(self.deliveries, [])
+        self.announce.assert_not_called()
 
     async def test_sensor_and_report_reject_the_same_invalid_data(self) -> None:
         now = datetime.now(UTC)
@@ -171,10 +235,99 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
             self.set_care("due", moisture=22, wet_risk="normal")
 
         self.refresh.side_effect = update
-        # A nonempty variables mapping leaves speak genuinely omitted.
-        report = await self.report({"test_context": True})
+        # Omit speak to exercise the real default, with an explicit requester.
+        report = await self.report({"reply_target": STATION_B})
         self.assertEqual(report["moisture"], 22)
         self.assertIn("Сухость подтверждена", report["message"])
-        self.announce.assert_awaited_once()
-        call = self.announce.call_args.args[0]
-        self.assertEqual(call.data, {"message": report["message"]})
+        self.assertEqual(self.delivered_targets(), [(STATION_B,)])
+        self.assertEqual(self.deliveries[0][0]["media_content_id"], report["message"])
+        self.announce.assert_not_called()
+
+    async def test_requested_station_receives_default_speech(self) -> None:
+        """A renamed requesting Station must never use the reminder speaker."""
+        for target in (STATION_A, STATION_B):
+            with self.subTest(target=target):
+                self.deliveries.clear()
+                context = Context(user_id="requesting-user")
+                report = await self.report({"reply_target": target}, context)
+                self.assertEqual(self.delivered_targets(), [(target,)])
+                data, delivered_context = self.deliveries[0]
+                self.assertEqual(data["media_content_type"], "text")
+                self.assertEqual(data["media_content_id"], report["message"])
+                self.assertIs(delivered_context, context)
+                self.announce.assert_not_called()
+
+    async def test_missing_or_invalid_requester_never_falls_back(self) -> None:
+        """Missing origins and lookalike entity names cannot select a speaker."""
+        cases = (
+            ("omitted", {}, "idle"),
+            ("empty", {"reply_target": ""}, "idle"),
+            ("null", {"reply_target": None}, "idle"),
+            ("absent entity", {"reply_target": "media_player.absent"}, "idle"),
+            ("wrong integration", {"reply_target": OTHER_PLAYER}, "idle"),
+            ("wrong domain", {"reply_target": NON_PLAYER}, "idle"),
+            ("unavailable", {"reply_target": STATION_B}, "unavailable"),
+            ("unknown", {"reply_target": STATION_B}, "unknown"),
+        )
+        for name, variables, state in cases:
+            with self.subTest(name=name):
+                self.hass.states.async_set(
+                    STATION_B, state, {"supported_features": 512}
+                )
+                self.deliveries.clear()
+                self.announce.reset_mock()
+                with self.assertRaises(HomeAssistantError):
+                    await self.report(variables)
+                self.assert_no_speech()
+
+    async def test_silent_report_requires_no_valid_speaker(self) -> None:
+        """Diagnostics return plant data even with no usable reply destination."""
+        for variables in (
+            {"speak": False},
+            {"speak": False, "reply_target": OTHER_PLAYER},
+        ):
+            with self.subTest(variables=variables):
+                report = await self.report(variables)
+                self.assertEqual(report["moisture"], 100.0)
+                self.assertIn("Показания долго высокие", report["message"])
+                self.assert_no_speech()
+
+    async def test_overlapping_requests_keep_their_own_station_and_context(
+        self,
+    ) -> None:
+        """A slow first refresh cannot overwrite or suppress another Station."""
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        first_context = Context(user_id="first-station-user")
+        second_context = Context(user_id="second-station-user")
+
+        async def refresh(call) -> None:
+            if call.context is first_context:
+                first_entered.set()
+                await release_first.wait()
+
+        self.refresh.side_effect = refresh
+        first = asyncio.create_task(
+            self.report({"reply_target": STATION_A}, first_context)
+        )
+        try:
+            await asyncio.wait_for(first_entered.wait(), timeout=TEST_TIMEOUT)
+            second_report = await asyncio.wait_for(
+                self.report({"reply_target": STATION_B}, second_context),
+                timeout=TEST_TIMEOUT,
+            )
+            self.assertEqual(self.delivered_targets(), [(STATION_B,)])
+            self.assertEqual(
+                self.deliveries[0][0]["media_content_id"], second_report["message"]
+            )
+            self.assertIs(self.deliveries[0][1], second_context)
+        finally:
+            release_first.set()
+            first_report = await asyncio.wait_for(first, timeout=TEST_TIMEOUT)
+
+        self.assertEqual(self.delivered_targets(), [(STATION_B,), (STATION_A,)])
+        self.assertEqual(
+            self.deliveries[1][0]["media_content_id"], first_report["message"]
+        )
+        self.assertIs(self.deliveries[1][1], first_context)
+        self.announce.assert_not_called()
