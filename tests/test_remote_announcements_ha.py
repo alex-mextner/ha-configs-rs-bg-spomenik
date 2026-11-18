@@ -670,6 +670,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "keys": [clip.key for clip in self.manager.cache.clips.values()],
         }
         self.aisis_native_levels = []
+        self.aisis_restore_ack_only = False
+        self.aisis_restore_requested = asyncio.Event()
 
         async def volume_set(call) -> None:
             self.calls.append((call.service, dict(call.data)))
@@ -677,6 +679,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             # Literal supported native levels, not an acknowledgement-only fake.
             level = {0.0: 0, 0.1: 1, 0.5: 5}[call.data["volume_level"]]
             self.aisis_native_levels.append(level)
+            if level == 0 and self.aisis_restore_ack_only:
+                self.aisis_restore_requested.set()
+                return
             state = self.hass.states.get(entity)
             self.hass.states.async_set(
                 entity, state.state, {**state.attributes, "volume_level": level / 10}
@@ -727,10 +732,46 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(self.manager.status, "sent_unconfirmed")
 
+    async def test_aisis_restore_ack_without_readback_is_unconfirmed(self) -> None:
+        entity = self.prepare_aisis_native_volume(0.0)
+        self.aisis_restore_ack_only = True
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.4),
+            patch.object(integration, "RECOVERY_RESERVE", 0.2),
+        ):
+            await asyncio.wait_for(self.manager.announce("tv"), 0.8)
+        self.assertEqual(self.aisis_native_levels, [5, 0])
+        self.assertEqual(self.hass.states.get(entity).attributes["volume_level"], 0.5)
+        self.assertEqual(self.manager.status, "recovery_unconfirmed")
+        self.assertLess(self.manager.public_status["controller_elapsed_ms"], 800)
+
+    async def test_aisis_restore_waits_for_delayed_native_readback(self) -> None:
+        entity = self.prepare_aisis_native_volume(0.0)
+        self.aisis_restore_ack_only = True
+
+        async def publish_readback() -> None:
+            await self.aisis_restore_requested.wait()
+            await asyncio.sleep(0.05)
+            state = self.hass.states.get(entity)
+            self.hass.states.async_set(
+                entity, state.state, {**state.attributes, "volume_level": 0.0}
+            )
+
+        readback = asyncio.create_task(publish_readback())
+        try:
+            await asyncio.wait_for(self.manager.announce("tv"), 0.8)
+            volume_at_return = self.hass.states.get(entity).attributes["volume_level"]
+            self.assertEqual(volume_at_return, 0.0)
+            self.assertEqual(self.manager.status, "sent_unconfirmed")
+            self.assertEqual(self.aisis_native_levels, [5, 0])
+        finally:
+            readback.cancel()
+            await asyncio.gather(readback, return_exceptions=True)
+
     async def test_aisis_reported_mute_remains_unsupported(self) -> None:
         self.prepare_aisis_native_volume(0.0, muted=True)
         with self.assertRaisesRegex(
-            ProviderNotReadyError, "aisis_cannot_restore_muted"
+            ProviderNotReadyError, "^aisis_cannot_restore_muted_or_invalid_volume$"
         ):
             await self.manager.announce("tv")
         self.assertEqual(self.calls, [])
@@ -738,7 +779,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_aisis_negative_volume_remains_rejected(self) -> None:
         self.prepare_aisis_native_volume(-0.1)
-        with self.assertRaises(ProviderNotReadyError):
+        with self.assertRaisesRegex(
+            ProviderNotReadyError, "^aisis_cannot_restore_muted_or_invalid_volume$"
+        ):
             await self.manager.announce("tv")
         self.assertEqual(self.calls, [])
         self.assertEqual(self.aisis_native_levels, [])

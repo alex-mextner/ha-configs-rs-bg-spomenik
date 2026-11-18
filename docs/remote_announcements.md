@@ -79,8 +79,11 @@ reports `aisis_cannot_restore_muted_or_invalid_volume`. No Alice fallback is use
 **Deployment order:** install the reviewed AISIS Quasar zero-volume overlay and
 verify the installed schema and actual native volume readback before deploying this
 HA guard change. Older Quasar can acknowledge a request while discarding level zero,
-so an HTTP/service acknowledgement is not restoration proof. The tests assert the
-published device volume, and intervening human volume changes still prevent restore.
+so an HTTP/service acknowledgement is not restoration proof. After the restore call,
+the controller waits for matching AISIS volume state within the existing recovery
+deadline; absent readback reports `recovery_unconfirmed`, without a retry or extra
+volume command. The tests assert published device volume, and intervening human
+volume changes still prevent restore.
 
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,

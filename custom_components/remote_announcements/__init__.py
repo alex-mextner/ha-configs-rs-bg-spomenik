@@ -130,13 +130,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 class SpeechPlayback:
     """State observed during one announcement, including temporary volume changes."""
 
-    def __init__(self, before: State, applied: float, *, pause: bool) -> None:
+    def __init__(
+        self, before: State, applied: float, *, pause: bool, verify_volume: bool
+    ) -> None:
         """Snapshot original music and volume with one controller deadline."""
         self.entity = before.entity_id
         self.old_volume = before.attributes.get("volume_level")
         self.muted_before = bool(before.attributes.get("is_volume_muted"))
         self.old_content = before.attributes.get("media_content_id")
         self.applied, self.pause = applied, pause
+        self.verify_volume = verify_volume
         self.paused, self.raised = False, False
         self.started = time.monotonic()
         self.budget = ATTEMPT_BUDGET
@@ -436,7 +439,9 @@ class Manager:
         if pause and not before.attributes.get("media_content_id"):
             message = "cannot_restore_unknown_music"
             raise ProviderNotReadyError(message)
-        return SpeechPlayback(before, applied, pause=pause)
+        return SpeechPlayback(
+            before, applied, pause=pause, verify_volume=backend == "aisis"
+        )
 
     async def prepare_playback(self, playback: SpeechPlayback) -> None:
         """Apply the optional pause and minimum speech volume."""
@@ -509,18 +514,56 @@ class Manager:
             )
         )
 
+    async def confirm_restored_volume(self, playback: SpeechPlayback) -> None:
+        """Require AISIS device readback within the existing recovery deadline."""
+        confirmed = asyncio.Event()
+
+        @callback
+        def observe(_event: Event[EventStateChangedData] | None = None) -> None:
+            state = self.hass.states.get(playback.entity)
+            if (
+                state
+                and state.state not in ("unknown", "unavailable")
+                and can_restore_volume(
+                    state.attributes.get("volume_level"),
+                    playback.old_volume,
+                    muted=state.attributes.get("is_volume_muted", False),
+                )
+            ):
+                confirmed.set()
+
+        unsubscribe = async_track_state_change_event(
+            self.hass, [playback.entity], observe
+        )
+        try:
+            observe()
+            if not confirmed.is_set():
+                await asyncio.wait_for(
+                    confirmed.wait(),
+                    max(0.0, playback.recovery_deadline - time.monotonic()),
+                )
+        except TimeoutError as error:
+            message = "aisis_volume_recovery_unconfirmed"
+            raise ProviderNotReadyError(message) from error
+        finally:
+            unsubscribe()
+
     async def restore_volume(self, playback: SpeechPlayback) -> None:
         """Restore volume and mute only while the original guards hold."""
         if not self.volume_unchanged(playback, playback.applied):
             return
         try:
-            await self.call(
+            sent = await self.call(
                 "volume_set",
                 playback.entity,
                 volume_level=playback.old_volume,
                 deadline=playback.recovery_deadline,
                 guard=lambda: self.volume_unchanged(playback, playback.applied),
             )
+            if not sent:
+                return
+            if playback.verify_volume:
+                await self.confirm_restored_volume(playback)
             # A human can change volume/mute while the restore service is awaited.
             # Check again immediately before restoring mute.
             restored = self.hass.states.get(playback.entity)
