@@ -2,7 +2,8 @@
   "domain": "plant_care_alerts",
   "name": "Plant Care Alerts",
   "after_dependencies": [
-    "adaptive_plant"
+    "adaptive_plant",
+    "recorder"
   ],
   "codeowners": [
     "@alex-mextner"
