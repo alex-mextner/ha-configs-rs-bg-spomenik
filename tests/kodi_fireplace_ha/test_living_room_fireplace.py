@@ -12,10 +12,11 @@ from typing import Any
 
 import yaml
 from homeassistant import loader
-from homeassistant.core import Context, HomeAssistant, SupportsResponse
+from homeassistant.core import Context, HomeAssistant, State, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import frame
+from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.script import Script, script_stack_cv
 from homeassistant.helpers.template import Template
 from homeassistant.helpers.trace import trace_clear, trace_get
@@ -67,6 +68,29 @@ def playback_attributes(request_id) -> dict[str, Any]:
         "title": TITLE,
         "progressing": True,
     }
+
+
+class ProjectorPublication(Entity):
+    """Fake only the device update; HA handles errors and state publication."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        current: State,
+        attributes: dict[str, Any],
+        *,
+        fail_update: bool,
+    ) -> None:
+        self.hass = hass
+        self.entity_id = PROJECTOR
+        self._attr_state = current.state
+        self._attr_extra_state_attributes = attributes
+        self.fail_update = fail_update
+
+    async def async_update(self) -> None:
+        if self.fail_update:
+            error_message = "Projector publication failed"
+            raise HomeAssistantError(error_message)
 
 
 class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
@@ -198,16 +222,20 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             )
         return {"status": self.rest_status, "content": response}
 
-    def refresh_projector(self) -> None:
-        """Publish the existing pair without changing power or inventing support."""
-        if self.projector_refresh_error:
-            error_message = "Projector publication failed"
-            raise HomeAssistantError(error_message)
+    async def refresh_projector(self) -> None:
+        """Exercise native HA refresh, including its swallowed device errors."""
         current = self.hass.states.get(PROJECTOR)
-        if self.projector_refresh_attributes is not None and current is not None:
-            self.hass.states.async_set(
-                PROJECTOR, current.state, self.projector_refresh_attributes
-            )
+        if current is None:
+            return
+        attributes = (
+            self.projector_refresh_attributes
+            if self.projector_refresh_attributes is not None
+            else dict(current.attributes)
+        )
+        entity = ProjectorPublication(
+            self.hass, current, attributes, fail_update=self.projector_refresh_error
+        )
+        await entity.async_update_ha_state(force_refresh=True)
         current = self.hass.states.get(PROJECTOR)
         self.projector_refresh_states.append(
             {
@@ -226,7 +254,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def refresh_readiness(self, call) -> None:
         if PROJECTOR in call.data.get("entity_id", []):
-            self.refresh_projector()
+            await self.refresh_projector()
         if READINESS not in call.data.get("entity_id", []):
             return
         # A separate HA readback must not inherit the REST response's verdict.
@@ -323,9 +351,14 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.ready = False
         self.power_release.clear()
+        cached = self.hass.states.get(PROJECTOR)
+        reported_before, updated_before = cached.last_reported, cached.last_updated
         operation = asyncio.create_task(self.launch())
         try:
             await asyncio.wait_for(self.power_entered.wait(), 0.5)
+            refreshed = self.hass.states.get(PROJECTOR)
+            self.assertEqual(refreshed.last_updated, updated_before)
+            self.assertGreater(refreshed.last_reported, reported_before)
             self.assertFalse(self.launches())
             self.power_release.set()
             await asyncio.wait_for(self.power_returned.wait(), 0.5)
@@ -386,10 +419,25 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.launches()), 1)
         self.assertIsInstance(self.current_request, str)
 
-    async def test_failed_projector_refresh_never_changes_power(self) -> None:
+    async def test_native_failed_refresh_rejects_valid_cached_pair_before_power(
+        self,
+    ) -> None:
+        cached = self.hass.states.get(PROJECTOR)
+        reported_before = cached.last_reported
+        self.assertEqual(cached.attributes["power_intent_revision"], "epoch:0")
         self.projector_refresh_error = True
-        with self.assertRaises(HomeAssistantError):
+        with self.assertLogs("homeassistant.helpers.entity", level="ERROR") as captured:
             await self.launch(None)
+        self.assertTrue(
+            any(
+                "Update for media_player.projector fails" in line
+                for line in captured.output
+            )
+        )
+        self.assert_aborted()
+        current = self.hass.states.get(PROJECTOR)
+        self.assertEqual(current.last_reported, reported_before)
+        self.assertEqual(current.attributes, cached.attributes)
         self.assertEqual(
             self.calls,
             [("homeassistant.update_entity", {"entity_id": [PROJECTOR]})],

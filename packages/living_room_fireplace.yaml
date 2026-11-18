@@ -53,13 +53,20 @@ script:
           # caller strings into numbers when rendering scalar templates.
           fireplace_request: >-
             {{ {'id': request_id | default(now().strftime('%Y%m%dT%H%M%S%f') ~ '-' ~ (range(100000) | random), true) | string} }}
+          # last_reported advances even when a successful refresh changes nothing.
+          projector_reported_before: >-
+            {% set projector = states.media_player.projector %}
+            {{ as_timestamp(projector.last_reported, 0) if projector is not none else 0 }}
       # Publish an existing pair after cold startup before testing its contract.
       # A refresh does not issue a power intent; unavailable pairs still fail below.
       - action: homeassistant.update_entity
         target:
           entity_id: media_player.projector
       - if: >-
-          {{ state_attr('media_player.projector', 'power_intent_revision') is none
+          {% set projector = states.media_player.projector %}
+          {{ projector is none
+             or as_timestamp(projector.last_reported, 0) <= (projector_reported_before | float(0))
+             or state_attr('media_player.projector', 'power_intent_revision') is none
              or states('binary_sensor.projector_hdmi_connected') in ['unknown', 'unavailable']
              or states('sensor.kodi_service_state') in ['unknown', 'unavailable'] }}
         then:
@@ -77,7 +84,9 @@ script:
                  and state_attr('media_player.projector', 'last_power_intent') is true
                  and state_attr('media_player.projector', 'power_sync_target') is none
                  and state_attr('media_player.projector', 'power_sync_error') is none) }}
-        timeout: "00:00:45"
+        # Measured cold startup took 70s under memory/I/O pressure. The
+        # prestart recovery itself is bounded at 55s; cancel still wins above.
+        timeout: "00:02:00"
         continue_on_timeout: true
       - if: >-
           {{ not wait.completed

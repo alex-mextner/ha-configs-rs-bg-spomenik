@@ -889,18 +889,80 @@ class RotatingFireplaceController:
         self._pending = None
         self._store()
 
-    def _finish_observation(self, proof: dict[str, Any]) -> dict[str, Any]:
+    def _observation_current(self, sequence: int) -> bool:
+        return sequence == self._intent_seq and not self._launch_admitted
+
+    def _observed_success(
+        self, value: dict[str, Any], sequence: int
+    ) -> dict[str, Any] | None:
+        identity = self._matched
+        if (
+            not self._observation_current(sequence)
+            or self._cancelled.is_set()
+            or self._closing.is_set()
+            or not value["owned"]
+            or value["state"] != "playing"
+            or not value["progressing"]
+            or identity is None
+            or not identity.get("attempt_id")
+        ):
+            return None
+        if identity is not self._pending and (
+            self._pending is not None or identity is not self._active
+        ):
+            return None
+        if self._failed_request and self.status()["request_id"] != identity.get(
+            "request_id"
+        ):
+            return None
+        return identity
+
+    def _recover_observed_success(
+        self, proof: dict[str, Any], sequence: int
+    ) -> dict[str, Any]:
+        value = self._proof(proof)
+        with self._cancel_lock:
+            identity = self._observed_success(value, sequence)
+            if identity is None:
+                return proof
+        if identity is self._active and not self._failed_request:
+            generation = json.loads(self._generation.read_text())
+            if generation.get("request_id") == identity["attempt_id"]:
+                return proof
+        previous = self._active, self._pending, self._last_source
+        promoted, committed = identity is self._pending, False
+        try:
+            if promoted:
+                self._promote()
+            # Admission stays responsive while durable storage and native reads run.
+            with self._cancel_lock:
+                if not self._observation_current(sequence) or self._cancelled.is_set():
+                    return proof
+            latest = self._owner.observe()
+            value = self._proof(latest)
+            with self._cancel_lock:
+                confirmed = self._observed_success(value, sequence)
+                if (
+                    confirmed is not None
+                    and confirmed.get("attempt_id") == identity["attempt_id"]
+                ):
+                    self._write_generation(identity["attempt_id"])
+                    self._failed_request = False
+                    self._publish(value)
+                    committed = True
+            return latest
+        finally:
+            if promoted and not committed:
+                self._active, self._pending, self._last_source = previous
+                self._store()
+
+    def _finish_observation(
+        self, proof: dict[str, Any], sequence: int
+    ) -> dict[str, Any]:
         if not self._settlement_still_current(proof):
             return self._unresolved_opening()
+        proof = self._recover_observed_success(proof, sequence)
         value = self._proof(proof)
-        if (
-            not self._cancelled.is_set()
-            and self._pending is not None
-            and self._matched is self._pending
-            and value["state"] == "playing"
-            and value["progressing"]
-        ):
-            self._promote()
         if (
             not proof["owned"]
             and proof["state"] != "unknown"
@@ -909,6 +971,8 @@ class RotatingFireplaceController:
             self._active = self._pending = None
             self._store()
         with self._cancel_lock:
+            if not self._observation_current(sequence):
+                return self.status()
             if (self._failed_request or self._cancelled.is_set()) and value["owned"]:
                 previous = self.status()
                 previous.update(owned=True, progressing=False)
@@ -979,6 +1043,8 @@ class RotatingFireplaceController:
         if self._load_error or not self._lock.acquire(blocking=False):
             return self.status()
         try:
+            with self._cancel_lock:
+                sequence = self._intent_seq
             self._recover_prepared()
             proof = (
                 self._owner.stop()
@@ -989,7 +1055,7 @@ class RotatingFireplaceController:
                 return self._unresolved_opening()
             if self._cleanup_identity() is not None and not proof["owned"]:
                 proof = self._owner.observe()
-            return self._finish_observation(proof)
+            return self._finish_observation(proof, sequence)
         # Contain every callback failure as bounded, non-secret evidence.
         except Exception:  # noqa: BLE001
             value = self.status()
