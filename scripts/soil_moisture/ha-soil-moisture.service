@@ -1,0 +1,26 @@
+[Unit]
+Description=ODROID N2+ soil probe ADC bridge for Home Assistant
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/ha-soil-moisture
+ExecStart=/usr/bin/python3 /opt/ha-soil-moisture/soil_bridge.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+DevicePolicy=closed
+DeviceAllow=/dev/gpiochip0 rw
+
+[Install]
+WantedBy=multi-user.target

@@ -155,9 +155,18 @@ class ReviewRegressionTests(unittest.TestCase):
         state = self.sequence(22500)
         state["source_identity"] = "sensor.old"
         state = self.step(state, value=90, offset=22800, source_identity="sensor.new")
+        self.assertEqual(state["status"], "sensor_error")
+        self.assertIsNone(state["due_since"])
+        self.assertIsNone(state["moisture"])
+        # The replacement must establish its own changing physical observations.
+        for offset, value in ((23100, 89), (23400, 88), (23700, 87)):
+            state = self.step(
+                state, value=value, offset=offset, source_identity="sensor.new"
+            )
         self.assertEqual(state["status"], "ok")
         self.assertIsNone(state["due_since"])
-        self.assertEqual(state["moisture"], 90)
+        self.assertEqual(state["moisture"], 87)
+        self.assertTrue(state["reliability_valid"])
 
     def test_snooze_gives_new_orange_period_not_immediate_red(self) -> None:
         state = self.sequence(22500)

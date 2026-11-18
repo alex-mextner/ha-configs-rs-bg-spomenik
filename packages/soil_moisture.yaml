@@ -1,0 +1,233 @@
+# Native HA REST + Template + Helpers; no custom integration or sidebar entry.
+# Bridge: /opt/ha-soil-moisture/soil_bridge.py on the ODROID N2+ host.
+# Physical wiring: pin 22 -> 10k -> probe; probe -> pin 37 ADC and 10k -> pin 39 GND.
+
+rest:
+  - resource: "http://127.0.0.1:8768/reading"
+    scan_interval: 300
+    timeout: 4
+    sensor:
+      - name: "Strelitzia Soil ADC"
+        unique_id: strelitzia_soil_n2_adc
+        icon: mdi:flower
+        availability: >-
+          {{ value_json is defined and value_json.adc_raw is defined
+             and is_number(value_json.adc_raw) }}
+        value_template: "{{ value_json.adc_raw | int(0) }}"
+        state_class: measurement
+        json_attributes:
+          - voltage_v
+          - soil_resistance_ohm
+          - sampled_at
+          - physical_pin
+          - samples
+
+# A direct REST action returns a fresh reading synchronously. HA's REST sensor
+# update_entity can be debounced, so it is unsuitable as a calibration trigger.
+rest_command:
+  strelitzia_soil_measure:
+    url: "http://127.0.0.1:8768/reading"
+    method: get
+    timeout: 4
+
+  # Waits up to 15 seconds if a scheduled REST poll just sampled the probe;
+  # this always obtains a new physical sample before saving calibration.
+  strelitzia_soil_measure_fresh:
+    url: "http://127.0.0.1:8768/reading/fresh"
+    method: get
+    timeout: 25
+
+# Two writable calibration settings appear in Settings -> Devices & services -> Helpers.
+# No 'initial': HA restores manual calibration settings across restarts.
+input_number:
+  strelitzia_soil_dry_adc:
+    name: "Стрелиция: сухая почва — ADC (0%)"
+    icon: mdi:water-off
+    min: 0
+    max: 4095
+    step: 1
+    mode: box
+
+  strelitzia_soil_wet_adc:
+    name: "Стрелиция: политая почва — ADC (100%)"
+    icon: mdi:water
+    min: 0
+    max: 4095
+    step: 1
+    mode: box
+
+# A valid dry value may itself be zero, so the numeric helpers alone do not
+# distinguish the unset default from an intentional calibration value.
+input_boolean:
+  strelitzia_soil_dry_calibrated:
+    name: "Стрелиция: сухая точка откалибрована"
+    icon: mdi:check-circle-outline
+
+template:
+  - sensor:
+      - name: "Strelitzia Soil Moisture Index"
+        unique_id: strelitzia_soil_moisture_index
+        icon: mdi:water-percent
+        unit_of_measurement: "%"
+        state_class: measurement
+        availability: >-
+          {% set dry = states('input_number.strelitzia_soil_dry_adc') %}
+          {% set wet = states('input_number.strelitzia_soil_wet_adc') %}
+          {{ is_state('input_boolean.strelitzia_soil_dry_calibrated', 'on')
+             and is_number(states('sensor.strelitzia_soil_adc'))
+             and is_number(dry) and is_number(wet)
+             and wet | float > dry | float }}
+        state: >-
+          {% set raw = states('sensor.strelitzia_soil_adc') | float(none) %}
+          {% set dry = states('input_number.strelitzia_soil_dry_adc') | float(none) %}
+          {% set wet = states('input_number.strelitzia_soil_wet_adc') | float(none) %}
+          {% if is_number(raw) and is_number(dry) and is_number(wet) and wet > dry %}
+            {% set pct = 100 * (raw - dry) / (wet - dry) %}
+            {{ ([0, [pct, 100] | min] | max) | round(1) }}
+          {% else %}
+            {{ none }}
+          {% endif %}
+        attributes:
+          meaning: "Relative index between two substrate calibration points, not volumetric water %."
+          dry_adc: "{{ states('input_number.strelitzia_soil_dry_adc') }}"
+          wet_adc: "{{ states('input_number.strelitzia_soil_wet_adc') }}"
+
+      - name: "Strelitzia Soil Resistance"
+        unique_id: strelitzia_soil_resistance_ohm
+        icon: mdi:resistor
+        unit_of_measurement: "Ω"
+        state_class: measurement
+        availability: >-
+          {{ is_number(states('sensor.strelitzia_soil_adc'))
+             and is_number(state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm')) }}
+        state: >-
+          {{ state_attr('sensor.strelitzia_soil_adc', 'soil_resistance_ohm') | int(0) }}
+
+# These two scripts are buttons in Settings -> Automations & scenes -> Scripts.
+# They take a fresh reading directly (not a potentially cached REST sensor state).
+script:
+  strelitzia_soil_capture_dry:
+    alias: "Стрелиция: запомнить сухую точку (0%)"
+    description: "Когда пора поливать: получить свежий ADC и сохранить его как 0%."
+    mode: single
+    sequence:
+      - action: rest_command.strelitzia_soil_measure_fresh
+        response_variable: soil_sample
+      - if:
+          - condition: template
+            value_template: >-
+              {{ soil_sample.status != 200 or
+                 not is_number(soil_sample.content.adc_raw) }}
+        then:
+          - stop: "Нет свежих показаний датчика"
+            error: true
+      - if:
+          - condition: template
+            value_template: >-
+              {{ (states('input_number.strelitzia_soil_wet_adc') | float(0)) > 0
+                 and (soil_sample.content.adc_raw | float(0)) >=
+                     (states('input_number.strelitzia_soil_wet_adc') | float(0)) }}
+        then:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.strelitzia_soil_wet_adc
+            data:
+              value: 0
+          - action: persistent_notification.create
+            data:
+              title: "Калибровка стрелиции: мокрая точка сброшена"
+              message: "Новая сухая точка выше прежней мокрой: сухое значение сохранено, повтори мокрую калибровку после полива."
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.strelitzia_soil_dry_adc
+        data:
+          value: "{{ soil_sample.content.adc_raw | int }}"
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.strelitzia_soil_dry_calibrated
+      # Reflect the new calibration sample in the dashboard rather than waiting
+      # up to five minutes for the REST sensor's scheduled poll.
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.strelitzia_soil_adc
+      - wait_template: >-
+          {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+             as_timestamp(soil_sample.content.sampled_at, 0) }}
+        timeout: "00:00:10"
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          - action: homeassistant.update_entity
+            target:
+              entity_id: sensor.strelitzia_soil_adc
+          - wait_template: >-
+              {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+                 as_timestamp(soil_sample.content.sampled_at, 0) }}
+            timeout: "00:00:10"
+            continue_on_timeout: true
+
+  strelitzia_soil_capture_wet:
+    alias: "Стрелиция: запомнить политую точку (100%)"
+    description: "Через 20–40 минут после полива возле щупа: сохранить ADC как 100%."
+    mode: single
+    sequence:
+      - action: rest_command.strelitzia_soil_measure_fresh
+        response_variable: soil_sample
+      - if:
+          - condition: template
+            value_template: >-
+              {{ soil_sample.status != 200 or
+                 not is_number(soil_sample.content.adc_raw) }}
+        then:
+          - stop: "Нет свежих показаний датчика"
+            error: true
+      - if:
+          - condition: template
+            value_template: >-
+              {{ not is_state('input_boolean.strelitzia_soil_dry_calibrated', 'on') }}
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "Калибровка стрелиции не сохранена"
+              message: "Сначала запиши сухую точку (0%)."
+          - stop: "Сначала нужна сухая точка"
+            error: true
+      - if:
+          - condition: template
+            value_template: >-
+              {{ (soil_sample.content.adc_raw | float(0)) <=
+                 (states('input_number.strelitzia_soil_dry_adc') | float(0)) }}
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "Калибровка стрелиции не сохранена"
+              message: "Мокрая точка не выше сухой. Дождись, когда вода дойдёт до датчика."
+          - stop: "Мокрый ADC должен быть выше сухого"
+            error: true
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.strelitzia_soil_wet_adc
+        data:
+          value: "{{ soil_sample.content.adc_raw | int }}"
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.strelitzia_soil_adc
+      - wait_template: >-
+          {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+             as_timestamp(soil_sample.content.sampled_at, 0) }}
+        timeout: "00:00:10"
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          - action: homeassistant.update_entity
+            target:
+              entity_id: sensor.strelitzia_soil_adc
+          - wait_template: >-
+              {{ as_timestamp(state_attr('sensor.strelitzia_soil_adc', 'sampled_at'), 0) >=
+                 as_timestamp(soil_sample.content.sampled_at, 0) }}
+            timeout: "00:00:10"
+            continue_on_timeout: true
