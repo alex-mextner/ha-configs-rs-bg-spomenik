@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,13 +15,15 @@ from unittest.mock import AsyncMock
 
 import yaml
 from homeassistant import loader
+from homeassistant.components import automation, trace
+from homeassistant.components.automation import config as automation_config
 from homeassistant.config_entries import ConfigEntries
-from homeassistant.core import Context, HomeAssistant
+from homeassistant.core import Context, CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers import frame
+from homeassistant.helpers import frame, restore_state
 from homeassistant.helpers.entity import entity_sources
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.template import Template
@@ -90,7 +93,7 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
             "script",
             script_mode=SCRIPT_CONFIG.get("mode", "single"),
             max_runs=SCRIPT_CONFIG.get("max", 10),
-            max_exceeded=SCRIPT_CONFIG.get("max_exceeded", "WARNING"),
+            max_exceeded=SCRIPT_CONFIG.get("max_exceeded", "WARNING").upper(),
         )
         self.reset_states()
 
@@ -330,4 +333,58 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
             self.deliveries[1][0]["media_content_id"], first_report["message"]
         )
         self.assertIs(self.deliveries[1][1], first_context)
+        self.announce.assert_not_called()
+
+    async def test_station_event_marker_filters_commands_and_tts_echoes(self) -> None:
+        """Only the dedicated request event may invoke the plant report."""
+        self.hass.config.skip_pip = True
+        await restore_state.async_load(self.hass, load_empty=True)
+        self.assertTrue(await trace.async_setup(self.hass, {}))
+        requests: list[dict[str, Any]] = []
+        reports: list[dict[str, Any]] = []
+
+        async def run_report(call) -> None:
+            requests.append(dict(call.data))
+            reports.append(await self.report(dict(call.data), call.context))
+
+        self.hass.services.async_register("script", "plant_care_status", run_report)
+        config = await automation_config.async_validate_config(
+            self.hass, {"automation": deepcopy(PACKAGE.get("automation", []))}
+        )
+        # Load HA's real automation engine without an unrelated HTTP listener.
+        self.hass.state = CoreState.running
+        self.assertTrue(await automation.async_setup(self.hass, config))
+        await self.hass.async_block_till_done()
+
+        async def emit(instance: str, value: str) -> None:
+            self.hass.bus.async_fire(
+                "yandex_speaker",
+                {
+                    "entity_id": STATION_B,
+                    "instance": instance,
+                    "value": value,
+                },
+                context=Context(),
+            )
+            await self.hass.async_block_till_done()
+
+        marker = "ничего не делай...,,::..,,..."
+        await emit("text_action", marker)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["reply_target"], STATION_B)
+        self.assertTrue(requests[0]["speak"])
+        self.assertEqual(self.delivered_targets(), [(STATION_B,)])
+        self.assertEqual(
+            self.deliveries[0][0]["media_content_id"], reports[0]["message"]
+        )
+
+        for instance, value in (
+            ("text_action", "включи свет"),
+            ("tts", marker),
+            ("text_action", reports[0]["message"]),
+        ):
+            with self.subTest(instance=instance, value=value):
+                await emit(instance, value)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(self.delivered_targets(), [(STATION_B,)])
         self.announce.assert_not_called()
