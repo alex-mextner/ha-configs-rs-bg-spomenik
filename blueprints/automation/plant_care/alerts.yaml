@@ -141,7 +141,7 @@ actions:
                         data:
                           entity_id: "{{ change_entity }}"
                           status: "{{ change_status }}"
-              - conditions: "{{ change_status in ['ok','snoozed','checking'] }}"
+              - conditions: "{{ change_status in ['ok','snoozed','checking','calibrating'] }}"
                 sequence:
                   - action: persistent_notification.dismiss
                     data:

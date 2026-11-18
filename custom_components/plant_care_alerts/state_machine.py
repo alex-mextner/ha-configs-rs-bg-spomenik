@@ -186,6 +186,10 @@ def _sensor_reading(
     s["untrusted_moisture"] = finite(reading.get("moisture"))
     if not quality["reliability_valid"]:
         _mark_invalid(s, reading, now, cfg)
+        if quality.get("reliability_reason") == "calibrating":
+            s.update(
+                status="calibrating", samples=[], reliability_pending_confirmation=True
+            )
         return False
     _restore_samples(s, now, quality, previous)
     if not _append_sample(s, reading, now, cfg):

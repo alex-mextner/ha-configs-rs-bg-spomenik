@@ -26,10 +26,36 @@ const allowedAttributes = new Set([
   'reliability_incident_reason', 'dry_threshold', 'confirmation_hours',
   'last_watering_at', 'last_watering_source', 'forecast_status', 'forecast_due_at',
   'voice_next_at', 'voice_unavailable_reason', 'voice_target_name',
-  'wet_risk', 'wet_since', 'snoozed_until', 'due_since'
+  'wet_risk', 'wet_since', 'snoozed_until', 'due_since',
+  'calibration_enabled', 'calibration_status', 'calibration_revision',
+  'calibration_baseline_dry', 'calibration_baseline_wet', 'calibration_dry_adc',
+  'calibration_wet_adc', 'calibration_source_fingerprint', 'calibration_last_change_at',
+  'calibration_observations', 'calibration_references', 'calibration_history',
+  'calibration_history_available'
 ]);
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+function verifyCalibrationPayload(attributes) {
+  if (!Object.hasOwn(attributes, 'calibration_enabled')) return;
+  assert.equal(typeof attributes.calibration_enabled, 'boolean');
+  assert.equal(typeof attributes.calibration_status, 'string');
+  assert.equal(typeof attributes.calibration_history_available, 'boolean');
+  const history = attributes.calibration_history;
+  assert.ok(Array.isArray(history) && history.length <= 1000);
+  const eventFields = new Set([
+    'event_id', 'at', 'detected_at', 'kind', 'old_dry', 'old_wet',
+    'new_dry', 'new_wet', 'reason', 'revision'
+  ]);
+  for (const event of history) {
+    assert.ok(event && typeof event === 'object' && !Array.isArray(event));
+    for (const key of Object.keys(event)) assert.ok(eventFields.has(key), 'Unexpected calibration history field: ' + key);
+    assert.ok(typeof event.event_id === 'string' && event.event_id.length > 0);
+    assert.ok([event.old_dry, event.old_wet, event.new_dry, event.new_wet].every(Number.isFinite));
+    assert.ok(['automatic', 'rollback', 'manual', 'external_discovered'].includes(event.kind));
+    assert.ok(event.at === null || Number.isFinite(event.at));
+    assert.ok(Number.isFinite(event.detected_at));
+  }
 }
 function readSnapshot(filename) {
   const original = fs.readFileSync(filename);
@@ -48,6 +74,7 @@ function readSnapshot(filename) {
     assert.ok(allowedAttributes.has(key), 'Snapshot has an unexpected attribute: ' + key);
     attributes[key] = value;
   }
+  verifyCalibrationPayload(attributes);
   return {data: {...data, plant: {...data.plant, attributes}}, hash: sha256(original)};
 }
 function historyEntry(snapshot) {
@@ -105,6 +132,30 @@ async function verifyFault(page, snapshot) {
   assert.equal(await page.locator('plant-care-card .moisture').innerText(), '—');
   assert.match(await page.locator('plant-care-card .notice').innerText(), /Полив по этим данным не определяется/);
 }
+async function verifyCalibrationView(page, snapshot) {
+  const attributes = snapshot.plant.attributes;
+  if (typeof attributes.calibration_enabled !== 'boolean') return false;
+  assert.ok(await page.locator('plant-care-card .calibration-status').isVisible());
+  await page.locator('plant-care-card .calibration-details summary').click();
+  assert.ok(await page.locator('plant-care-card .calibration-details').evaluate(details => details.open));
+  await page.evaluate(() => {
+    const card = document.querySelector('plant-care-card');
+    card.hass = card._hass;
+  });
+  assert.ok(await page.locator('plant-care-card .calibration-details').evaluate(details => details.open), 'An ordinary HA update closed the calibration history');
+  assert.ok(await page.locator('plant-care-card .calibration-scale').isVisible());
+  if (!attributes.calibration_history_available) {
+    assert.equal(await page.locator('plant-care-card .calibration-event').count(), 0);
+    assert.equal(await page.locator('plant-care-card .calibration-unavailable').innerText(), 'История калибровки временно недоступна');
+    assert.equal(await page.locator('plant-care-card .calibration-empty').count(), 0);
+    return true;
+  }
+  assert.equal(await page.locator('plant-care-card .calibration-event').count(), attributes.calibration_history.length);
+  if (!attributes.calibration_history.length) {
+    assert.equal(await page.locator('plant-care-card .calibration-empty').innerText(), 'Записанных изменений калибровки пока нет');
+  }
+  return true;
+}
 async function renderViews(browser, snapshot, cardPath, cardHash, output) {
   const screenshots = [];
   for (const viewport of [{name: 'desktop', width: 900}, {name: 'mobile', width: 390}]) {
@@ -113,9 +164,11 @@ async function renderViews(browser, snapshot, cardPath, cardHash, output) {
     try {
       await mount(page, snapshot, cardPath, cardHash);
       await verifyFault(page, snapshot);
+      const calibrationDetailsOpened = await verifyCalibrationView(page, snapshot);
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Component has horizontal overflow');
       const file = viewport.name + '.png';
       await page.screenshot({path: path.join(output, file), fullPage: true});
-      screenshots.push({file, sha256: sha256(fs.readFileSync(path.join(output, file)))});
+      screenshots.push({file, sha256: sha256(fs.readFileSync(path.join(output, file))), calibration_details_opened: calibrationDetailsOpened, calibration_details_preserved_after_update: calibrationDetailsOpened});
       log('Captured ' + viewport.name + ' component preview');
     } finally {
       await page.close();
@@ -123,14 +176,37 @@ async function renderViews(browser, snapshot, cardPath, cardHash, output) {
   }
   return screenshots;
 }
+function cardSource(revision, output) {
+  const relativePath = 'www/plant-care/plant-care-card.js';
+  if (!revision) {
+    return {
+      path: path.resolve(relativePath),
+      commit: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim()
+    };
+  }
+  assert.match(revision, /^[0-9a-f]{40}$/, 'Historical card source requires an immutable commit');
+  const commit = execFileSync('git', ['rev-parse', '--verify', revision + '^{commit}'], {encoding: 'utf8'}).trim();
+  const content = execFileSync('git', ['show', commit + ':' + relativePath]);
+  const filename = path.join(output, 'rendered-card.js');
+  fs.writeFileSync(filename, content, {mode: 0o600});
+  return {path: filename, commit};
+}
 async function main() {
-  const {values} = parseArgs({options: {snapshot: {type: 'string'}, output: {type: 'string'}}});
+  const {values} = parseArgs({options: {
+    snapshot: {type: 'string'}, output: {type: 'string'},
+    'card-revision': {type: 'string'}, 'expected-card-sha': {type: 'string'}
+  }});
   assert.ok(values.snapshot && values.output, '--snapshot and --output are required');
   const {data: snapshot, hash: snapshotHash} = readSnapshot(values.snapshot);
   const output = path.resolve(values.output);
   fs.mkdirSync(output, {recursive: true});
-  const cardPath = path.resolve('www/plant-care/plant-care-card.js');
+  const source = cardSource(values['card-revision'], output);
+  const cardPath = source.path;
   const cardHash = sha256(fs.readFileSync(cardPath));
+  if (values['expected-card-sha']) {
+    assert.match(values['expected-card-sha'], /^[0-9a-f]{64}$/);
+    assert.equal(cardHash, values['expected-card-sha'], 'Card bytes differ from the captured baseline');
+  }
   log('Rendering actual component ' + cardHash + ' from capture ' + snapshot.observed_at);
   const {chromium} = require('playwright');
   const browser = await chromium.launch({headless: true, timeout: 30000});
@@ -146,6 +222,7 @@ async function main() {
       rendered_at: new Date().toISOString(),
       snapshot_sha256: snapshotHash,
       card_sha256: cardHash,
+      card_git_commit: source.commit,
       git_commit: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(),
       plant_entity: snapshot.plant.entity_id,
       plant_state: snapshot.plant.state,

@@ -2,9 +2,55 @@
 // Companion view: Adaptive Plant owns its settings; Recorder owns the measurements.
 (() => {
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const words = {ok:'Показания влажности',checking:'Проверяю сухость',due:'Пора проверить грунт',overdue:'Полив просрочен',snoozed:'Напоминания на паузе',sensor_error:'Недостоверные показания'};
+  const words = {ok:'Показания влажности',calibrating:'Проверяю шкалу датчика',checking:'Проверяю сухость',due:'Пора проверить грунт',overdue:'Полив просрочен',snoozed:'Напоминания на паузе',sensor_error:'Недостоверные показания'};
   const reliabilityWords = {starting:'Запуск датчика: ожидаю первое измерение.',lower_saturation:'Индекс остаётся на нижней границе 0% более 12 часов. Степень сухости по нему не определить.',history_unavailable:'История измерений пока недоступна. Проверяю достоверность показаний.',saturated:'Индекс остаётся на 100% более 12 часов: по нему нельзя оценить влажность грунта.',unchanged:'Показания не меняются более 12 часов.',raw_unchanged:'Исходные измерения датчика не меняются более 12 часов.',stale:'Датчик не передаёт свежих измерений.',invalid_sample:'Датчик передал недопустимые данные или время измерения.',recovering:'Получены новые измерения. Проверяю устойчивое восстановление.'};
   const forecastWords = {invalid_readings:'Недостоверные показания: прогноз отключён',insufficient_data:'Недостаточно данных для оценки',saturated:'Индекс насыщен: оценить высыхание нельзя',unstable:'Показания нестабильны: оценка недоступна',stale:'Нет свежих данных для оценки',no_drying_trend:'Устойчивого высыхания пока не видно'};
+  const calibrationWords = {
+    awaiting_reference:'наблюдение — нужен независимый эталон',
+    awaiting_source:'наблюдение — ожидаю данные датчика и настройки',
+    witness_unavailable:'приостановлена — контрольная история недоступна',
+    concurrent_change:'наблюдение — настройка изменилась во время проверки',
+    effect_unconfirmed:'наблюдение — результат записи пока не подтверждён',
+    context_unavailable:'приостановлена — условия записи не подтверждены',
+    unsupported_runtime:'приостановлена — способ записи ещё не проверен',
+    service_conflict:'приостановлена — запись настройки сейчас недоступна',
+    evidence_limit:'наблюдение — слишком много данных для проверки',
+    awaiting_cycles:'наблюдение — собираю подтверждённые опорные циклы',
+    insufficient_span:'наблюдение — истории опорных циклов пока мало',
+    awaiting_holdout:'наблюдение — ожидаю отдельное контрольное окно',
+    cooldown:'наблюдение — перерыв между изменениями шкалы',
+    deadband:'наблюдение — подтверждённое отклонение слишком мало',
+    helper_resolution:'наблюдение — изменение меньше выбранного шага записи',
+    applying:'Сохраняю изменение шкалы',
+    applied:'изменение шкалы сохранено',
+    rolled_back:'предыдущая шкала восстановлена',
+    storage_unavailable:'наблюдение — журнал временно недоступен',
+    source_changed:'наблюдение — источник измерений изменился',
+    dry_changed:'наблюдение — сухая опорная точка изменена',
+    manual_override:'наблюдение — шкала изменена извне',
+    outside_baseline_envelope:'наблюдение — изменение выходит за допустимый предел',
+    target_out_of_bounds:'наблюдение — изменение выходит за допустимый предел',
+    unreliable_sample:'наблюдение — показания пока недостоверны',
+    stale_sample:'наблюдение — ожидаю свежие измерения',
+    poor_reference_quality:'наблюдение — опорные измерения недостаточно устойчивы',
+    holdout_failed:'наблюдение — контрольное окно не подтвердило улучшение',
+    invalid_reference:'наблюдение — независимый эталон не подтверждён',
+  };
+  const calibrationEventWords = {
+    automatic:'Автоматическая калибровка',
+    rollback:'Откат к предыдущей шкале',
+    manual:'Изменение настройки',
+    external_discovered:'Обнаружено внешнее изменение',
+  };
+  const calibrationReasonWords = {
+    qualified_drift:'Независимые опорные измерения подтвердили улучшение.',
+    contradiction:'На последующем независимом измерении прежняя шкала дала меньшую ошибку.',
+    pending_effect_reconciled:'Проверено после перезапуска; время и автор изменения неизвестны.',
+  };
+  const adcLabel = value => typeof value === 'number' && Number.isFinite(value)
+    ? new Intl.NumberFormat('ru-RU', {maximumFractionDigits:6}).format(value) : '—';
+  const validEpoch = value => typeof value === 'number' && value > 0
+    && Number.isFinite(value) && Number.isFinite(new Date(value * 1000).getTime());
   const dateLabel = value => {
     if (value == null || value === '') return null;
     const dateOnly = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -33,7 +79,7 @@
   const number = value => value === null || value === undefined || (typeof value === 'string' && !value.trim()) ? null : Number.isFinite(Number(value)) ? Number(value) : null;
 
   class PlantCareCard extends HTMLElement {
-    constructor() { super(); this.attachShadow({mode:'open'}); this._config = {}; this._history = {}; this._days = 7; this._pending = new Set(); }
+    constructor() { super(); this.attachShadow({mode:'open'}); this._config = {}; this._history = {}; this._days = 7; this._pending = new Set(); this._calibrationOpen = new Set(); }
     setConfig(config) { this._config = config || {}; this._render(); }
     static getStubConfig() { return {type:'custom:plant-care-card'}; }
     getCardSize() { return 6; }
@@ -106,12 +152,13 @@
     _plantReading(a, status) {
       const fresh = this._hass.states[a.freshness_entity];
       const stamp = a.last_sample_at ?? fresh?.attributes?.sampled_at;
-      const moisture = status === 'sensor_error' || a.reliability_valid === false ? null : number(a.moisture);
+      const moisture = ['sensor_error','calibrating'].includes(status) || a.reliability_valid === false ? null : number(a.moisture);
       const changed = a.last_value_change_at
         ? `<br>Значение не менялось с ${esc(dateLabel(a.last_value_change_at))}` : '';
       return `<div><h3 class="name">${esc(a.plant_name)}</h3><div class="status">${esc(this._statusLabel(a, status))}</div><div class="moisture">${moisture === null ? '—' : `${esc(Math.round(moisture))}<small> %</small>`}</div><div class="caption">Относительный индекс · замер: ${esc(ageLabel(stamp))}${changed}</div></div>`;
     }
     _plantNotice(a, status) {
+      if (status === 'calibrating') return 'Проверяю новые измерения после изменения шкалы.';
       if (status === 'sensor_error') {
         return esc(reliabilityWords[a.reliability_reason] || 'Показания датчика недостоверны.')
           + ' Полив по этим данным не определяется. Проверь грунт вручную.';
@@ -145,6 +192,38 @@
         prolonged:`Влажность длительно высокая${since ? ` с ${since}` : ''}`
       }[a.wet_risk] || 'Высокая влажность: недостаточно данных';
     }
+    _calibrationEvents(a) {
+      if (a.calibration_history_available !== true || !Array.isArray(a.calibration_history)) return [];
+      return a.calibration_history.filter(event => event
+        && typeof event.event_id === 'string' && event.event_id
+        && ['automatic','rollback','manual','external_discovered'].includes(event.kind)
+        && [event.old_dry,event.old_wet,event.new_dry,event.new_wet].every(value => typeof value === 'number' && Number.isFinite(value))
+        && (event.at === null ? validEpoch(event.detected_at) : validEpoch(event.at)))
+        .slice().sort((a,b) => (b.at ?? b.detected_at) - (a.at ?? a.detected_at));
+    }
+    _calibrationEvent(event) {
+      const discovered = event.at === null;
+      const stamp = discovered ? event.detected_at : event.at;
+      const title = discovered ? 'Обнаружено внешнее изменение' : calibrationEventWords[event.kind];
+      const reason = calibrationReasonWords[event.reason];
+      const before = `${adcLabel(event.old_dry)} / ${adcLabel(event.old_wet)}`;
+      const after = `${adcLabel(event.new_dry)} / ${adcLabel(event.new_wet)}`;
+      return `<li class="calibration-event"><div>${esc(title)} · <time data-time-kind="${discovered ? 'detected' : 'changed'}" datetime="${esc(new Date(stamp * 1000).toISOString())}">${esc(dateLabel(stamp))}</time></div><div class="calibration-values">${esc(before)} → ${esc(after)} ADC</div>${reason ? `<div class="calibration-reason">${esc(reason)}</div>` : ''}${discovered ? '<div class="calibration-note">Время изменения неизвестно</div>' : ''}</li>`;
+    }
+    _calibration(a, entityId) {
+      if (typeof a.calibration_enabled !== 'boolean') return '';
+      const label = a.calibration_enabled
+        ? calibrationWords[a.calibration_status] || 'наблюдение' : 'отключена';
+      const events = this._calibrationEvents(a);
+      const current = `${adcLabel(a.calibration_dry_adc)} / ${adcLabel(a.calibration_wet_adc)}`;
+      const baseline = `${adcLabel(a.calibration_baseline_dry)} / ${adcLabel(a.calibration_baseline_wet)}`;
+      const journal = a.calibration_history_available !== true || !Array.isArray(a.calibration_history)
+        ? '<div class="calibration-unavailable">История калибровки временно недоступна</div>'
+        : events.length
+          ? `<ol class="calibration-history">${events.map(event => this._calibrationEvent(event)).join('')}</ol>`
+          : '<div class="calibration-empty">Записанных изменений калибровки пока нет</div>';
+      return `<div class="calibration" role="group" aria-label="Автокалибровка"><div class="calibration-status">Автокалибровка: ${esc(label)}</div><details class="calibration-details" data-entity="${esc(entityId)}"${this._calibrationOpen.has(entityId) ? ' open' : ''}><summary>Шкала и история изменений</summary><div class="calibration-scale">Шкала, сухая / влажная: ${esc(current)} ADC<br>Исходная шкала: ${esc(baseline)} ADC</div>${journal}</details></div>`;
+    }
     _plantFacts(a, status) {
       const snoozed = dateLabel(a.snoozed_until);
       const priorDry = status === 'sensor_error' && a.due_since
@@ -157,14 +236,24 @@
       const notice = this._plantNotice(a, status);
       return `<section class="plant ${status}"><div class="body">${this._plantPhoto(a, preview)}${this._plantReading(a, status)}</div>
         ${notice ? `<div class="notice">${notice}</div>` : ''}<div class="graph-head"><span>История влажности</span><span>${[1,7,30].map(d => `<button data-action="range" data-days="${d}" aria-pressed="${d===this._days}">${d} дн.</button>`).join('')}</span></div><div class="graph">${this._graph(a)}</div>
-        ${this._plantFacts(a, status)}
+        ${this._plantFacts(a, status)}${this._calibration(a, state.entity_id)}
         <div class="actions"><button data-action="snooze" data-entity="${esc(state.entity_id)}" ${preview ? 'disabled' : ''}>Пауза напоминаний на 24 часа</button><button data-action="options">Настройки</button></div></section>`;
+    }
+    _rememberCalibrationSections() {
+      this.shadowRoot.querySelectorAll('.calibration-details[data-entity]').forEach(section => {
+        const entityId = section.dataset.entity;
+        if (!entityId) return;
+        if (section.open) this._calibrationOpen.add(entityId);
+        else this._calibrationOpen.delete(entityId);
+      });
     }
     _render() {
       if (!this._hass) return;
+      this._rememberCalibrationSections();
       const plants = this._plants(); const preview = this._config.preview_status; const voice = this._hass.states['input_boolean.plant_care_voice_enabled']?.state === 'on';
       this.shadowRoot.innerHTML = `<style>
         :host{display:block;font-family:var(--paper-font-body1_-_font-family,system-ui,sans-serif);color:var(--primary-text-color,#243029)}*{box-sizing:border-box}ha-card{background:var(--ha-card-background,var(--card-background-color,#fff));box-shadow:none;border:1px solid var(--divider-color,#ddd);border-radius:14px;overflow:hidden}.header,.footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px}.title{font-size:20px;font-weight:650}.plants{padding:0 16px}.plant{border-top:1px solid var(--divider-color,#ddd);padding:14px 0}.body{display:grid;grid-template-columns:72px minmax(0,1fr);gap:12px;align-items:start}.photo-button{padding:0;border:0;background:none;min-width:72px}.photo{display:block;width:72px;height:82px;object-fit:cover;border-radius:8px}.placeholder{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:5px;background:var(--secondary-background-color,#f1f3ef);color:var(--secondary-text-color,#667);font-size:10px}.name{margin:0;font-size:19px}.status{font-size:12px;color:var(--secondary-text-color,#667);margin-top:3px}.due .status,.overdue .status,.sensor_error .status{color:var(--error-color,#a63c27)}.moisture{font-size:32px;font-weight:650;line-height:1;margin-top:5px}.moisture small{font-size:17px;font-weight:400}.caption,.chart-note,.axis{color:var(--secondary-text-color,#667);font-size:11px}.caption{margin-top:3px}.graph-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-top:12px;font-weight:600}.graph-head button{font-size:11px;min-height:36px;padding:5px 7px}.graph-head button[aria-pressed=true]{color:var(--primary-color,#39785b);font-weight:700}.graph{margin-top:4px}.chart{width:100%;height:90px;overflow:visible}.history-line{stroke:var(--primary-color,#39785b);stroke-width:2;vector-effect:non-scaling-stroke}.history-point{fill:var(--primary-color,#39785b)}.threshold{stroke:var(--secondary-text-color,#888);stroke-width:1;stroke-dasharray:4 4;vector-effect:non-scaling-stroke}.axis{display:flex;justify-content:space-between}.chart-note{margin-top:3px}.graph-message{color:var(--secondary-text-color,#667);font-size:12px;padding:18px 0}.facts{font-size:12px;line-height:1.55;margin-top:10px}.notice{font-size:12px;margin-top:8px;color:var(--error-color,#a63c27)}button{font:inherit;cursor:pointer;color:inherit;border:0;background:transparent;border-radius:6px;min-height:40px;padding:7px 9px}button:focus-visible{outline:2px solid var(--primary-color,#39785b)}button:disabled{opacity:.5;cursor:default}.actions{display:flex;flex-wrap:wrap;gap:4px;margin:7px -9px 0}.actions button,.footer button,.header button{font-size:12px;color:var(--primary-color,#39785b)}.footer{border-top:1px solid var(--divider-color,#ddd);font-size:11px;color:var(--secondary-text-color,#667)}.preview,.empty{padding:10px 16px;font-size:12px}@media(max-width:420px){.plants{padding:0 12px}.header,.footer{padding:10px 12px}.facts{font-size:12px}}
+        .calibrating .notice{color:var(--secondary-text-color,#667)}.calibration{font-size:12px;line-height:1.5;margin-top:10px;padding-top:9px;border-top:1px solid var(--divider-color,#ddd)}.calibration-status{color:var(--secondary-text-color,#667)}.calibration-details{margin-top:3px}.calibration-details summary{cursor:pointer;min-height:32px;display:list-item;align-content:center;color:var(--primary-color,#39785b)}.calibration-details summary:focus-visible{outline:2px solid var(--primary-color,#39785b);border-radius:3px}.calibration-scale,.calibration-empty,.calibration-unavailable{margin:5px 0;color:var(--secondary-text-color,#667)}.calibration-history{list-style:none;margin:5px 0 0;padding:0}.calibration-event{padding:6px 0;border-top:1px solid var(--divider-color,#ddd)}.calibration-values,.calibration-note,.calibration-reason{color:var(--secondary-text-color,#667)}
       </style><ha-card><div class="header"><div class="title">Растения</div><button data-action="add">Добавить</button></div>${preview ? '<div class="preview">ПРЕДПРОСМОТР · действия отключены</div>' : ''}<div class="plants">${plants.length ? plants.map(p => this._plant(p,preview)).join('') : '<div class="empty">Добавь первое растение через Adaptive Plant.</div>'}</div><div class="footer"><span>Голос после суток просрочки · 08:00–21:00<br><button data-action="speaker" ${preview ? 'disabled' : ''}>Колонка: ${esc(plants[0]?.attributes.voice_target_name || 'выбрать')}</button></span><button data-action="voice" ${preview ? 'disabled' : ''}>Алиса: ${voice ? 'вкл.' : 'выкл.'}</button></div></ha-card>`;
       this.shadowRoot.querySelectorAll('[data-action]').forEach(button => {
         if (this._pending.has(`${button.dataset.action}:${button.dataset.entity || button.dataset.entry || ''}`)) button.disabled = true;

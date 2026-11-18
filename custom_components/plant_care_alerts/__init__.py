@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.auth.permissions.const import POLICY_CONTROL
+from homeassistant.components.input_number import InputNumber
+from homeassistant.components.logbook import async_log_entry
 from homeassistant.components.recorder import get_instance, history
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
@@ -19,11 +21,15 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import CoreState
+from homeassistant.const import (
+    __version__ as ha_version,
+)
+from homeassistant.core import Context, CoreState, SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError, Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import discovery
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_component import DATA_INSTANCES
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.service import (
     async_get_config_entry,
@@ -33,14 +39,14 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .analytics import analyze
+from .calibration_runtime import CalibrationRuntime, RuntimeHooks, collect_witnesses
 from .photo import persist_photo
-from .reliability import UNCHANGED_SECONDS
+from .reliability import UNCHANGED_SECONDS, assess
 from .state_machine import evaluate, finite
 from .voice import async_announce, configured_target, target_available
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import Context
 
 DOMAIN = "plant_care_alerts"
 MAX_SAMPLE_SKEW_SECONDS = 60
@@ -48,7 +54,7 @@ MAX_MOISTURE_INDEX = 100
 VOICE_START_HOUR = 8
 VOICE_LAST_HOUR = 21
 RETRY_DELAYS = (60, 300, 900, 3600)
-CLEAR_STATUSES = {"sensor_error", "ok", "checking", "snoozed"}
+CLEAR_STATUSES = {"sensor_error", "ok", "checking", "snoozed", "calibrating"}
 VOICE_METADATA_KEYS = (
     "forecast_voice_at",
     "voice_unavailable_reason",
@@ -83,6 +89,26 @@ CONFIG_SCHEMA = vol.Schema(
                         {
                             vol.Required("dry"): cv.entity_id,
                             vol.Required("wet"): cv.entity_id,
+                        }
+                    )
+                },
+                vol.Optional("automatic_calibration", default={}): {
+                    cv.entity_id: vol.Schema(
+                        {
+                            vol.Optional("enabled", default=True): cv.boolean,
+                            vol.Required("original_dry"): vol.All(
+                                vol.Coerce(float), vol.Range(min=0, max=4095)
+                            ),
+                            vol.Required("original_wet"): vol.All(
+                                vol.Coerce(float), vol.Range(min=0, max=4095)
+                            ),
+                            vol.Required("source_revision"): vol.All(
+                                cv.string, vol.Length(min=1)
+                            ),
+                            vol.Optional("reference_entity"): cv.entity_id,
+                            vol.Optional("reference_protocol"): vol.All(
+                                cv.string, vol.Length(min=1)
+                            ),
                         }
                     )
                 },
@@ -228,9 +254,19 @@ async def async_setup(hass: Any, config: Any) -> bool:
     manager = CareManager(hass, config[DOMAIN])
     hass.data[DOMAIN] = manager
     await manager.load()
+    _register_calibration_service(hass, manager)
     await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
     manager.unsub_timer = async_track_time_interval(
-        hass, manager.async_refresh, timedelta(minutes=1)
+        hass, manager.async_background_refresh, timedelta(minutes=1)
+    )
+
+    @callback
+    def capture_calibration_change(event: Any) -> None:
+        """Retain exact helper events before asynchronous refresh coalescing."""
+        manager.calibration.note_helper_event(event)
+
+    manager.unsub_calibration = hass.bus.async_listen(
+        EVENT_STATE_CHANGED, capture_calibration_change
     )
 
     async def source_changed(event: Any) -> None:
@@ -253,16 +289,98 @@ async def async_setup(hass: Any, config: Any) -> bool:
 
     async def stop(_event: Any) -> None:
         """Handle an integration lifecycle event."""
+        manager.calibration.stop_writes()
         manager.unsub_timer()
         manager.unsub_state()
         manager.unsub_registry()
+        manager.unsub_calibration()
+        if manager.unsub_calibration_service:
+            manager.unsub_calibration_service()
         await manager.store.async_save(manager.records)
+        await manager.calibration.async_save()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop)
     _register_photo_service(hass, manager)
 
     _register_delivery_services(hass, manager)
+    _register_reference_service(hass, manager)
     return True
+
+
+def _register_calibration_service(hass: Any, manager: CareManager) -> None:
+    """Register an owned admin action with explicit control of the wet helper."""
+    name = "apply_calibration"
+    if ha_version != "2026.9.3":
+        manager.calibration.inhibit_writes("unsupported_runtime")
+        return
+    if hass.services.has_service(DOMAIN, name):
+        manager.calibration.inhibit_writes("service_conflict")
+        _LOGGER.error("Calibration write service already registered; writes disabled")
+        return
+
+    async def apply(call: Any) -> dict:
+        entity_id = call.data["entity_id"]
+        # The public admin wrapper runs first. Preserve the caller's context and
+        # finish every authorization await before the final compare and effect.
+        await _require_entity_control(hass, call.context, entity_id)
+        if hass.data.get(DOMAIN) is not manager or hass.state is not CoreState.running:
+            return {entity_id: {"applied": False}}
+        component = hass.data.get(DATA_INSTANCES, {}).get("input_number")
+        entity = component.get_entity(entity_id) if component else None
+        if (
+            ha_version != "2026.9.3"
+            or type(entity) is not InputNumber
+            or getattr(entity.async_set_native_value, "__func__", None)
+            is not InputNumber.async_set_native_value
+        ):
+            manager.calibration.inhibit_writes("unsupported_runtime")
+            return {entity_id: {"applied": False}}
+        entity.async_set_context(call.context)
+        result = await manager.calibration.async_guarded_apply(entity, call)
+        return {entity_id: result}
+
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        name,
+        apply,
+        schema=vol.Schema(
+            {
+                vol.Required("entity_id"): cv.entity_id,
+                vol.Required("transaction_id"): cv.string,
+            }
+        ),
+        supports_response=SupportsResponse.ONLY,
+    )
+    registered = hass.services.async_services()[DOMAIN][name]
+
+    @callback
+    def remove() -> None:
+        if hass.services.async_services().get(DOMAIN, {}).get(name) is registered:
+            hass.services.async_remove(DOMAIN, name)
+
+    manager.unsub_calibration_service = remove
+
+
+def _register_reference_service(hass: Any, manager: CareManager) -> None:
+    """Read an allowlisted reference; never accept arbitrary reference values."""
+
+    async def record_reference(call: Any) -> None:
+        for entry_id, entity in manager.entities.items():
+            if entity.entity_id == call.data["entity_id"]:
+                await manager.calibration.async_record_reference(
+                    entry_id, dt_util.utcnow().timestamp()
+                )
+                await manager.async_refresh(wait=True)
+                break
+
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        "record_reference",
+        record_reference,
+        schema=vol.Schema({vol.Required("entity_id"): cv.entity_id}),
+    )
 
 
 def _register_photo_service(hass: Any, manager: CareManager) -> None:
@@ -357,6 +475,19 @@ class CareManager:
         """Initialize the adapter without changing upstream plant state."""
         self.hass, self.config = hass, config
         self.store = Store(hass, 1, DOMAIN)
+        self.calibration = CalibrationRuntime(
+            hass,
+            Store(hass, 1, "plant_care_calibration"),
+            config,
+            hooks=RuntimeHooks(
+                context_factory=Context,
+                log_event=self._log_calibration,
+                clock=lambda: dt_util.utcnow().timestamp(),
+                quality_provider=self._calibration_quality,
+                identity_provider=self._calibration_source_identity,
+                write_ready=lambda: self.hass.state is CoreState.running,
+            ),
+        )
         self.records, self.entities, self.details = {}, {}, {}
         self.button_cache, self.pending_initial, self.last_attempt = {}, {}, {}
         self.add_entities = None
@@ -367,11 +498,14 @@ class CareManager:
         self.history_failures = {}
         self.busy = False
         self._refresh_pending = False
+        self._calibration_write_pending = False
+        self._calibration_write_active = False
         self._refresh_owner = None
         self._refresh_finished = asyncio.Event()
         self._refresh_finished.set()
         self._refresh_watched = set()
         self.voice_entry = None
+        self.unsub_calibration_service = None
         self.settings = {
             "confirm_seconds": config["confirmation_hours"] * 3600,
             "overdue_seconds": config["overdue_hours"] * 3600,
@@ -401,12 +535,81 @@ class CareManager:
     @property
     def watched_sources(self) -> set[str]:
         """Keep existing source subscriptions while recorder history is pending."""
-        return self.watched | self._refresh_watched
+        return self.watched | self._refresh_watched | self.calibration.watched_entities
 
     async def load(self) -> None:
         """Restore alert timing through the supported Home Assistant storage API."""
         data = await self.store.async_load()
         self.records = data if isinstance(data, dict) else {}
+        await self.calibration.async_load(self._calibration_witnesses())
+
+    def _calibration_witnesses(self) -> dict:
+        """Keep actual progress and independent uncertainty fences for each source."""
+        return collect_witnesses(self.records)
+
+    async def _persist_calibration_witnesses(self, entry_id: str) -> bool:
+        witnesses = self.calibration.witnesses()
+        record = self.records[entry_id]
+        if record.get("calibration_witnesses", {}) == witnesses:
+            return False
+        record["calibration_witnesses"] = witnesses
+        try:
+            await self.store.async_save(self.records)
+        except Exception:
+            self.calibration.inhibit_writes("witness_unavailable")
+            _LOGGER.exception(
+                "Calibration witness could not be persisted; writes disabled"
+            )
+        return True
+
+    def _calibration_source_identity(self, source: str) -> str:
+        """Bind history to the registry's raw-source identity and channel."""
+        raw_id = self.config.get("freshness_sources", {}).get(source)
+        entity = er.async_get(self.hass).async_get(raw_id) if raw_id else None
+        return (
+            f"{entity.platform}:{entity.unique_id}:{entity.id}"
+            if entity
+            else raw_id or ""
+        )
+
+    def _calibration_quality(self, entry_id: str, now: float) -> dict:
+        """Recheck physical evidence after the executor without changing care state."""
+        plant = self.hass.data.get("adaptive_plant", {}).get(entry_id)
+        if plant is None:
+            return {"reliability_valid": False, "reliability_reason": "missing"}
+        return assess(
+            self.records.get(entry_id, {}),
+            self._reading(plant, now),
+            now,
+            self.settings,
+        )
+
+    def _log_calibration(self, event: dict) -> None:
+        """Mirror durable changes into native Logbook without a notification."""
+        source = event["source"]
+        for entry_id, bound in self.calibration.bindings.items():
+            if bound != source or entry_id not in self.entities:
+                continue
+            name = self.details.get(entry_id, {}).get("plant_name", "Растение")
+            kind = {
+                "automatic": "Автоматическая калибровка",
+                "rollback": "Откат калибровки",
+                "manual": "Изменение настройки",
+                "external_discovered": "Обнаружено внешнее изменение",
+            }.get(event["kind"], "Калибровка")
+            message = (
+                f"{kind}: сухая точка {event['old_dry']:g} → {event['new_dry']:g}; "
+                f"мокрая точка {event['old_wet']:g} → {event['new_wet']:g} ADC."
+            )
+            if event["at"] is None:
+                message += " Время изменения неизвестно."
+            async_log_entry(
+                self.hass,
+                name,
+                message,
+                domain=DOMAIN,
+                entity_id=self.entities[entry_id].entity_id,
+            )
 
     def _buttons(self, entry_id: Any) -> dict[str, str]:
         """Resolve stable button unique IDs and cache the registry lookup."""
@@ -474,6 +677,7 @@ class CareManager:
             "raw_source_identity": fresh_id if fresh_id != source_id else None,
             "dry_threshold": plant.dry_threshold,
             "next_watering_at": self._scheduled_time(plant.next_watering),
+            **self.calibration.reading_fields(plant.entry_id),
         }
         for action, field in [
             ("mark_watered", "watered_at"),
@@ -483,6 +687,11 @@ class CareManager:
             state = self.hass.states.get(entity_id) if entity_id else None
             reading[field] = timestamp(state.state) if state else None
         old = self.records.get(plant.entry_id, {})
+        # A failed calibration Store must not let manual scaling erase a prior fault.
+        reading.setdefault("calibration_current", self._calibration(source_id))
+        reading.setdefault(
+            "calibration_previous", old.get("reliability_calibration_basis")
+        )
         reading["history_ready"] = self._history_ready(old, source_id)
         reading["recorder_ready"] = old.get(
             "value_history_source"
@@ -606,6 +815,7 @@ class CareManager:
                     no_attributes=False,
                 )
             )
+            self.calibration.seed_history(entry_id, states.get(raw_id, []), record, now)
             points = []
             for state in states.get(raw_id, []):
                 stamp = timestamp(state.attributes.get("sampled_at"))
@@ -832,6 +1042,8 @@ class CareManager:
             return "Колонка недоступна"
         if current.get("status") == "sensor_error":
             return "Показания датчика недостоверны"
+        if current.get("status") == "calibrating":
+            return "Проверяю показания после изменения калибровки"
         if not due:
             return "Нет достоверной оценки времени полива"
         return None
@@ -845,6 +1057,11 @@ class CareManager:
         raw = self.hass.states.get(raw_id) if raw_id else None
         calibration = self._calibration(source)
         self._collect_adc_samples(current, raw_id, raw, calibration, now)
+        barrier = finite(reading.get("calibration_barrier_until"))
+        if barrier is not None:
+            current["adc_samples"] = [
+                point for point in current["adc_samples"] if point[0] > barrier
+            ]
         prior = (
             current.get("last_watering_at"),
             current.get("last_watering_source", "unknown"),
@@ -964,17 +1181,49 @@ class CareManager:
         self.watched = set()
         for entry_id, plant in list(plants.items()):
             if hasattr(plant, "moisture_sensor"):
-                await self._load_history(entry_id, plant, now)
-                changed = self._refresh_plant(entry_id, plant, now) or changed
+                changed = (
+                    await self._refresh_calibrated_plant(entry_id, plant, now)
+                    or changed
+                )
         for entry_id in set(self.entities) - set(plants):
             changed = await self._remove_missing(entry_id) or changed
         if changed:
             self.store.async_delay_save(lambda: self.records, 10)
 
-    async def async_refresh(self, _event: Any = None, *, wait: bool = False) -> None:
+    async def _refresh_calibrated_plant(
+        self, entry_id: str, plant: Any, now: float
+    ) -> bool:
+        """Order reconciliation, reliability, and separately authorized observation."""
+        before = self.calibration.attributes(entry_id)
+        await self.calibration.async_prepare(entry_id, plant.moisture_sensor, now)
+        await self._load_history(entry_id, plant, now)
+        changed = self._refresh_plant(entry_id, plant, now)
+        await self.calibration.async_observe(
+            entry_id,
+            self.records[entry_id],
+            now,
+            allow_write=self._calibration_write_active,
+        )
+        changed = await self._persist_calibration_witnesses(entry_id) or changed
+        if before != self.calibration.attributes(entry_id):
+            changed = True
+            entity = self.entities.get(entry_id)
+            if entity is not None and getattr(entity, "hass", None) is not None:
+                entity.async_write_ha_state()
+        return changed
+
+    async def async_background_refresh(self, _event: Any = None) -> None:
+        """Authorize automatic writes only from the independently scheduled timer."""
+        await self.async_refresh(calibration_write=True)
+
+    async def async_refresh(
+        self, _event: Any = None, *, wait: bool = False, calibration_write: bool = False
+    ) -> None:
         """Coalesce refreshes and let explicit callers await the latest pass."""
         if self.add_entities is None:
             return
+        if calibration_write:
+            self._calibration_write_pending = True
         if self.busy:
             self._refresh_pending = True
             if wait and asyncio.current_task() is not self._refresh_owner:
@@ -986,12 +1235,16 @@ class CareManager:
         try:
             while True:
                 self._refresh_pending = False
+                self._calibration_write_active = self._calibration_write_pending
+                self._calibration_write_pending = False
                 await self._refresh_once()
+                self._calibration_write_active = False
                 if not self._refresh_pending:
                     break
         except Exception:
             _LOGGER.exception("Failed to update plant care alerts")
         finally:
+            self._calibration_write_active = False
             self.busy = False
             self._refresh_owner = None
             self._refresh_watched = set()

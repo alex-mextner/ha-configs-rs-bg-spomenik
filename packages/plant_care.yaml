@@ -11,6 +11,13 @@ plant_care_alerts:
     sensor.strelitzia_soil_smoothed:
       dry: input_number.strelitzia_soil_dry_adc
       wet: input_number.strelitzia_soil_wet_adc
+  automatic_calibration:
+    sensor.strelitzia_soil_smoothed:
+      enabled: true
+      original_dry: 67
+      original_wet: 221
+      source_revision: "n2-adc3-pin22-v1"
+      # No independent qualified reference is currently installed: observe only.
   user_reports:
     sensor.strelitzia_soil_smoothed: "2026-11-03"
 

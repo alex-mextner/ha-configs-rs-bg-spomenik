@@ -58,6 +58,69 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.manager._buttons = Mock(return_value={})
         self.now = datetime.now(UTC).timestamp()
 
+    async def test_user_refresh_does_not_inherit_background_write_authority(
+        self,
+    ) -> None:
+        phases = []
+
+        async def refresh_once() -> None:
+            phases.append(self.manager._calibration_write_active)
+            if len(phases) == 1:
+                await self.manager.async_refresh()
+
+        self.manager._refresh_once = AsyncMock(side_effect=refresh_once)
+        await self.manager.async_background_refresh()
+        await self.manager.async_refresh()
+        self.assertEqual(phases, [True, False, False])
+
+    def test_missing_calibration_store_preserves_frozen_fault_basis(self) -> None:
+        from custom_components.plant_care_alerts.state_machine import evaluate
+
+        sampled = datetime.fromtimestamp(self.now, UTC)
+        states = {
+            "sensor.smooth": SimpleNamespace(
+                state="50", attributes={}, last_reported=sampled
+            ),
+            "sensor.raw": SimpleNamespace(
+                state="1500",
+                attributes={"sampled_at": sampled.isoformat()},
+                last_reported=sampled,
+            ),
+            "input_number.dry": SimpleNamespace(state="67", attributes={}),
+            "input_number.wet": SimpleNamespace(state="2933", attributes={}),
+        }
+        self.hass.states.get = states.get
+        self.manager.config["calibration_sources"] = {
+            "sensor.smooth": {"dry": "input_number.dry", "wet": "input_number.wet"}
+        }
+        self.manager.calibration._storage_ready = False
+        old = {
+            "source_identity": "sensor.smooth",
+            "raw_source_identity": "sensor.raw",
+            "last_observed_value": 100,
+            "last_value_change_at": self.now - 5 * 86400,
+            "last_source_value": 1490,
+            "last_source_change_at": self.now - 300,
+            "reliability_last_sample_at": self.now - 300,
+            "reliability_valid": False,
+            "reliability_incident_started_at": self.now - 4 * 86400,
+            "reliability_incident_reason": "saturated",
+            "reliability_incident_value": 100,
+            "reliability_incident_value_changed_at": self.now - 5 * 86400,
+            "reliability_calibration_basis": [67, 221],
+        }
+        self.manager.records["a"] = old
+        reading = self.manager._reading(self.plant, self.now)
+        current = evaluate(old, reading, self.now, self.manager.settings)
+        self.assertEqual(current["status"], "sensor_error")
+        self.assertEqual(current["last_value_change_at"], old["last_value_change_at"])
+        self.assertEqual(
+            current["reliability_incident_started_at"],
+            old["reliability_incident_started_at"],
+        )
+        self.assertEqual(current["reliability_calibration_basis"], [67, 221])
+        self.assertFalse(current["reliability_valid"])
+
     def test_unavailable_raw_source_invalidates_buffered_median(self) -> None:
         states = {
             "sensor.smooth": SimpleNamespace(

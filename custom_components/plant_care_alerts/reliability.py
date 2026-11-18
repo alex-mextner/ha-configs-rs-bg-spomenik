@@ -35,6 +35,9 @@ KEYS = (
     "recovery_raw_values",
     "reliability_recovered_at",
     "reliability_invalid_intervals",
+    "reliability_calibration_basis",
+    "calibration_seen_revision",
+    "calibration_rebase_pending",
 )
 
 
@@ -367,9 +370,108 @@ def _startup_absence(state: dict, reading: dict, stagnation: str | None) -> bool
     )
 
 
+CALIBRATION_ENDPOINTS = 2
+
+
+def _calibration_basis(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != CALIBRATION_ENDPOINTS:
+        return None
+    dry, wet = (number(item) for item in value)
+    return [dry, wet] if dry is not None and wet is not None and wet > dry else None
+
+
+def _calibration_reading(state: dict, reading: dict, now: float) -> dict:
+    """Keep an old fault's scale until independently qualified evidence replaces it."""
+    current = _calibration_basis(reading.get("calibration_current"))
+    if current is None:
+        return reading
+    basis = (
+        _calibration_basis(state.get("reliability_calibration_basis"))
+        or _calibration_basis(reading.get("calibration_previous"))
+        or current
+    )
+    revision = reading.get("calibration_revision")
+    if state.get("calibration_seen_revision") != revision:
+        state["calibration_seen_revision"] = revision
+        state["calibration_rebase_pending"] = (
+            number(reading.get("calibration_effective_at")) is not None
+        )
+    barrier = number(reading.get("calibration_barrier_until")) or 0
+    frozen = state.get("reliability_incident_reason") in FROZEN_CAUSES
+    verified = (
+        revision is not None
+        and reading.get("calibration_verified_revision") == revision
+    )
+    if now >= barrier and (not frozen or verified):
+        if state.get("calibration_rebase_pending") and number(
+            reading.get("raw_source_value")
+        ) == number(state.get("last_source_value")):
+            # The same physical value in another scale is not a numeric change.
+            state["last_observed_value"] = number(reading.get("moisture"))
+        state["calibration_rebase_pending"] = False
+        basis = current
+    state["reliability_calibration_basis"] = basis
+    raw = number(reading.get("raw_source_value"))
+    if frozen and basis != current and raw is not None:
+        value = max(0.0, min(MAX_INDEX, 100 * (raw - basis[0]) / (basis[1] - basis[0])))
+        return {**reading, "moisture": value}
+    return reading
+
+
+def _observe_barrier_raw(
+    state: dict, reading: dict, now: float, settings: dict
+) -> str | None:
+    stamp, raw = (
+        number(reading.get("sample_at")),
+        number(reading.get("raw_source_value")),
+    )
+    last = number(state.get("reliability_last_sample_at"))
+    if (
+        stamp is None
+        or raw is None
+        or stamp > now + FUTURE_TOLERANCE
+        or (last is not None and stamp < last)
+    ):
+        return "invalid_sample"
+    if now - stamp > settings.get("stale_seconds", 1200):
+        return "stale"
+    if last is None or stamp > last:
+        if state.get("last_source_value") != raw:
+            state.update(last_source_value=raw, last_source_change_at=stamp)
+        state["reliability_last_sample_at"] = stamp
+    return None
+
+
+def _calibration_barrier(
+    state: dict, reading: dict, now: float, settings: dict
+) -> bool:
+    """Pause the derived smoothing window without opening a calibration incident."""
+    until = number(reading.get("calibration_barrier_until"))
+    if until is None or now >= until:
+        return False
+    reason = _observe_barrier_raw(state, reading, now, settings)
+    reason = _stagnation_reason(state, now) or reason
+    state["reliability_invalid_intervals"] = [
+        list(pair) for pair in state.get("reliability_invalid_intervals") or []
+    ]
+    if reason is not None:
+        _latch_fault(state, reading, reason, now)
+    else:
+        _reset_recovery(state)
+        state.update(
+            reliability_valid=False,
+            reliability_reason=state.get("reliability_incident_reason")
+            or "calibrating",
+        )
+    return True
+
+
 def assess(previous: dict, reading: dict, now: float, settings: dict) -> dict:
     """Latch a fault until independent healthy samples demonstrate recovery."""
     state = _initial_state(previous, reading, now)
+    reading = _calibration_reading(state, reading, now)
+    if _calibration_barrier(state, reading, now, settings):
+        return state
     history_missing = (
         reading.get("history_ready") is False or not _history_matches(previous, reading)
     ) and state.get("last_value_change_at") is None

@@ -67,6 +67,7 @@ class PlantCareSensor(SensorEntity):
 
         return {
             **self.manager.details[self.plant_id],
+            **self.manager.calibration.attributes(self.plant_id),
             **{
                 k: record.get(k)
                 for k in (
