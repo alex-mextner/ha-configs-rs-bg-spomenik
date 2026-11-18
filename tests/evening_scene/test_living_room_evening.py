@@ -11,7 +11,13 @@ from typing import Any
 
 import yaml
 from homeassistant import loader
-from homeassistant.core import Context, HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import (
+    Context,
+    HomeAssistant,
+    ServiceCall,
+    SupportsResponse,
+    callback,
+)
 from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import frame
@@ -85,6 +91,7 @@ class LivingRoomEveningTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_stop()
         self.temp.cleanup()
 
+    @callback
     def queue_changed(self) -> None:
         if self.child.runs == QUEUE_LIMIT:
             self.queue_full.set()

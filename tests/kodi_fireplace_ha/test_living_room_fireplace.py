@@ -149,7 +149,6 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             ("script", "source_to_pc"),
             ("media_player", "turn_on"),
             ("homeassistant", "update_entity"),
-            ("test", "completed"),
         ):
             self.hass.services.async_register(domain, service, self.boundary)
         self.hass.services.async_register(
@@ -166,15 +165,11 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             "script.source_to_pc": self.power_on,
             "rest_command.host_kodi_fireplace": self.start_playback,
             "homeassistant.update_entity": self.refresh_readiness,
-            "test.completed": self.record_completion,
         }
         return await handlers.get(action, self.ignore_call)(call)
 
     async def ignore_call(self, _call) -> None:
         return None
-
-    async def record_completion(self, _call) -> None:
-        self.completed.append(True)
 
     async def power_on(self, _call) -> None:
         self.power_entered.set()
@@ -388,7 +383,6 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
                     {"fireplace_request": {"id": "voice-request"}},
                 ),
                 ("homeassistant.update_entity", {"entity_id": [READINESS]}),
-                ("test.completed", {}),
             ],
         )
         self.assertEqual(self.completed, [True])
