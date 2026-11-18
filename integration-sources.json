@@ -3,5 +3,13 @@
     "submodule": "submodules/adaptive-plant",
     "repository": "Big-Xan/adaptive_plant",
     "branch": "main"
+  },
+  "yandex_station": {
+    "submodule": "submodules/YandexStation",
+    "repository": "alex-mextner/YandexStation",
+    "branch": "local/ha-3.22.3-remote-announcements-20261118",
+    "aliases": [
+      "AlexxIT/YandexStation"
+    ]
   }
 }
