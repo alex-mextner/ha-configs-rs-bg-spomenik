@@ -2,7 +2,7 @@ name: Plant care
 
 on:
   push:
-    branches: [main, feat/plant-care-yandex-main-20261118]
+    branches: [main, feat/plant-care-yandex-main-20261118, feat/plant-care-alerts]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -49,4 +49,76 @@ jobs:
           path: |
             /tmp/ha-plant-care-*.log
             .cache/test-results/plant-care.xml
+          retention-days: 14
+
+  reliability:
+    name: Plant tests and installed-HA compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.14'
+      - name: Install lint dependencies
+        run: python -m pip install ruff==0.15.13
+      - name: Lint scoped implementation
+        run: |
+          ruff check custom_components/plant_care_alerts tests/plant_care scripts/host/ha_plant_sensor_recovery.py tests/plant_recovery
+          ruff format --check custom_components/plant_care_alerts tests/plant_care scripts/host/ha_plant_sensor_recovery.py tests/plant_recovery
+          node --check www/plant-care/plant-care-card.js
+      - name: Card behavior
+        if: always()
+        run: |
+          node tests/plant_care/test_card.cjs
+          node tests/plant_care/test_reliability_card.cjs
+      - name: Recovery controller regression tests
+        if: always()
+        run: python3 tests/plant_recovery/test_recovery.py
+      - name: All tests in the deployed Home Assistant version
+        if: always()
+        # Matches the verified production version, not the moving stable tag.
+        run: >-
+          docker run --rm --entrypoint python3
+          -v "$PWD:/workspace:ro" -w /workspace
+          -e PYTHONPATH=/workspace -e PYTHONDONTWRITEBYTECODE=1
+          ghcr.io/home-assistant/home-assistant:2026.9.3
+          -m unittest discover -s tests/plant_care -v
+
+
+  component-preview:
+    name: Plant card component preview from observed API state
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install browser in the native CI runner
+        run: |
+          npm install --prefix "$RUNNER_TEMP/plant-card-browser" --no-save --package-lock=false --ignore-scripts playwright@1.65.1
+          "$RUNNER_TEMP/plant-card-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Render the component from the captured plant state
+        env:
+          NODE_PATH: ${{ runner.temp }}/plant-card-browser/node_modules
+        run: >-
+          node tests/plant_care/render_component.cjs
+          --snapshot tests/plant_care/fixtures/live-reading.json
+          --output "$RUNNER_TEMP/plant-card-preview"
+      - name: Save component screenshots and provenance
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: plant-card-component-preview
+          path: ${{ runner.temp }}/plant-card-preview/
+          if-no-files-found: error
           retention-days: 14

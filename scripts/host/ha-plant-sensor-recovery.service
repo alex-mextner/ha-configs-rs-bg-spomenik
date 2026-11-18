@@ -1,0 +1,14 @@
+[Unit]
+Description=Verify plant sensor recovery and escalate unresolved incidents once
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/share/ha-plant-sensor-recovery/ha_plant_sensor_recovery.py run
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+TimeoutStartSec=180
+SuccessExitStatus=75
+RestartPreventExitStatus=75
+Nice=10
+UMask=0077

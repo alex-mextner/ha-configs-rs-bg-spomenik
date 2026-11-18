@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Alex Ultra
+# SPDX-License-Identifier: MIT
 """Select one speech target and use its actual Home Assistant transport."""
 
 from __future__ import annotations
@@ -37,8 +39,8 @@ async def async_announce(
         return
     state = hass.states.get(target) if target else None
     if not target_available(state):
-        message = "Колонка для напоминаний недоступна"
-        raise HomeAssistantError(message)
+        error = "Колонка для напоминаний недоступна"
+        raise HomeAssistantError(error)
     if target.startswith("notify."):
         await hass.services.async_call(
             "notify",
@@ -64,5 +66,5 @@ async def async_announce(
             context=context,
         )
         return
-    message = "У выбранной колонки нет действия для озвучивания текста"  # noqa: RUF001 - Russian message
-    raise HomeAssistantError(message)
+    error = "У выбранной колонки нет действия для озвучивания текста"  # noqa: RUF001 - Russian UI text.
+    raise HomeAssistantError(error)

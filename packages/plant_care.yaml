@@ -4,6 +4,7 @@ plant_care_alerts:
   confirmation_hours: 6
   overdue_hours: 24
   stale_minutes: 20
+  unchanged_hours: 12
   freshness_sources:
     sensor.strelitzia_soil_smoothed: sensor.strelitzia_soil_adc
   calibration_sources:

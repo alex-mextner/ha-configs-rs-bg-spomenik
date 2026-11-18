@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.const import EVENT_STATE_CHANGED
-from homeassistant.core import Context
+from homeassistant.core import Context, CoreState
 
 from custom_components.plant_care_alerts import (
     DOMAIN,
@@ -33,6 +33,8 @@ class TestManagerRegressions(unittest.IsolatedAsyncioTestCase):
         self.now = datetime(2026, 11, 18, 12, tzinfo=UTC)
         self.hass = SimpleNamespace(
             data={},
+            is_running=True,
+            state=CoreState.running,
             states=SimpleNamespace(get=lambda _: None),
             services=SimpleNamespace(async_register=Mock()),
             bus=SimpleNamespace(

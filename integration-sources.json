@@ -1,0 +1,7 @@
+{
+  "adaptive_plant": {
+    "submodule": "submodules/adaptive-plant",
+    "repository": "Big-Xan/adaptive_plant",
+    "branch": "main"
+  }
+}

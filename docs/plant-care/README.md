@@ -1,102 +1,147 @@
-# Strelitzia and Alice
+# Растения: карточки и напоминания о поливе
 
-`packages/plant_care_yandex.yaml` publishes the existing care engine as
-`sensor.strelitzia_yandex_moisture` and `script.plant_care_status`.
-The sensor's Russian name is **Стрелиция**. Its percentage is a relative index
-between the probe's dry and wet calibration points, not a volumetric water
-measurement. Values beyond the wet calibration point are clipped to 100%; this
-alone does not establish the physical condition of the soil.
+Основа — MIT Adaptive Plant, закреплённый Git-сабмодуль `submodules/adaptive-plant`
+(`87af7d212f69986f7cc0dda4faece7b2abb3a47c`, integration 1.2.3).
+`plant_care_alerts`, карточка и blueprint добавляют проверку достоверности
+измерений, оценку полива и устойчивые напоминания о просрочке.
+Эти новые компоненты — MIT, лицензия в `custom_components/plant_care_alerts/LICENSE`.
+Лицензия остального HA-репозитория от этого не меняется.
 
-The report uses the same smoothed moisture and care state as the existing engine.
-Both the raw ADC measurement and the care engine's own sample must be at most
-20 minutes old and must not be in the future. Missing readings, invalid
-calibration and invalid values produce an unavailable sensor, never a false 0%.
-Prolonged high readings take priority over a watering suggestion. A date is
-reported only when the engine has a valid future drying forecast; the calendar
-`next_watering` field is not used as a substitute.
+## Где пользоваться
 
-## Installation and existing runtime settings
+На существующем домашнем экране HA находится карточка «Растения».
+«Пауза напоминаний на 24 часа» временно откладывает напоминания.
+Нажатие на фотографию открывает загрузку нового изображения; для сохранения
+нужны права администратора HA. «Настройки» открывают Adaptive Plant, где можно
+изменить растение и его расписание. Кнопка «Колонка» выбирает устройство
+для голосовых напоминаний. Период истории переключается между 1, 7 и 30 днями.
 
-This repository uses Home Assistant packages. Keep the existing
-`homeassistant.packages` directory inclusion and initialize the pinned dependency:
+Новое растение: Настройки → Устройства и службы → Добавить интеграцию →
+Adaptive Plant. Затем выбери датчик влажности и порог, или настрой расписание,
+если датчика нет. Карточка и уведомления подхватят растение автоматически,
+без копирования YAML. Род/вид, фотография, имя и пороги принадлежат Adaptive Plant.
+
+## Как принимается решение
+
+Для стрелиции исходная калибровка сохранена: сухая точка ADC 67, мокрая 221.
+Это относительный индекс, а не объёмный процент воды. Первичный порог 25% —
+рабочая настройка для наблюдения, не ботанически установленная константа.
+Источник для Adaptive Plant — 30-минутная медиана `sensor.strelitzia_soil_smoothed`.
+Сырые отсчёты доступны отдельно и не меняются интеграцией.
+Автоматическая запись полива в upstream для этого датчика отключена:
+Wet threshold = 100 (upstream требует строгое превышение, индекс ограничен 100).
+Ручной полив можно отметить средствами Adaptive Plant. Карточка подписывает
+источник даты: пользователь, Adaptive Plant или автоматическая оценка.
+Устойчивый скачок физического сигнала может дать автоматическую оценку;
+насыщенные и недостоверные измерения из такого расчёта исключаются.
+
+Компаньон учитывает минимум четыре независимых измерения в 30-минутном окне,
+отбрасывает крайние 20% отсчётов (при малой выборке берёт медиану).
+Оранжевое предупреждение появляется после 6 часов подтверждённой сухости.
+Красное — через 24 часа после оранжевого. Восстановление влажности выше порога
+на 10 процентных пунктов снимает предупреждение; одиночного мокрого отсчёта
+после разрыва измерений для этого недостаточно. После ручной отметки полива
+предусмотрено 6 часов на распределение воды. Таймеры сохраняются при перезапуске.
+Смена датчика сбрасывает старую измерительную историю, смена фотографии — нет.
+
+## Недостоверные показания
+
+Если численное значение не меняется более 12 часов, карточка показывает
+«Недостоверные показания» и скрывает процент влажности. Это правило действует
+на 0%, 100% и промежуточных значениях. Свежий пакет с тем же числом и перезапуск
+HA сохраняют прежнее время последнего изменения. Потеря свежих измерений
+проверяется отдельно через `freshness_sources`.
+
+Во время ошибки расчёт новых поливов, прогноз и голосовые просьбы полить
+приостанавливаются; грунт следует проверить вручную. Ранее подтверждённая
+сухость остаётся подписанным историческим контекстом. Возврат к нормальному
+состоянию требует трёх независимых измерений за десять минут, а после
+застывшего значения — подтверждённой численной динамики.
+
+Восстановление начинается с повторного физического измерения и обновления данных
+HA. Сервис датчика перезапускается только при подтверждённом отказе самого
+сервиса. Сохранившаяся ошибка передаётся одной отслеживаемой OMP-сессии.
+Условия и ограничения описаны в [достоверности измерений](../plant-reading-reliability.md)
+и [восстановлении датчика](../plant-sensor-recovery.md).
+
+## Доставка
+
+`packages/plant_care.yaml` использует один переиспользуемый blueprint:
+`blueprints/automation/plant_care/alerts.yaml`.
+Телефон получает уведомления при переходе в оранжевый/красный этап.
+Яндекс.Станция «Мини гостиная» произносит список просроченных растений
+каждый час с 08:00 до 21:00 включительно (после 22:00 — тишина).
+Переключатель «Алиса» в карточке отключает только голос, не сбор данных.
+Никакой насос или автоматический полив не запускается.
+
+## Алиса и новая установка
+
+`sensor.strelitzia_yandex_moisture` публикует относительный индекс под именем
+«Стрелиция», а `script.plant_care_status` возвращает состояние и пригодный прогноз.
+Оба используют решение о достоверности из того же care engine. Сырой отсчёт и
+измерение care engine должны быть не старше 20 минут и не из будущего; ошибка,
+отсутствующая калибровка или недостоверные показания дают недоступное значение,
+а не 0%. Длительная высокая влажность имеет приоритет над просьбой полить.
+Поле календарного `next_watering` не заменяет пригодный прогноз высыхания.
+
+Для проверки без речи вызови `script.plant_care_status` с `speak: false` и запроси
+ответ сервиса. Это отключает звук именно этого вызова; обновление данных может
+обработать обычный переход состояния и ожидающую доставку уведомлений.
+По умолчанию ответ произносится через выбранную в UI колонку.
+
+При новой установке сохрани существующее подключение packages и выполни шаги:
+
+1. Создай Adaptive Plant с источником `sensor.strelitzia_soil_smoothed` и проверь
+   companion entity. Пакет Алисы использует `sensor.strelitsiia_poliv`; при другом
+   имени измени эту ссылку на фактическую сущность.
+2. Откалибруй реальный датчик сухой и мокрой контрольными точками. Сохранённые
+   значения одной установки нельзя переносить на другой датчик без проверки.
+3. Добавь Plant Care Alerts через «Настройки → Устройства и службы» и выбери
+   поддерживаемую Яндекс.Станцию или Aisis notify entity. ID колонки в скрипте
+   Алисы не зашит. Настрой мобильную цель в экземпляре blueprint.
+4. В существующих настройках Yandex Smart Home добавь к выбранным сущностям
+   `sensor.strelitzia_yandex_moisture` и `script.plant_care_status`, сохранив остальные.
+   Обнови устройства в Яндексе и создай сценарии для нужных фраз, например
+   «состояние растений» и «когда поливать стрелицию», вызывающие этот скрипт.
+
+Сущности Adaptive Plant, калибровка, выбранная колонка, список Yandex Smart Home
+и сценарии Алисы — runtime settings. Копирование репозитория не создаёт их заново.
+Используй штатные UI и сервисы; не копируй и не изменяй `.storage`.
+
+Soil package читает bridge `http://127.0.0.1:8768`. Его исходник и systemd unit
+находятся в `scripts/soil_moisture/`; на настроенном Odroid исходник установлен
+в `/opt/ha-soil-moisture/soil_bridge.py`. Нужны Python 3, системный
+`python3-libgpiod` с API v2 `request_lines`, правильные GPIO chip/line, ADC sysfs
+path и доступ service к GPIO. Проверь эти аппаратные параметры перед установкой
+на другом устройстве. Bridge пишет ограниченные приватные журналы в `/tmp`;
+путь сообщается при запуске. Перенос исходника сам по себе сервис не перезапускает.
+
+## Развёртывание и проверки
+
+Источники/обновления зарегистрированы в `integration-sources.json`.
+При новом клонировании выполни `git submodule update --init submodules/adaptive-plant`.
+В `configuration.yaml` нужны ресурсы `/local/plant-care/plant-care-card.js`
+и `/adaptive_plant/adaptive-plant-card.js`, оба `type: module`.
+Пакет из `packages/` загружается существующим include_dir_named.
+
+Workflow Plant care в CI сохраняет проверки Алисы, native HA actions,
+speaker transports и simulated bridge hardware из опубликованного main,
+а также проверки достоверности и совместимости с HA 2026.9.3. Для ограниченной локальной проверки отдельного модуля:
 
 ```sh
-git submodule update --init submodules/adaptive-plant
+python3 tests/plant_care/test_reliability.py
+node --check www/plant-care/plant-care-card.js
+node tests/plant_care/test_reliability_card.cjs
+scripts/ha_validate_yaml.sh packages/plant_care.yaml blueprints/automation/plant_care/alerts.yaml
 ```
 
-`custom_components/adaptive_plant` links to the MIT Adaptive Plant source at
-`87af7d212f69986f7cc0dda4faece7b2abb3a47c`.
-The accompanying `plant_care_alerts` integration, packages and notification
-blueprint are included here so the Alice package has its required source chain.
-The companion also exposes its existing photo upload service, which depends on
-Home Assistant's `file_upload` integration and Pillow.
+CI запускает `test_adapter.py` внутри контейнера с той же версией HA,
+чтобы проверить совместимость импортов, адаптера и сервисов.
+Отдельный CI job сохраняет desktop/mobile изображения компонента из
+снимка фактического состояния одного растения. В его подписи
+и квитанции указаны время чтения API и хеш карточки; это проверка компонента,
+а доступ к живой панели HA проверяется отдельно.
 
-The soil package requires the host bridge at `http://127.0.0.1:8768`.
-Its source and systemd unit are in `scripts/soil_moisture/`. On the configured
-Odroid host it is installed at `/opt/ha-soil-moisture/soil_bridge.py` and requires
-Python 3, the host's `python3-libgpiod` package with the v2 `request_lines` API,
-the matching GPIO chip/line and ADC sysfs path, and the unit's GPIO access.
-Review these hardware-specific defaults before installing on another machine.
-The unit and source are supplied for reproducibility; this change does not
-restart or reconfigure the live bridge. Each invocation writes bounded private
-lifecycle/request logs under `/tmp`, with the path printed on startup. Requests
-and failures do not log raw request paths, sampled values or exception details.
-
-Adaptive Plant instances, calibration helper values, the selected reminder
-speaker, Yandex Smart Home exposure and Alice scenarios are runtime settings.
-They are not recreated by copying this repository. Preserve them on the existing
-installation. For a new installation:
-
-1. Add Adaptive Plant through its native integration UI, select
-   `sensor.strelitzia_soil_smoothed`, and set the plant's own care preferences.
-   Confirm its companion entity is `sensor.strelitsiia_poliv`, or update the
-   Alice package to the actual entity ID.
-2. Calibrate the actual probe using the soil package's dry/wet controls. The
-   example installation's stored values are not portable to a different probe.
-3. Add **Plant Care Alerts** through Settings → Devices & services and select a
-   supported Yandex Station or Aisis notification entity. That setting controls
-   speech; the Alice script contains no fixed speaker ID.
-4. Configure the existing notification blueprint's mobile notification target
-   for the installation. The package currently names the original household's
-   target. Existing automatic reminders retain their own enable switch and quiet
-   hours; this package adds no announcement schedule.
-5. In the existing Yandex Smart Home integration's options, append
-   `sensor.strelitzia_yandex_moisture` and `script.plant_care_status` to the
-   selected entities, preserving other selections. Refresh devices in Yandex.
-   Create an Alice scenario with the desired voice phrases, such as
-   **«состояние растений»** and **«когда поливать стрелицию»**, that invokes the
-   exposed script. The sensor's moisture class maps to the supported percentage
-   humidity property in Yandex.
-
-Use native configuration flows and services. Do not copy or edit `.storage`.
-On an existing installation, validate YAML and use template/script reloads when
-only the Alice package changes. A first installation of the companion and
-Adaptive Plant needs the usual Home Assistant integration setup/restart.
-
-## Verification and operation
-
-A report can be inspected without speech by calling `script.plant_care_status`
-with `speak: false` and requesting its service response. The default is to speak
-once through `plant_care_alerts.announce`. The refresh action can still update
-normal care transitions and existing pending notification delivery; `speak:
-false` controls this script's audio, not all effects of the existing care engine.
-
-The deployed package was checked in Home Assistant 2026.9.3 using 13 native
-freshness/calibration cases, nine message branches, targeted domain reloads and
-a live silent report. Its current example was:
-
-> Стрелиция: индекс влажности 100%. Показания долго высокие. Проверь грунт перед поливом.
-
-Yandex device inventory and scenario configuration were read back successfully.
-No audible end-to-end voice request was performed. The package has SHA256
-`7ac0179cb483f28d660d98cf481552c1a62db0cb1c635190d7923210175dec93` and Git blob
-`db9558f0edf195436542038060220499a7cc5684`.
-
-The **Plant care and Alice status** CI job runs the native HA script and template
-regressions, source inference/state tests, speaker transport tests and the
-bridge's simulated hardware/HTTP tests. CI uses the same Home Assistant version
-as the deployment. It makes no real hardware or speaker calls. Existing Ruff,
-Hassfest, HACS and maintained repository regression jobs remain in force.
-
-This source publication draws on the earlier implementation in PR #35, while
-starting from current remote `main` and excluding unrelated production history.
+`preview_status: due|overdue` — только визуальный просмотр карточки с явной
+пометкой «ПРЕДПРОСМОТР». Он не меняет показания, таймеры или историю полива;
+кнопки действий в этом режиме отключены. В рабочий dashboard preview не сохранять.

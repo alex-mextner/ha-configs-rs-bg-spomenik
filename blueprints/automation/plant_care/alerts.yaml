@@ -52,7 +52,7 @@ variables:
       {% set freshness = s.attributes.get('freshness_entity', source) %}
       {% set max_age = s.attributes.get('stale_seconds', 1200) | float(1200) %}
       {% set stamp = s.attributes.get('last_sample_at', 0) | float(0) %}
-      {% if not source or (is_number(states(source)) and is_number(states(freshness)) and as_timestamp(now()) - stamp < max_age) %}
+      {% if not source or (s.attributes.get('reliability_valid') == true and is_number(states(source)) and is_number(states(freshness)) and 0 <= as_timestamp(now()) - stamp < max_age) %}
         {% set ns.names = ns.names + [s.attributes.plant_name] %}
       {% endif %}
     {% endfor %}
@@ -96,10 +96,12 @@ actions:
                       alert_title: >-
                         {{ ('🔴 Полив просрочен: ' if change_status == 'overdue' else
                             '🟠 Пора поливать: ' if change_status == 'due' else
-                            'Нет данных датчика: ') ~ plant_name }}
+                            'Недостоверные показания: ') ~ plant_name }}
                       alert_message: >-
                         {% if change_status == 'sensor_error' %}
-                          Нет свежих показаний. Проверь датчик; это не команда поливать.
+                          Не удалось подтвердить достоверность показаний.
+                          Текущая причина и ход восстановления показаны в карточке растения.
+                          Полив по этим данным не определяется. Проверь грунт вручную.
                         {% elif change_status == 'overdue' %}
                           Полив просрочен больше суток. Проверь грунт и отметь полив на карточке растения.
                         {% else %}

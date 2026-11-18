@@ -10,7 +10,7 @@ import uuid
 import warnings
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from homeassistant.components.file_upload import process_uploaded_file
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -26,33 +26,22 @@ _MAX_PIXELS = 40_000_000
 _UPLOAD_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 
-def _check_output_size(size: int) -> None:
-    """Reject oversize output inside the caller's exclusive-file cleanup scope."""
-    if size > _MAX_OUTPUT_BYTES:
-        message = "Processed image is too large"
-        raise ValueError(message)
-
-
-def _check_upload_id(file_id: str) -> None:
-    if not _UPLOAD_ID.fullmatch(file_id):
-        message = "Invalid upload ID"
-        raise ValueError(message)
-
-
 def persist_photo(hass: HomeAssistant, file_id: str) -> str:
     """Consume a HA upload, validate it and create a new exclusive image file."""
-    _check_upload_id(file_id)
+    if not _UPLOAD_ID.fullmatch(file_id):
+        error = "Invalid upload ID"
+        raise ValueError(error)
     with process_uploaded_file(hass, file_id) as source:
         if source.stat().st_size > _MAX_BYTES:
-            message = "Image is too large"
-            raise ValueError(message)
+            error = "Image is too large"
+            raise ValueError(error)
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
                 with Image.open(source) as original:
                     if original.format not in {"PNG", "JPEG"}:
-                        message = "Only PNG and JPEG images are supported"
-                        raise ValueError(message)
+                        error = "Only PNG and JPEG images are supported"
+                        raise ValueError(error)
                     width, height = original.size
                     if (
                         width < 1
@@ -61,8 +50,8 @@ def persist_photo(hass: HomeAssistant, file_id: str) -> str:
                         or height > _MAX_DIMENSION
                         or width * height > _MAX_PIXELS
                     ):
-                        message = "Image dimensions are too large"
-                        raise ValueError(message)
+                        error = "Image dimensions are too large"
+                        raise ValueError(error)
                     image = ImageOps.exif_transpose(original)
                     alpha = "A" in image.getbands() or "transparency" in image.info
                     image = image.convert("RGBA" if alpha else "RGB")
@@ -76,8 +65,8 @@ def persist_photo(hass: HomeAssistant, file_id: str) -> str:
             Image.DecompressionBombWarning,
             OSError,
         ) as err:
-            message = "Invalid image"
-            raise ValueError(message) from err
+            error = "Invalid image"
+            raise ValueError(error) from err
 
         # Open each directory without following symlinks, so another process cannot
         # redirect writes outside the managed directory during directory creation.
@@ -90,8 +79,8 @@ def persist_photo(hass: HomeAssistant, file_id: str) -> str:
                 try:
                     next_fd = os.open(component, flags, dir_fd=fd)
                 except OSError as err:
-                    message = "Unsafe photo directory"
-                    raise ValueError(message) from err
+                    error = "Unsafe photo directory"
+                    raise ValueError(error) from err
                 os.close(fd)
                 fd = next_fd
             extension = "png" if alpha else "jpg"
@@ -104,11 +93,18 @@ def persist_photo(hass: HomeAssistant, file_id: str) -> str:
             )
             try:
                 with os.fdopen(output, "wb") as target:
-                    image.save(target, format="PNG" if alpha else "JPEG")
-                    _check_output_size(target.tell())
+                    _save_image(image, target, alpha=alpha)
             except BaseException:
                 os.unlink(name, dir_fd=fd)
                 raise
         finally:
             os.close(fd)
     return f"/local/plant_care/managed/{name}"
+
+
+def _save_image(image: Image.Image, target: BinaryIO, *, alpha: bool) -> None:
+    """Write the validated image while enforcing the processed size limit."""
+    image.save(target, format="PNG" if alpha else "JPEG")
+    if target.tell() > _MAX_OUTPUT_BYTES:
+        error = "Processed image is too large"
+        raise ValueError(error)

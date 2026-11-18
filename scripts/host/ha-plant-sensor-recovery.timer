@@ -1,0 +1,11 @@
+[Unit]
+Description=Check plant measurement reliability once a minute
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=60
+AccuracySec=10
+Unit=ha-plant-sensor-recovery.service
+
+[Install]
+WantedBy=timers.target

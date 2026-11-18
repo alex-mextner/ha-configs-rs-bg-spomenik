@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Alex Ultra
+# SPDX-License-Identifier: MIT
 """Native selection of the speaker used for watering reminders."""
 
 from __future__ import annotations
@@ -51,14 +53,14 @@ class PlantCareConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Create the household speaker preference."""
+        """Choose a verified speech target for the household."""
         await self.async_set_unique_id("plant_care_voice")
         self._abort_if_unique_id_configured()
         errors = {}
         if user_input is not None:
             if valid_target(self.hass, user_input[CONF_VOICE_TARGET]):
                 return self.async_create_entry(
-                    title="Напоминания о поливе",  # noqa: RUF001 - Russian title
+                    title="Напоминания о поливе",  # noqa: RUF001 - Russian UI text.
                     data=user_input,
                 )
             errors[CONF_VOICE_TARGET] = "invalid_speaker"
@@ -75,9 +77,10 @@ class PlantCareConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(
-        _config_entry: config_entries.ConfigEntry,
-    ) -> PlantCareOptionsFlow:
-        """Offer the same supported targets when preferences change."""
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options handler required by the Home Assistant callback."""
+        del config_entry
         return PlantCareOptionsFlow()
 
 
@@ -87,7 +90,7 @@ class PlantCareOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Save and immediately apply the selected speaker."""
+        """Save a supported replacement speaker."""
         errors = {}
         if user_input is not None:
             if valid_target(self.hass, user_input[CONF_VOICE_TARGET]):

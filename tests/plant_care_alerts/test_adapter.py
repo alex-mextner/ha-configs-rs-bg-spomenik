@@ -20,12 +20,16 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     """Exercise plant-care regression scenarios."""
 
     def setUp(self) -> None:
+        from homeassistant.core import CoreState
+
         from custom_components.plant_care_alerts import (
             CareManager,
         )
 
         self.hass = SimpleNamespace(
             data={},
+            is_running=True,
+            state=CoreState.running,
             states=SimpleNamespace(get=lambda _entity: None),
             bus=SimpleNamespace(async_fire=Mock()),
             config_entries=SimpleNamespace(async_get_entry=Mock(return_value=object())),
@@ -200,6 +204,18 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         record = evaluate(
             record, {"has_sensor": True, "moisture": 10, "sample_at": 2001}, 2001
         )
+        self.assertEqual(record["status"], "sensor_error")
+        for stamp in (2301, 2601):
+            record = evaluate(
+                record, {"has_sensor": True, "moisture": 10, "sample_at": stamp}, stamp
+            )
+        # Reliability recovery does not immediately reuse the old dry claim.
+        self.assertEqual(record["status"], "checking")
+        self.assertEqual(record["due_since"], 1000)
+        for stamp in (2901, 3201, 3501):
+            record = evaluate(
+                record, {"has_sensor": True, "moisture": 10, "sample_at": stamp}, stamp
+            )
         self.assertEqual(record["status"], "due")
         acknowledge_delivery(record, "sensor_error")
         self.assertTrue(needs_notification(record))

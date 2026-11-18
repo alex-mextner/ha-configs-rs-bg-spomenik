@@ -5,6 +5,8 @@
 import copy
 import importlib.util
 import json
+import sys
+import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,12 @@ class PlantCareTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.assertTrue(FILE.exists(), "plant alert engine has not been implemented")
-        spec = importlib.util.spec_from_file_location("plant_care_engine", FILE)
+        package = types.ModuleType("_plant_care_engine")
+        package.__path__ = [str(FILE.parent)]
+        sys.modules[package.__name__] = package
+        spec = importlib.util.spec_from_file_location(
+            "_plant_care_engine.state_machine", FILE
+        )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self.evaluate = module.evaluate
@@ -52,7 +59,10 @@ class PlantCareTests(unittest.TestCase):
         self, duration: Any, value: Any = 20, old: Any = None, start: Any = 0
     ) -> Any:
         for sec in range(start, start + duration + 1, 300):
-            old = self.step(old, value, sec)
+            # Normal changing measurements within the same dry/wet band. Truly
+            # frozen readings have their own twelve-hour reliability regressions.
+            changing_value = value + (0.1 if sec % 600 else 0)
+            old = self.step(old, changing_value, sec)
         return old
 
     def test_single_dry_sample_is_not_a_warning(self) -> None:
@@ -145,9 +155,18 @@ class ReviewRegressionTests(unittest.TestCase):
         state = self.sequence(22500)
         state["source_identity"] = "sensor.old"
         state = self.step(state, value=90, offset=22800, source_identity="sensor.new")
+        self.assertEqual(state["status"], "sensor_error")
+        self.assertIsNone(state["due_since"])
+        self.assertIsNone(state["moisture"])
+        # The replacement must establish its own changing physical observations.
+        for offset, value in ((23100, 89), (23400, 88), (23700, 87)):
+            state = self.step(
+                state, value=value, offset=offset, source_identity="sensor.new"
+            )
         self.assertEqual(state["status"], "ok")
         self.assertIsNone(state["due_since"])
-        self.assertEqual(state["moisture"], 90)
+        self.assertEqual(state["moisture"], 87)
+        self.assertTrue(state["reliability_valid"])
 
     def test_snooze_gives_new_orange_period_not_immediate_red(self) -> None:
         state = self.sequence(22500)
@@ -195,7 +214,10 @@ class ReviewRegressionTests(unittest.TestCase):
         state = self.step(state, value=None, offset=21300)
         self.assertEqual(state["dry_since"], dry)
         state = self.step(state, offset=21360)
-        self.assertEqual(state["dry_since"], dry + 60)
+        self.assertEqual(state["status"], "sensor_error")
+        state = self.step(state, offset=21660)
+        state = self.step(state, offset=21960)
+        self.assertEqual(state["dry_since"], dry + 660)
 
     def test_middle_band_cannot_complete_initial_dry_confirmation(self) -> None:
         state = self.sequence(1800)

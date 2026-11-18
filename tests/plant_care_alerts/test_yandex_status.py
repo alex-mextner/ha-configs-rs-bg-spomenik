@@ -59,6 +59,7 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
             "ok",
             {
                 "moisture": 100.0,
+                "reliability_valid": True,
                 "last_sample_at": stamp.timestamp(),
                 "wet_risk": "prolonged",
                 "forecast_status": "saturated",
@@ -81,6 +82,7 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
         now = datetime.now(UTC)
         cases = [
             ("valid", {}, None, None, True),
+            ("unreliable", {"reliability_valid": False}, None, None, False),
             (
                 "care stale",
                 {"last_sample_at": now.timestamp() - 1201},

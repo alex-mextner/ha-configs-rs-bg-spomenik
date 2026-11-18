@@ -81,6 +81,18 @@ class PlantCareSensor(SensorEntity):
                     "ack_until",
                     "dry_threshold",
                     "recovery_threshold",
+                    "untrusted_moisture",
+                    "reliability_valid",
+                    "reliability_reason",
+                    "reliability_incident_reason",
+                    "reliability_incident_started_at",
+                    "reliability_incident_value_changed_at",
+                    "last_value_change_at",
+                    "last_source_change_at",
+                    "last_source_value",
+                    "stagnant_seconds",
+                    "recovery_sample_count",
+                    "reliability_recovered_at",
                 )
             },
             **{
