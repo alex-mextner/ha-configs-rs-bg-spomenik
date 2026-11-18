@@ -183,7 +183,7 @@ homeassistant:
 lovelace:
   resource_mode: yaml
   resources:
-    - url: /local/plant-care/plant-care-card.js?v=20261118-f05d26e63c
+    - url: /local/plant-care/plant-care-card.js?v=20261118-90cec0b3c8
       type: module
     - url: /adaptive_plant/adaptive-plant-card.js?v=1.2.3
       type: module

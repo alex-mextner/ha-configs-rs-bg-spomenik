@@ -324,6 +324,7 @@ async def async_setup(hass: Any, config: Any) -> bool:
 
     async def source_changed(event: Any) -> None:
         """Handle an integration lifecycle event."""
+        manager.note_source_event(event)
         entity_id = event.data.get("entity_id")
         if entity_id in manager.voice_entities:
             manager.refresh_voice_metadata()
@@ -612,7 +613,7 @@ class CareManager:
         return collect_witnesses(self.records)
 
     async def _confirm_calibration_witnesses(
-        self, entry_id: str, witnesses: dict
+        self, entry_id: str, witnesses: dict | None
     ) -> None:
         """Confirm the independent witness before each effect, even when unchanged."""
         if witnesses is None or entry_id not in self.records:
@@ -648,7 +649,7 @@ class CareManager:
 
     def _calibration_source_identity(self, source: str) -> str:
         """Bind history to the registry's raw-source identity and channel."""
-        raw_id = self.config.get("freshness_sources", {}).get(source)
+        raw_id = self.config.get("freshness_sources", {}).get(source, source)
         entity = er.async_get(self.hass).async_get(raw_id) if raw_id else None
         return (
             f"{entity.platform}:{entity.unique_id}:{entity.id}"
@@ -870,13 +871,64 @@ class CareManager:
         )
         self.store.async_delay_save(lambda: self.records, 10)
 
+    def _prepare_adc_context(self, current: dict, source: str, now: float) -> bool:
+        """Fence physical-source metadata independently of calibration storage."""
+        raw_id = self.config.get("freshness_sources", {}).get(source, source)
+        context = [
+            source,
+            raw_id,
+            self._calibration_source_identity(source),
+            self.config.get("automatic_calibration", {})
+            .get(source, {})
+            .get("source_revision"),
+        ]
+        previous = current.get("adc_source_context")
+        changed = previous != context and (
+            previous is not None or bool(current.get("adc_samples"))
+        )
+        if changed:
+            self._reset_adc_samples(current)
+            current["adc_source_fence"] = now
+        current["adc_source_context"] = context
+        return changed
+
+    def note_source_event(self, event: Any) -> None:
+        """Retain the event snapshot before a busy refresh coalesces callbacks."""
+        raw = event.data.get("new_state")
+        observed = timestamp(
+            getattr(raw, "last_updated", None) or getattr(event, "time_fired", None)
+        )
+        if observed is None:
+            return
+        now = dt_util.utcnow().timestamp()
+        plants = self.hass.data.get("adaptive_plant", {})
+        if not isinstance(plants, dict):
+            return
+        for entry_id, plant in plants.items():
+            source = getattr(plant, "moisture_sensor", None)
+            raw_id = self.config.get("freshness_sources", {}).get(source, source)
+            if not raw_id or event.data.get("entity_id") != raw_id:
+                continue
+            current = self.records.setdefault(entry_id, {})
+            self._prepare_adc_context(current, source, now)
+            if raw is None:
+                interruptions = set(current.get("watering_interruptions", []))
+                interruptions.add(observed)
+                current["watering_interruptions"] = sorted(interruptions)
+            else:
+                self._merge_adc_states(current, [raw], now)
+            self.store.async_delay_save(lambda: self.records, 10)
+
     async def _load_history(self, entry_id: str, plant: Any, now: float) -> None:
         """Read bounded recorder history once per source, retrying failed startup."""
         source = plant.moisture_sensor
         raw_id = self.config.get("freshness_sources", {}).get(source, source)
         record = self.records.setdefault(entry_id, {})
         identity = (entry_id, raw_id, source)
-        if "adc_identity" in record and record["adc_identity"] != raw_id:
+        context_changed = self._prepare_adc_context(record, source, now)
+        if context_changed or (
+            "adc_identity" in record and record["adc_identity"] != raw_id
+        ):
             self._reset_adc_samples(record)
             self.history_loaded.discard(identity)
             self.history_attempts.pop(identity, None)
@@ -908,7 +960,8 @@ class CareManager:
             )
             self.calibration.seed_history(entry_id, states.get(raw_id, []), record, now)
             record = self.records.setdefault(entry_id, {})
-            self._merge_adc_states(record, states.get(raw_id, []), now)
+            observed_now = max(now, dt_util.utcnow().timestamp())
+            self._merge_adc_states(record, states.get(raw_id, []), observed_now)
             # Restarts and unavailable->same-value states are not numeric changes.
             # Recorder's bounded initial state supplies a conservative lower bound.
             record["value_history_source"] = source
@@ -972,6 +1025,7 @@ class CareManager:
         for key in (
             "adc_samples",
             "adc_bursts",
+            "adc_provenance",
             "watering_conflicts",
             "watering_interruptions",
         ):
@@ -1004,26 +1058,62 @@ class CareManager:
     @staticmethod
     def _merge_adc_states(current: dict, states: list, now: float) -> None:
         """Keep burst contradictions and actual state interruptions with raw history."""
-        points = list(current.get("adc_samples", []))
+        fence = finite(current.get("adc_source_fence")) or 0
+        points = [
+            point for point in current.get("adc_samples", []) if point[0] >= fence
+        ]
         conflicts = set(current.get("watering_conflicts", []))
         bursts = dict(current.get("adc_bursts", []))
+        provenance = dict(current.get("adc_provenance", []))
         interruptions = set(current.get("watering_interruptions", []))
         for state in states:
-            stamp = timestamp(state.attributes.get("sampled_at"))
-            value = finite(state.state)
-            if stamp is None or value is None:
-                interrupted_at = timestamp(getattr(state, "last_updated", None))
-                if interrupted_at is not None:
-                    interruptions.add(interrupted_at)
+            point = CareManager._adc_observation(state, interruptions)
+            if point is None or point[0] < fence:
                 continue
-            points.append([stamp, value])
+            stamp = point[0]
+            points.append(point)
             CareManager._retain_adc_burst(bursts, conflicts, state, stamp)
+            fingerprint = canonical_digest(state.attributes.get("physical_pin"))
+            if provenance.setdefault(stamp, fingerprint) != fingerprint:
+                conflicts.add(stamp)
         current["adc_samples"], current["watering_conflicts"] = normalize_adc_points(
             points, now, conflicts=conflicts
         )
         retained = {point[0] for point in current["adc_samples"]}
         current["adc_bursts"] = [
             [stamp, bursts[stamp]] for stamp in sorted(bursts) if stamp in retained
+        ]
+        CareManager._retain_source_fences(current, provenance, interruptions, now)
+
+    @staticmethod
+    def _adc_observation(state: Any, interruptions: set) -> list | None:
+        """Use a physical timestamp for values and transition time for outages."""
+        stamp = timestamp(state.attributes.get("sampled_at"))
+        value = finite(state.state)
+        if stamp is not None and value is not None:
+            return [stamp, value]
+        interrupted_at = timestamp(getattr(state, "last_updated", None))
+        if interrupted_at is not None:
+            interruptions.add(interrupted_at)
+        return None
+
+    @staticmethod
+    def _retain_source_fences(
+        current: dict, provenance: dict, interruptions: set, now: float
+    ) -> None:
+        """Split adjacent physical channels, including legacy unattributed points."""
+        prior = None
+        have_prior = False
+        for stamp, _value in current["adc_samples"]:
+            identity = provenance.get(stamp)
+            if have_prior and identity != prior:
+                interruptions.add(stamp)
+            prior, have_prior = identity, True
+        retained = {point[0] for point in current["adc_samples"]}
+        current["adc_provenance"] = [
+            [stamp, provenance[stamp]]
+            for stamp in sorted(provenance)
+            if stamp in retained
         ]
         current["watering_interruptions"] = sorted(
             stamp for stamp in interruptions if now - RETENTION_SECONDS <= stamp <= now
@@ -1198,6 +1288,7 @@ class CareManager:
         raw_id = self.config.get("freshness_sources", {}).get(source, source)
         raw = self.hass.states.get(raw_id) if raw_id else None
         calibration = self._calibration(source)
+        self._prepare_adc_context(current, source, now)
         self._collect_adc_samples(current, raw_id, raw, calibration, now)
         barrier = finite(reading.get("calibration_barrier_until"))
         if barrier is not None:
@@ -1339,6 +1430,7 @@ class CareManager:
         before = self.calibration.attributes(entry_id)
         await self.calibration.async_prepare(entry_id, plant.moisture_sensor, now)
         await self._load_history(entry_id, plant, now)
+        now = max(now, dt_util.utcnow().timestamp())
         changed = self._refresh_plant(entry_id, plant, now)
         await self.calibration.async_observe(
             entry_id,

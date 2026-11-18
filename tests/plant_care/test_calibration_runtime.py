@@ -307,7 +307,7 @@ class FakeServices:
 class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     """Exercise persistence and actual helper effects through the runtime adapter."""
 
-    async def confirm_witnesses(self, entry: str, witnesses: dict) -> None:
+    async def confirm_witnesses(self, entry: str, witnesses: dict | None) -> None:
         await persistence_module.async_save_confirmed(
             self.care_store, self.care_store.async_load, {entry: witnesses}
         )
@@ -632,7 +632,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         await self.qualified_fixture()
 
-        async def failed_witness(_entry: str, _witnesses: dict) -> None:
+        async def failed_witness(_entry: str, _witnesses: dict | None) -> None:
             message = "Independent care-store confirmation failed"
             raise OSError(message)
 
@@ -649,7 +649,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.qualified_fixture()
         observed = []
 
-        async def confirm(entry: str, witnesses: dict) -> None:
+        async def confirm(entry: str, witnesses: dict | None) -> None:
             pending = self.store.data["records"]["sensor.smooth"]["pending"]
             self.assertIsNotNone(pending)
             self.assertEqual(self.hass.services.writes, [])
@@ -668,7 +668,9 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.qualified_fixture()
         confirmed = self.confirm_witnesses
 
-        async def manual_during_confirmation(entry: str, witnesses: dict) -> None:
+        async def manual_during_confirmation(
+            entry: str, witnesses: dict | None
+        ) -> None:
             await confirmed(entry, witnesses)
             self.external_wet_change(230)
 

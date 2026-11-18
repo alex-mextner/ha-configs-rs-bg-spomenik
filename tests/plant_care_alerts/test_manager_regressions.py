@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from datetime import UTC, datetime, timedelta
 from inspect import iscoroutinefunction
@@ -21,6 +22,7 @@ from custom_components.plant_care_alerts import (
     async_setup,
     needs_notification,
 )
+from custom_components.plant_care_alerts.analytics import analyze
 from custom_components.plant_care_alerts.state_machine import evaluate
 
 from .service_fixtures import make_service_registry
@@ -231,8 +233,9 @@ class TestManagerRegressions(unittest.IsolatedAsyncioTestCase):
 
         def refresh_plant(entry_id, _plant, _now) -> bool:
             passes.append(entry_id)
+            record = self.manager.records.setdefault(entry_id, {})
             if entry_id == "a":
-                self.manager.records["a"]["status"] = "ok" if watered else "due"
+                record["status"] = "ok" if watered else "due"
             return True
 
         async def read_report() -> str:
@@ -286,6 +289,90 @@ class TestManagerRegressions(unittest.IsolatedAsyncioTestCase):
             release.set()
             await asyncio.wait_for(owner, timeout=TEST_TIMEOUT)
         self.assertEqual(self.manager._refresh_plant.call_count, 2)
+
+    async def test_live_outage_survives_a_coalesced_history_wait(self) -> None:
+        await self._register_callbacks()
+        end = self.now.timestamp()
+        start = end - 5400
+        raw_states = [
+            SimpleNamespace(
+                state=str(300 if index < 12 else 340),
+                attributes={
+                    "sampled_at": datetime.fromtimestamp(
+                        start + index * 300, UTC
+                    ).isoformat(),
+                    "samples": [300 if index < 12 else 340] * 5,
+                    "physical_pin": 22,
+                },
+                last_updated=datetime.fromtimestamp(start + index * 300, UTC),
+            )
+            for index in range(19)
+        ]
+        self.manager.watched = {"sensor.raw"}
+        self.hass.data["adaptive_plant"] = {
+            "a": SimpleNamespace(moisture_sensor="sensor.smooth")
+        }
+        current = self.manager.records["a"]
+        current["adc_identity"] = "sensor.raw"
+        current["adc_source_context"] = [
+            "sensor.smooth",
+            "sensor.raw",
+            "registry-a",
+            None,
+        ]
+        current["adc_calibration"] = [67, 1298]
+        self.manager._merge_adc_states(current, raw_states[:-1], end - 300)
+        self.manager._calibration_source_identity = Mock(return_value="registry-a")
+        states = {"sensor.raw": raw_states[-2]}
+        self.hass.states.get = states.get
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def load_history(_entry_id, _plant, _now) -> None:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+
+        def refresh_plant(_entry_id, _plant, now) -> bool:
+            self.manager._collect_adc_samples(
+                current, "sensor.raw", states["sensor.raw"], [67, 1298], now
+            )
+            current.update(
+                analyze(current, current["adc_samples"], now, calibration=[67, 1298])
+            )
+            return True
+
+        self.manager._load_history = AsyncMock(side_effect=load_history)
+        self.manager._refresh_plant = Mock(side_effect=refresh_plant)
+        with patch(f"{MODULE}.dt_util.utcnow") as clock:
+            clock.return_value = self.now - timedelta(seconds=300)
+            owner = asyncio.create_task(self.manager.async_refresh())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=TEST_TIMEOUT)
+                outage = SimpleNamespace(
+                    state="unavailable",
+                    attributes=raw_states[-2].attributes,
+                    last_updated=self.now - timedelta(seconds=150),
+                )
+                for state in (outage, raw_states[-1]):
+                    states["sensor.raw"] = state
+                    clock.return_value = state.last_updated
+                    await self.source_changed(
+                        SimpleNamespace(
+                            data={"entity_id": "sensor.raw", "new_state": state},
+                            time_fired=state.last_updated,
+                        )
+                    )
+                self.assertTrue(self.manager._refresh_pending)
+            finally:
+                release.set()
+                await asyncio.wait_for(owner, timeout=TEST_TIMEOUT)
+        self.assertEqual(self.manager._refresh_plant.call_count, 2)
+        self.assertIn(end - 150, current.get("watering_interruptions", []))
+        self.assertNotEqual(current.get("last_watering_source"), "auto")
+        # The fence is part of the persisted care record, not an ephemeral flag.
+        restored = json.loads(json.dumps(current))
+        self.assertEqual(restored, current)
+        self.assertIn(end - 150, restored["watering_interruptions"])
 
     async def test_reentrant_refresh_coalesces_without_waiting_on_itself(self) -> None:
         calls = 0

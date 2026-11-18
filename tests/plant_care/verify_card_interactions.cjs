@@ -47,13 +47,14 @@ function historyPoints(history) {
   const end = Date.parse(history.end);
   assert.ok(Number.isFinite(start) && Number.isFinite(end) && start < end);
   const points = history.points.flatMap((item, index) => {
-    const time = Date.parse(item.last_changed || item.last_updated);
+    const timestamp = item.last_changed || item.last_updated;
+    const time = Date.parse(timestamp);
     // Only the first raw boundary row is HA carry-forward, not later real observations at that time.
     if (index === 0 && history.include_initial_state !== false && time === start) return [];
     if (item.state == null || String(item.state).trim() === '') return [];
     const value = Number(item.state);
     return Number.isFinite(time)
-      && Number.isFinite(value) && value >= 0 && value <= 100 ? [{time, value}] : [];
+      && Number.isFinite(value) && value >= 0 && value <= 100 ? [{time, value, timestamp}] : [];
   }).sort((a, b) => a.time - b.time);
   assert.ok(points.length > 1, 'At least two real valid history points are required');
   return {start, end, points};
@@ -75,6 +76,7 @@ async function assertPoint(page, expected) {
   assert.equal(actual.time, expected.time, 'Graph must identify the real Recorder timestamp');
   assert.ok(Math.abs(actual.value - expected.value) < 1e-8, 'Graph must show the recorded value without interpolation');
   assert.equal(Date.parse(actual.datetime), expected.time);
+  if (expected.timestamp) assert.equal(actual.datetime, expected.timestamp, 'Recorder timestamp precision must be retained');
   assert.ok(actual.dateText && actual.reading, 'Selection must expose visible date and moisture');
   const displayed = Number(actual.reading.match(/-?\d+(?:[.,]\d+)?/)?.[0].replace(',', '.'));
   assert.ok(Number.isFinite(displayed) && Math.abs(displayed - expected.value) <= 0.51);
@@ -384,6 +386,44 @@ async function verifyLegacyBoundary(page, fixture) {
   await closeWithEscape(page, tile);
 }
 
+async function verifyEqualTimeSelection(page, fixture) {
+  const history = structuredClone(fixture.histories['sensor.qa_soil_a|7']);
+  const pairs = [[history.start, history.start],
+    [history.start.replace('.000Z', '.000100Z'), history.start.replace('.000Z', '.000200Z')]];
+  const tile = TILE + '[data-entity="sensor.qa_plant_a"]';
+  for (const timestamps of pairs) {
+    history.points = [{state: '61', last_changed: timestamps[0]},
+      {state: '62', last_changed: timestamps[1]},
+      {state: '65', last_changed: new Date(Date.parse(history.start) + 3600000).toISOString()}];
+    await page.evaluate(history => {
+      const card = document.querySelector('plant-care-card');
+      card._history['sensor.qa_soil_a|7'] = {
+        points: history.points, start: Date.parse(history.start), end: Date.parse(history.end),
+        loading: false, fetchedAt: Date.now(), includesInitialState: false,
+      };
+    }, history);
+    await page.locator(tile).click();
+    const points = historyPoints(history).points;
+    await page.locator(GRAPH).press('Home');
+    await assertPoint(page, points[0]);
+    await page.locator(GRAPH).press('ArrowRight');
+    await assertPoint(page, points[1]);
+    assert.equal(await page.locator(GRAPH).getAttribute('aria-valuenow'), '1');
+    await page.evaluate(() => {
+      const card = document.querySelector('plant-care-card');
+      card.hass = {...card.hass, states: {...card.hass.states}};
+    });
+    await assertPoint(page, points[1]);
+    await page.locator(GRAPH).press('End');
+    await page.locator(GRAPH).press('ArrowLeft');
+    await assertPoint(page, points[1]);
+    await closeWithEscape(page, tile);
+    await page.locator(tile).click();
+    await assertPoint(page, points[1]);
+    await closeWithEscape(page, tile);
+  }
+}
+
 async function verifyDynamicDiscovery(page, fixture) {
   await page.evaluate(fixture => {
     const card = document.querySelector('plant-care-card');
@@ -547,6 +587,8 @@ async function verifySyntheticCardInteractions(page) {
       });
       await check('legacy query boundary is not offered as a recorded measurement',
         () => verifyLegacyBoundary(page, fixture));
+      await check('equal-time observations preserve independent selection and exact timestamp precision',
+        () => verifyEqualTimeSelection(page, fixture));
       await check('discovery preserves tiles, photos, open detail and focus return',
         () => verifyDynamicDiscovery(page, fixture));
       await check('failed refresh of cached empty history exposes retry and recovers real observations',

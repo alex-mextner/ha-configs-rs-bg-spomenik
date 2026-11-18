@@ -59,6 +59,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             enable_image=False,
         )
         self.manager._buttons = Mock(return_value={})
+        self.manager._calibration_source_identity = Mock(return_value="registry-a")
         self.now = datetime.now(UTC).timestamp()
 
     def test_configuration_rejects_incomplete_or_reversed_calibration(self) -> None:
@@ -226,6 +227,109 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(result.get("last_watering_source"), "auto")
         self.assertIn(start + 3450, current["watering_interruptions"])
+
+    async def test_physical_channel_change_fences_watering_without_autocalibration(
+        self,
+    ) -> None:
+        from custom_components.plant_care_alerts.analytics import analyze
+
+        start = self.now - 5400
+        states = [
+            SimpleNamespace(
+                state=str(300 if index < 12 else 340),
+                attributes={
+                    "sampled_at": datetime.fromtimestamp(
+                        start + index * 300, UTC
+                    ).isoformat(),
+                    "samples": [300 if index < 12 else 340] * 5,
+                    "physical_pin": 22 if index < 12 else 23,
+                },
+                last_updated=datetime.fromtimestamp(start + index * 300, UTC),
+            )
+            for index in range(19)
+        ]
+        current = {}
+        self.manager._merge_adc_states(current, states, self.now)
+        result = analyze(
+            current, current["adc_samples"], self.now, calibration=[67, 1298]
+        )
+        self.assertNotEqual(result.get("last_watering_source"), "auto")
+        restored = json.loads(json.dumps(current))
+        self.assertEqual(restored, current)
+        self.assertIn(start + 3600, restored["watering_interruptions"])
+
+    async def test_registry_or_revision_change_fences_loaded_adc_history(self) -> None:
+        from custom_components.plant_care_alerts.analytics import analyze
+
+        start = self.now - 5400
+        raw_states = [
+            SimpleNamespace(
+                state=str(300 if index < 12 else 340),
+                attributes={
+                    "sampled_at": datetime.fromtimestamp(
+                        start + index * 300, UTC
+                    ).isoformat(),
+                    "samples": [300 if index < 12 else 340] * 5,
+                    "physical_pin": 22,
+                },
+                last_updated=datetime.fromtimestamp(start + index * 300, UTC),
+            )
+            for index in range(19)
+        ]
+        recorder = SimpleNamespace(
+            async_add_executor_job=AsyncMock(
+                return_value={
+                    "sensor.raw": raw_states,
+                    "sensor.smooth": [
+                        SimpleNamespace(
+                            state="50",
+                            last_updated=datetime.fromtimestamp(self.now, UTC),
+                        )
+                    ],
+                }
+            )
+        )
+        registry = Mock(return_value="registry-a")
+        self.manager._calibration_source_identity = registry
+        for change in ("registry", "revision"):
+            with self.subTest(change=change):
+                self.manager.records["a"] = {}
+                self.manager.history_loaded.clear()
+                self.manager.history_attempts.clear()
+                self.manager.config["automatic_calibration"] = {}
+                registry.return_value = "registry-a"
+                with (
+                    patch(
+                        "custom_components.plant_care_alerts.get_instance",
+                        return_value=recorder,
+                    ),
+                    patch(
+                        "custom_components.plant_care_alerts.dt_util.utcnow",
+                        return_value=datetime.fromtimestamp(self.now, UTC),
+                    ),
+                ):
+                    await self.manager._load_history("a", self.plant, self.now)
+                    if change == "registry":
+                        registry.return_value = "registry-b"
+                    else:
+                        self.manager.config["automatic_calibration"] = {
+                            "sensor.smooth": {"source_revision": "repaired"}
+                        }
+                    # A disabled calibration writer cannot supply the source fence.
+                    self.manager.calibration.inhibit_writes("storage_unavailable")
+                    await self.manager._load_history("a", self.plant, self.now + 1)
+                current = self.manager.records["a"]
+                self.assertEqual(json.loads(json.dumps(current)), current)
+                result = analyze(
+                    current,
+                    current["adc_samples"],
+                    self.now + 1,
+                    calibration=[67, 1298],
+                )
+                self.assertNotEqual(result.get("last_watering_source"), "auto")
+                self.assertTrue(
+                    all(point[0] >= self.now + 1 for point in current["adc_samples"])
+                )
 
     async def test_user_refresh_does_not_inherit_background_write_authority(
         self,

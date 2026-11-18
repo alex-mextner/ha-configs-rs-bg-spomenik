@@ -129,7 +129,7 @@ test('drag and keyboard selection update only inspection and skip the same obser
   fresh._hass = {states: {[plant.entity_id]: plant}};
   fresh._history['sensor.moisture|7'] = {start, end: start + 3600000, includesInitialState: false,
     points: [{state: '20', last_changed: stamp(15)}, {state: '70', last_changed: stamp(45)}]};
-  fresh._selectedPoints.set(`${plant.entity_id}|7`, start + 15 * 60000);
+  fresh._selectedPoints.set(`${plant.entity_id}|7`, fresh._historyPoints(fresh._history['sensor.moisture|7'])[0]);
   fresh._render = () => assert.fail('Selection must not rebuild detail markup');
   fresh._inspectPointer({target: chart, clientX: 250});
   assert.equal(writes, 0, 'Selecting the existing point performs no DOM work');
@@ -146,6 +146,31 @@ test('drag and keyboard selection update only inspection and skip the same obser
   fresh._inspectKeyboard({target: chart, key: 'Home', preventDefault() {}});
   assert.equal(chart.attributes['aria-valuenow'], '0');
   assert.equal(time.attributes.datetime, stamp(15));
+});
+
+test('equal-time observations remain independently selectable and survive refreshed rendering', () => {
+  for (const timestamps of [[stamp(0), stamp(0)],
+    ['2026-11-18T12:00:00.000100Z', '2026-11-18T12:00:00.000200Z']]) {
+    const fresh = new Card(); let inspected;
+    const chart = {matches: () => true};
+    fresh._selectedEntity = plant.entity_id;
+    fresh._hass = {states: {[plant.entity_id]: plant}};
+    const h = fresh._history['sensor.moisture|7'] = {
+      start, end: start + 3600000, includesInitialState: false,
+      points: [{state: '61', last_changed: timestamps[0]},
+        {state: '62', last_changed: timestamps[1]}, {state: '65', last_changed: stamp(15)}],
+    };
+    fresh._updateInspection = (_history, _points, point) => { inspected = point; };
+    const key = key => fresh._inspectKeyboard({target: chart, key, preventDefault() {}});
+    key('Home'); assert.equal(inspected.value, 61);
+    key('ArrowRight'); assert.equal(inspected.value, 62);
+    assert.match(fresh._graph(plant.attributes, plant.entity_id), /data-value="62"/);
+    assert.equal(fresh._inspectionData(h, fresh._historyPoints(h), inspected).date, timestamps[1]);
+    key('End'); key('ArrowLeft'); assert.equal(inspected.value, 62);
+    h.points = [{state: '59', last_changed: stamp(-1)}, ...h.points.map(point => ({...point}))];
+    assert.match(fresh._graph(plant.attributes, plant.entity_id), /data-value="62"/);
+    key('ArrowLeft'); assert.equal(inspected.value, 61);
+  }
 });
 
 console.log('PASS: compact truthful tiles, approximate day labels and selection of real history points');

@@ -534,9 +534,19 @@ class CalibrationNativeServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_read_only_user_cannot_invoke_the_guarded_write_service(self) -> None:
+        # HA makes its first human user the owner, regardless of the requested group.
+        owner = await self.hass.auth.async_create_user(
+            "Calibration owner", group_ids=[GROUP_ID_ADMIN]
+        )
+        self.assertTrue(owner.is_owner)
+        self.assertTrue(owner.is_admin)
         user = await self.hass.auth.async_create_user(
             "Calibration observer", group_ids=[GROUP_ID_READ_ONLY]
         )
+        self.assertTrue(user.is_active)
+        self.assertFalse(user.is_owner)
+        self.assertFalse(user.is_admin)
+        self.assertEqual([group.id for group in user.groups], [GROUP_ID_READ_ONLY])
         caller_context = Context(user_id=user.id)
         observed_contexts = []
 

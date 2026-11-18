@@ -587,14 +587,20 @@
       const includesInitialState = h.includesInitialState !== false;
       if (cached && cached.sourcePoints === h.points && cached.start === h.start
         && cached.end === h.end && cached.includesInitialState === includesInitialState) return cached;
+      const identities = new Map();
       const transitions = (h.points || []).map(item => {
-        const time = Date.parse(item.last_changed || item.last_updated);
+        const timestamp = String(item.last_changed || item.last_updated || '');
+        const time = Date.parse(timestamp);
         const value = number(item.state);
-        return {time, value, valid:Number.isFinite(time) && value !== null && value >= 0 && value <= 100};
+        const signature = JSON.stringify([timestamp,value]);
+        const occurrence = identities.get(signature) || 0;
+        identities.set(signature,occurrence + 1);
+        return {id:signature + ':' + occurrence, timestamp, time, value,
+          valid:Number.isFinite(time) && value !== null && value >= 0 && value <= 100};
       });
       const observations = transitions.filter((point,index) => point.valid
         && !(includesInitialState && index === 0 && point.time === h.start))
-        .map(({time,value}) => ({time,value})).sort((a,b) => a.time - b.time);
+        .map(({id,timestamp,time,value}) => ({id,timestamp,time,value})).sort((a,b) => a.time - b.time);
       h.normalized = {sourcePoints:h.points, start:h.start, end:h.end, includesInitialState,
         observations, rendering:this._historyShapesFor(transitions,h)};
       return h.normalized;
@@ -612,11 +618,11 @@
     _selectedPoint(a, entityId, points) {
       const chosen = this._selectedPoints.get(this._pointKey(a,entityId));
       if (chosen === undefined) return points.at(-1);
-      return points.find(point => point.time === chosen)
-        || points.reduce((nearest,point) => Math.abs(point.time-chosen) < Math.abs(nearest.time-chosen) ? point : nearest);
+      return points.find(point => point.id === chosen.id)
+        || points.reduce((nearest,point) => Math.abs(point.time-chosen.time) < Math.abs(nearest.time-chosen.time) ? point : nearest);
     }
     _inspectionData(h, points, point) {
-      const date = new Date(point.time).toISOString();
+      const date = point.timestamp;
       return {
         x:Math.max(0,Math.min(1000,(point.time-h.start)/(h.end-h.start)*1000)),
         index:points.indexOf(point), date, value:adcLabel(point.value), label:dateLabel(date),
@@ -643,8 +649,8 @@
       const a = state.attributes;
       const h = this._history[`${a.source_entity}|${this._days}`];
       const points = this._historyPoints(h);
-      if (!points.length || this._selectedPoint(a,state.entity_id,points).time === point.time) return;
-      this._selectedPoints.set(this._pointKey(a,state.entity_id),point.time);
+      if (!points.length || this._selectedPoint(a,state.entity_id,points).id === point.id) return;
+      this._selectedPoints.set(this._pointKey(a,state.entity_id),{id:point.id, time:point.time});
       this._updateInspection(h,points,point);
     }
     _graph(a, entityId) {
@@ -659,7 +665,7 @@
       const point = this._selectedPoint(a,entityId,points);
       const {x,index,date,value,label} = this._inspectionData(h,points,point);
       const line = threshold !== null && threshold >= 0 && threshold <= 100 ? `<line class="threshold" x1="0" x2="1000" y1="${100-threshold}" y2="${100-threshold}"/>` : '';
-      return `<svg class="chart" data-key="chart" viewBox="0 0 1000 100" preserveAspectRatio="none" tabindex="0" role="slider" aria-label="Выбор измерения влажности" aria-valuemin="0" aria-valuemax="${points.length-1}" aria-valuenow="${index}" aria-valuetext="${esc(label)}, ${esc(value)} процентов">${line}${shapes}<line class="inspection-line" x1="${x}" x2="${x}" y1="0" y2="100"/><circle class="inspection-point" cx="${x}" cy="${100-point.value}" r="3"/></svg><output class="graph-inspection" data-key="inspection" aria-live="polite" data-value="${point.value}" data-timestamp="${point.time}"><time datetime="${date}">${esc(label)}</time><strong data-reading-value>${esc(value)} %</strong></output><div class="axis" data-key="axis"><span>${this._days} дн. до конца периода</span><span>до ${esc(dateLabel(new Date(h.end).toISOString()))}</span></div><div class="chart-note" data-key="note">0–100 %${line ? ` · Порог сухости ${esc(threshold)} %` : ''} · выбери точку на графике или стрелками</div><div class="chart-note" data-key="quality">Ступени — состояния Recorder, разрывы — неизвестно${h.error ? ' · Обновление не удалось; показана ранее загруженная история' : ''}</div>`;
+      return `<svg class="chart" data-key="chart" viewBox="0 0 1000 100" preserveAspectRatio="none" tabindex="0" role="slider" aria-label="Выбор измерения влажности" aria-valuemin="0" aria-valuemax="${points.length-1}" aria-valuenow="${index}" aria-valuetext="${esc(label)}, ${esc(value)} процентов">${line}${shapes}<line class="inspection-line" x1="${x}" x2="${x}" y1="0" y2="100"/><circle class="inspection-point" cx="${x}" cy="${100-point.value}" r="3"/></svg><output class="graph-inspection" data-key="inspection" aria-live="polite" data-value="${point.value}" data-timestamp="${point.time}"><time datetime="${esc(date)}">${esc(label)}</time><strong data-reading-value>${esc(value)} %</strong></output><div class="axis" data-key="axis"><span>${this._days} дн. до конца периода</span><span>до ${esc(dateLabel(new Date(h.end).toISOString()))}</span></div><div class="chart-note" data-key="note">0–100 %${line ? ` · Порог сухости ${esc(threshold)} %` : ''} · выбери точку на графике или стрелками</div><div class="chart-note" data-key="quality">Ступени — состояния Recorder, разрывы — неизвестно${h.error ? ' · Обновление не удалось; показана ранее загруженная история' : ''}</div>`;
     }
     _inspectPointer(event) {
       const chart = event.target.closest?.('.chart');
