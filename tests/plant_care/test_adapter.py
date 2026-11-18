@@ -8,6 +8,7 @@ import importlib.util
 import unittest
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -35,7 +36,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             bus=SimpleNamespace(async_fire=Mock()),
             config_entries=SimpleNamespace(async_get_entry=Mock(return_value=object())),
         )
-        with patch("custom_components.plant_care_alerts.Store"):
+        with patch("custom_components.plant_care_alerts.new_store"):
             self.manager = CareManager(
                 self.hass,
                 {
@@ -95,6 +96,49 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     config.pop(removed)
                 with self.assertRaises(vol.Invalid):
                     CONFIG_SCHEMA({DOMAIN: config})
+
+    def test_approximate_report_keeps_the_reported_day_and_uncertainty(self) -> None:
+        from custom_components.plant_care_alerts import CONFIG_SCHEMA, DOMAIN
+
+        report = {
+            "date": "2026-11-17",
+            "precision": "approximate_day",
+            "note": "Вчера вроде",
+            "timezone": "Europe/Belgrade",
+        }
+        config = CONFIG_SCHEMA({DOMAIN: {"user_reports": {"sensor.smooth": report}}})
+        self.manager.config["user_reports"] = config[DOMAIN]["user_reports"]
+        analysis = {
+            "last_watering_at": "2026-11-03",
+            "last_watering_source": "user_report",
+        }
+        now = datetime(2026, 11, 18, 20, tzinfo=UTC).timestamp()
+        self.manager._restore_reported_watering(
+            analysis, ("2026-11-03", "user_report"), self.plant, now
+        )
+        self.assertEqual(analysis["last_watering_at"], "2026-11-17")
+        self.assertEqual(analysis["last_watering_precision"], "approximate_day")
+        self.assertEqual(analysis["last_watering_note"], "Вчера вроде")
+        self.assertIsNone(analysis["last_watering_window_start"])
+        self.assertIsNone(analysis["watering_history"][0]["detected_at"])
+        self.assertEqual(analysis["watering_history"][1]["detected_at"], now)
+        self.manager._restore_reported_watering(
+            analysis, ("2026-11-17", "user_report"), self.plant, now + 60
+        )
+        self.assertEqual(len(analysis["watering_history"]), 2)
+        self.assertIsNone(analysis["watering_history"][0]["detected_at"])
+        self.assertEqual(analysis["watering_history"][1]["detected_at"], now)
+
+    def test_collector_does_not_hide_conflicting_physical_timestamp(self) -> None:
+        current = {"adc_identity": "sensor.raw", "adc_samples": [[self.now, 300]]}
+        raw = SimpleNamespace(
+            state="340",
+            attributes={"sampled_at": datetime.fromtimestamp(self.now, UTC)},
+        )
+        self.manager._collect_adc_samples(
+            current, "sensor.raw", raw, [67, 1298], self.now
+        )
+        self.assertEqual(current["watering_conflicts"], [self.now])
 
     async def test_user_refresh_does_not_inherit_background_write_authority(
         self,
@@ -236,12 +280,20 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         record = CalibrationRuntime._new_record(
             "sensor.smooth", (67, 221), identity, self.now - 86400
         )
-        producer = CalibrationRuntime(self.hass, SimpleNamespace(), options)
+        producer = CalibrationRuntime(
+            self.hass,
+            SimpleNamespace(),
+            options,
+            hooks=RuntimeHooks(
+                read_persisted=AsyncMock(return_value=None),
+                confirm_witnesses=AsyncMock(),
+            ),
+        )
         witness = producer._witness_snapshot({"sensor.smooth": record})
         prior = {"a": {"status": "sensor_error", "calibration_witnesses": witness}}
         self.hass.data["adaptive_plant"] = {"a": self.plant}
         for _ in range(2):
-            with patch("custom_components.plant_care_alerts.Store"):
+            with patch("custom_components.plant_care_alerts.new_store"):
                 manager = CareManager(self.hass, options)
             manager.add_entities = Mock()
             manager._buttons = Mock(return_value={})
@@ -252,7 +304,11 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.hass,
                 SimpleNamespace(async_load=AsyncMock(return_value=None)),
                 options,
-                hooks=RuntimeHooks(identity_provider=lambda _source: identity),
+                hooks=RuntimeHooks(
+                    read_persisted=AsyncMock(return_value=None),
+                    confirm_witnesses=manager._confirm_calibration_witnesses,
+                    identity_provider=lambda _source: identity,
+                ),
             )
             with self.assertLogs(
                 "custom_components.plant_care_alerts.calibration_runtime", level="ERROR"
@@ -284,6 +340,37 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.manager.calibration._disabled_reason, "witness_unavailable"
         )
+
+    async def test_identical_durable_witness_is_confirmed_each_time(self) -> None:
+        witness = {"source": {"revision": 0, "decision_fence_at": None}}
+        self.manager.records["a"] = {"calibration_witnesses": deepcopy(witness)}
+        self.manager.store.async_save = AsyncMock()
+        self.manager._read_persisted = AsyncMock(
+            return_value=deepcopy(self.manager.records)
+        )
+        for _ in range(2):
+            await self.manager._confirm_calibration_witnesses("a", witness)
+        self.assertEqual(self.manager.store.async_save.await_count, 2)
+        self.assertEqual(self.manager._read_persisted.await_count, 2)
+        self.assertEqual(self.manager.records["a"]["calibration_witnesses"], witness)
+
+    async def test_witness_confirmation_does_not_restore_stale_care_fields(
+        self,
+    ) -> None:
+        witness = {"source": {"revision": 0, "decision_fence_at": None}}
+        self.manager.records["a"] = {"notified_status": "due"}
+        persisted = None
+
+        async def save(snapshot: dict) -> None:
+            nonlocal persisted
+            persisted = deepcopy(snapshot)
+            self.manager.records["a"]["notified_status"] = "overdue"
+
+        self.manager.store.async_save = AsyncMock(side_effect=save)
+        self.manager._read_persisted = AsyncMock(side_effect=lambda _key: persisted)
+        await self.manager._confirm_calibration_witnesses("a", witness)
+        self.assertEqual(self.manager.records["a"]["notified_status"], "overdue")
+        self.assertEqual(self.manager.records["a"]["calibration_witnesses"], witness)
 
     async def test_failed_refresh_drops_queued_background_authority(self) -> None:
         observed = []
@@ -328,6 +415,64 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.emit_transition("a", "checking")
         self.assertFalse(self.hass.bus.async_fire.call_args.args[1]["notify"])
+
+    def test_blueprint_clear_consumer_obeys_explicit_delivery_permission(self) -> None:
+        import yaml
+        from jinja2 import Environment, StrictUndefined
+
+        class BlueprintLoader(yaml.SafeLoader):
+            """Keep blueprint input placeholders while reading the real branches."""
+
+        BlueprintLoader.add_constructor(
+            "!input", lambda loader, node: loader.construct_scalar(node)
+        )
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "blueprints/automation/plant_care/alerts.yaml"
+        )
+        loader = BlueprintLoader(path.read_text())
+        try:
+            document = loader.get_single_data()
+        finally:
+            loader.dispose()
+        choices = document["actions"][0]["choose"][1]["sequence"][0]["choose"]
+        environment = Environment(undefined=StrictUndefined, autoescape=True)
+        healthy = environment.from_string(choices[1]["conditions"])
+        fault = environment.from_string(choices[0]["sequence"][3]["if"])
+        for status in ("calibrating", "checking", "ok", "sensor_error"):
+            with self.subTest(status=status, clear=False):
+                variables = {
+                    "change_status": status,
+                    "trigger": {
+                        "event": {"data": {"clear": False, "previous": "overdue"}}
+                    },
+                }
+                self.assertEqual(healthy.render(**variables).strip(), "False")
+                self.assertEqual(fault.render(**variables).strip(), "False")
+        for status in ("ok", "checking"):
+            with self.subTest(status=status, clear=True):
+                variables = {
+                    "change_status": status,
+                    "trigger": {
+                        "event": {"data": {"clear": True, "previous": "checking"}}
+                    },
+                }
+                self.assertEqual(healthy.render(**variables).strip(), "True")
+
+    def test_delayed_clear_is_emitted_once_confirmation_finishes(self) -> None:
+        self.manager.records["a"] = {
+            "status": "ok",
+            "due_since": None,
+            "notified_status": None,
+            "calibration_confirmation_pending": False,
+            "clear_pending": True,
+        }
+        self.manager.details["a"] = {"plant_name": "Тест"}
+        self.manager.entities["a"] = SimpleNamespace(entity_id="sensor.test")
+        self.manager.emit_transition("a", "checking")
+        event = self.hass.bus.async_fire.call_args.args[1]
+        self.assertTrue(event["clear"])
+        self.assertFalse(event["notify"])
 
     def test_recorder_excludes_large_calibration_journal(self) -> None:
         from custom_components.plant_care_alerts.sensor import PlantCareSensor

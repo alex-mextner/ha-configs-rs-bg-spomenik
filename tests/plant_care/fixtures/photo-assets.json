@@ -1,0 +1,54 @@
+{
+  "schema": "plant-care-photo-assets/v1",
+  "source": "Home Assistant HTTP capture",
+  "capture_receipt_sha256": "67ddd177780f15a3d63870b27ed5d2f4fbe63650cb38b6723536a2bb447d2357",
+  "generated_source_sha256": "b8ef7bcc8e8d39e3d96ae16dc6e478ab87b70813e2c42c156f139fac9ad5b616",
+  "assets": [
+    {
+      "source_url": "/local/adaptive_plant/1907fb5ebe5a4f62a57d668c206fd614.jpg",
+      "file": "before-photo.jpg",
+      "sha256": "6dfb8e1958759aa898847b8c2ef184eed67ac056db67a06cbf3264c93b3489cd",
+      "bytes": 99801,
+      "mime": "image/jpeg",
+      "observed_at": "2026-11-18T20:14:23.003905+00:00",
+      "inspection": {
+        "sha256": "6dfb8e1958759aa898847b8c2ef184eed67ac056db67a06cbf3264c93b3489cd",
+        "mode": "RGB",
+        "size": [
+          701,
+          1024
+        ],
+        "alpha_extrema": null,
+        "alpha_corners": null,
+        "transparent_fraction": 0
+      }
+    },
+    {
+      "source_url": "/local/plant_care/managed/2a21be858d34493f96d9ad0ba0248a6e.png",
+      "file": "after-photo.png",
+      "sha256": "5af783971c11b6438c402a47414a434ab419bad9ab2748d2b5ab8127ae124cb5",
+      "bytes": 591822,
+      "mime": "image/png",
+      "observed_at": "2026-11-18T20:14:46.671680+00:00",
+      "inspection": {
+        "sha256": "5af783971c11b6438c402a47414a434ab419bad9ab2748d2b5ab8127ae124cb5",
+        "mode": "RGBA",
+        "size": [
+          701,
+          1024
+        ],
+        "alpha_extrema": [
+          0,
+          255
+        ],
+        "alpha_corners": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "transparent_fraction": 0.6145949424928673
+      }
+    }
+  ]
+}

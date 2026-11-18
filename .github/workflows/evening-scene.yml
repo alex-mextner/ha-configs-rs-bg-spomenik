@@ -1,0 +1,53 @@
+name: Evening scene
+
+on:
+  pull_request:
+    paths:
+      - packages/living_room_evening.yaml
+      - .github/workflows/evening-scene.yml
+  push:
+    branches:
+      - feat/evening-scene-20261116
+      - main
+    paths:
+      - packages/living_room_evening.yaml
+      - .github/workflows/evening-scene.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  home-assistant-schema:
+    name: Home Assistant script schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Validate the script schema with Home Assistant 2026.9.3
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/ha-evening-schema-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          trap 'rc=$?; printf "%s finished rc=%s elapsed=%ss log=%s\n" "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting commit=%s log=%s\n' "$(date -Is)" "$(git rev-parse HEAD)" "$task_log"
+          docker run --rm --network none --entrypoint python3 \
+            --mount "type=bind,source=$PWD/packages/living_room_evening.yaml,target=/config/evening.yaml,readonly" \
+            ghcr.io/home-assistant/home-assistant:2026.9.3 -c '
+          import json
+          from pathlib import Path
+          import yaml
+          from homeassistant.components.script.config import SCRIPT_ENTITY_SCHEMA
+          package = yaml.safe_load(Path("/config/evening.yaml").read_text())
+          script = SCRIPT_ENTITY_SCHEMA(package["script"]["living_room_evening"])
+          print(json.dumps({"home_assistant": "2026.9.3", "script": "living_room_evening", "actions": len(script["sequence"]), "schema": "passed"}))
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evening-schema-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/ha-evening-schema-*.log
+          retention-days: 14

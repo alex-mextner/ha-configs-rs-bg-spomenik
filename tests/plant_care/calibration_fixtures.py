@@ -1,8 +1,28 @@
 # Copyright (c) 2026 Alex Ultra
 # SPDX-License-Identifier: MIT
-"""Pure independent-reference builders shared by bounded and native CI tests."""
+"""Pure module loading and reference builders shared by bounded and native CI tests."""
+
+import sys
+from importlib import import_module
+from pathlib import Path
+from types import ModuleType
 
 DAY = 86400
+
+
+def load_component_module(name: str) -> ModuleType:
+    """Load cached pure source without replacing the actual HA integration package."""
+    package_name = "_plant_care_test_components"
+    if package_name not in sys.modules:
+        package = ModuleType(package_name)
+        package.__path__ = [
+            str(
+                Path(__file__).resolve().parents[2]
+                / "custom_components/plant_care_alerts"
+            )
+        ]
+        sys.modules[package_name] = package
+    return import_module(f"{package_name}.{name}")
 
 
 def raw_burst(raw: float = 209) -> list[float]:

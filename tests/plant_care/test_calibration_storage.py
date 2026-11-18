@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.util
 import json
-import sys
-import types
 import unittest
-from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
-MODULE = ROOT / "custom_components/plant_care_alerts/calibration_storage.py"
+from calibration_fixtures import load_component_module
+
+storage = load_component_module("calibration_storage")
 SOURCE = "sensor.soil"
 RECORD_PATH = f"records[{SOURCE}]"
 CREATED = 1_000_000.0
@@ -347,22 +344,10 @@ class StorageIntegrityTests(unittest.TestCase):
     """Exercise the pure persistence boundary without a Home Assistant runtime."""
 
     def setUp(self) -> None:
-        self.assertTrue(MODULE.is_file(), "The strict storage validator is missing")
-        package_name = "_plant_calibration_storage_test"
-        package = types.ModuleType(package_name)
-        package.__path__ = [str(MODULE.parent)]
-        sys.modules[package_name] = package
-        spec = importlib.util.spec_from_file_location(
-            f"{package_name}.calibration_storage", MODULE
-        )
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        self.validate = module.validate_storage
-        self.error = module.StorageIntegrityError
-        self.fingerprint = module.source_fingerprint
-        self.decision_fence = getattr(module, "decision_fence", None)
+        self.validate = storage.validate_storage
+        self.error = storage.StorageIntegrityError
+        self.fingerprint = storage.source_fingerprint
+        self.decision_fence = storage.decision_fence
 
     def accept(self, record: dict) -> dict:
         data = envelope(record)
@@ -1119,24 +1104,41 @@ class StorageIntegrityTests(unittest.TestCase):
                     self.reject(envelope(record), {SOURCE: witness(record)})
 
     def test_decision_fence_filters_only_uncertainty_resolutions(self) -> None:
-        self.assertTrue(callable(self.decision_fence))
         self.assertIsNone(self.decision_fence(initial_record()))
         record = uncertain_record(changed_record(), APPLIED + 10)
-        record["attempts"].append(
-            record["attempts"][0]
-            | {
-                "attempt_id": "aborted-context",
-                "outcome": "aborted",
-                "resolved_at": APPLIED + 20,
-            }
+        aborted = copy.deepcopy(record["attempts"][0])
+        aborted.update(
+            attempt_id="aborted-context",
+            outcome="aborted",
+            resolved_at=APPLIED + 20,
         )
+        record["attempts"].append(aborted)
         self.validate(envelope(record), CONFIGURED, {})
         self.assertEqual(self.decision_fence(record), APPLIED + 10)
-        self.assertEqual(self.decision_fence(record, before=APPLIED + 9), APPLIED)
-        self.assertEqual(self.decision_fence(record, before=APPLIED + 10), APPLIED + 10)
-        replay = record | {"last_applied_at": None}
-        self.assertIsNone(self.decision_fence(replay, before=APPLIED + 9))
-        self.assertEqual(self.decision_fence(record, before=CREATED), APPLIED)
+        fence_at = storage._decision_fence
+        attempts = record["attempts"]
+        for cutoff, expected in ((APPLIED + 9, APPLIED), (APPLIED + 10, APPLIED + 10)):
+            with self.subTest(inclusive_cutoff=cutoff):
+                self.assertEqual(
+                    fence_at(APPLIED, attempts, attempts_resolved_through=cutoff),
+                    expected,
+                )
+        self.assertIsNone(
+            fence_at(None, attempts, attempts_resolved_through=APPLIED + 9)
+        )
+        self.assertEqual(
+            fence_at(APPLIED, attempts, attempts_resolved_through=CREATED), APPLIED
+        )
+
+    def test_exported_outcomes_and_reasons_keep_the_wire_values(self) -> None:
+        for actual, expected in (
+            (storage.UNKNOWN_OUTCOME, "interrupted_unknown"),
+            (storage.ABORTED_OUTCOME, "aborted"),
+            (storage.PRE_ENROLLMENT_REASON, "pre_enrollment"),
+            (storage.AMBIGUOUS_ORDER_REASON, "ambiguous_order"),
+            (storage.INVALID_TIME_REASON, "invalid_time"),
+        ):
+            self.assertEqual(actual, expected)
 
     def test_nested_identifier_and_fence_errors_name_the_exact_field(self) -> None:
         record = pending_record()
@@ -1189,10 +1191,9 @@ class StorageIntegrityTests(unittest.TestCase):
                 )
 
     def test_fingerprint_includes_the_persisted_epoch(self) -> None:
-        self.assertEqual(self.fingerprint("probe-A", 0), fingerprint("probe-A", 0))
-        self.assertNotEqual(
-            self.fingerprint("probe-A", 0), self.fingerprint("probe-A", 2)
-        )
+        initial = self.fingerprint("probe-A", 0)
+        self.assertEqual(initial, fingerprint("probe-A", 0))
+        self.assertNotEqual(initial, self.fingerprint("probe-A", 2))
 
 
 if __name__ == "__main__":

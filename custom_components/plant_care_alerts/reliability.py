@@ -7,6 +7,7 @@ from typing import Any
 
 MAX_INDEX = 100
 UNCHANGED_SECONDS = 12 * 3600
+DEFAULT_STALE_SECONDS = 1200
 FUTURE_TOLERANCE = 60
 RETENTION_SECONDS = 14 * 86400
 RECOVERY_SECONDS = 600
@@ -157,7 +158,9 @@ def _record_sample(state: dict, reading: dict, *, history_missing: bool) -> None
 def _observe(
     state: dict, reading: dict, now: float, settings: dict, *, history_missing: bool
 ) -> tuple:
-    reason = _sample_reason(reading, now, settings.get("stale_seconds", 1200))
+    reason = _sample_reason(
+        reading, now, settings.get("stale_seconds", DEFAULT_STALE_SECONDS)
+    )
     if reason is not None:
         return reason, False
     stamp = number(reading.get("sample_at"))
@@ -293,7 +296,9 @@ def _recovery_candidate(state: dict, reading: dict, *, needs_change: bool) -> bo
 def _record_recovery(state: dict, reading: dict, settings: dict) -> None:
     stamp = number(reading.get("sample_at"))
     last = number(state.get("recovery_sample_at"))
-    if last is None or stamp - last > settings.get("stale_seconds", 1200):
+    if last is None or stamp - last > settings.get(
+        "stale_seconds", DEFAULT_STALE_SECONDS
+    ):
         _reset_recovery(state)
         state["recovery_started_at"] = stamp
     state["recovery_sample_count"] = (state.get("recovery_sample_count") or 0) + 1
@@ -423,7 +428,9 @@ def _calibration_reading(state: dict, reading: dict, now: float) -> dict:
 def _observe_barrier_raw(
     state: dict, reading: dict, now: float, settings: dict
 ) -> str | None:
-    reason = _sample_reason(reading, now, settings.get("stale_seconds", 1200))
+    reason = _sample_reason(
+        reading, now, settings.get("stale_seconds", DEFAULT_STALE_SECONDS)
+    )
     if reason is not None:
         return reason
     stamp, raw = (
@@ -433,12 +440,7 @@ def _observe_barrier_raw(
     if state.get("raw_source_identity") is None:
         return "invalid_sample"
     last = number(state.get("reliability_last_sample_at"))
-    if (
-        stamp is None
-        or raw is None
-        or stamp > now + FUTURE_TOLERANCE
-        or (last is not None and stamp < last)
-    ):
+    if raw is None or (last is not None and stamp < last):
         return "invalid_sample"
     if last is None or stamp > last:
         if state.get("last_source_value") != raw:

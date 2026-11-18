@@ -36,29 +36,27 @@ from homeassistant.helpers.service import (
     async_get_config_entry,
     async_register_admin_service,
 )
-from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .analytics import analyze
-from .calibration_runtime import (
+from .calibration_policy import ADC_MAX
+from .calibration_runtime import CalibrationRuntime, RuntimeHooks, collect_witnesses
+from .const import (
     APPLY_CALIBRATION_SERVICE,
-    CALIBRATION_DOMAIN,
     CALIBRATION_STORE_KEY,
+    DOMAIN,
     SUPPORTED_HA_VERSION,
-    CalibrationRuntime,
-    RuntimeHooks,
-    collect_witnesses,
-    require_persisted_snapshot,
 )
+from .persistence import PersistenceNotConfirmedError, async_save_confirmed, new_store
 from .photo import persist_photo
 from .reliability import UNCHANGED_SECONDS, assess
 from .state_machine import evaluate, finite
 from .voice import async_announce, configured_target, target_available
+from .watering import WATERING_METADATA, record_report
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
 
-DOMAIN = CALIBRATION_DOMAIN
 MAX_SAMPLE_SKEW_SECONDS = 60
 MAX_MOISTURE_INDEX = 100
 VOICE_START_HOUR = 8
@@ -80,19 +78,19 @@ def _validate_calibration_config(config: dict) -> dict:
     for source, options in config.get("automatic_calibration", {}).items():
         if options["original_dry"] >= options["original_wet"]:
             message = "Automatic calibration requires original_dry < original_wet"
-            raise vol.Invalid(message)
+            raise vol.Invalid(message, path=["automatic_calibration", source])
         if bool(options.get("reference_entity")) != bool(
             options.get("reference_protocol")
         ):
             message = (
                 "reference_entity and reference_protocol must be configured together"
             )
-            raise vol.Invalid(message)
+            raise vol.Invalid(message, path=["automatic_calibration", source])
         if source not in config.get(
             "freshness_sources", {}
         ) or source not in config.get("calibration_sources", {}):
             message = "Automatic calibration requires raw-source and endpoint mappings"
-            raise vol.Invalid(message)
+            raise vol.Invalid(message, path=["automatic_calibration", source])
     return config
 
 
@@ -116,7 +114,21 @@ CONFIG_SCHEMA = vol.Schema(
                     vol.Optional("freshness_sources", default={}): {
                         cv.entity_id: cv.entity_id
                     },
-                    vol.Optional("user_reports", default={}): {cv.entity_id: cv.string},
+                    vol.Optional("user_reports", default={}): {
+                        cv.entity_id: vol.Any(
+                            cv.string,
+                            vol.Schema(
+                                {
+                                    vol.Required("date"): cv.string,
+                                    vol.Optional("precision", default="day"): vol.In(
+                                        ["day", "approximate_day"]
+                                    ),
+                                    vol.Optional("note"): cv.string,
+                                    vol.Optional("timezone"): cv.string,
+                                }
+                            ),
+                        )
+                    },
                     vol.Optional("calibration_sources", default={}): {
                         cv.entity_id: vol.Schema(
                             {
@@ -130,10 +142,10 @@ CONFIG_SCHEMA = vol.Schema(
                             {
                                 vol.Optional("enabled", default=True): cv.boolean,
                                 vol.Required("original_dry"): vol.All(
-                                    vol.Coerce(float), vol.Range(min=0, max=4095)
+                                    vol.Coerce(float), vol.Range(min=0, max=ADC_MAX)
                                 ),
                                 vol.Required("original_wet"): vol.All(
-                                    vol.Coerce(float), vol.Range(min=0, max=4095)
+                                    vol.Coerce(float), vol.Range(min=0, max=ADC_MAX)
                                 ),
                                 vol.Required("source_revision"): vol.All(
                                     cv.string, vol.Length(min=1)
@@ -185,13 +197,15 @@ def needs_notification(record: Any) -> bool:
     )
 
 
+def _clear_applies(record: dict[str, Any]) -> bool:
+    return record.get("status") in CLEAR_STATUSES and not record.get(
+        "calibration_confirmation_pending"
+    )
+
+
 def needs_clear(record: dict[str, Any]) -> bool:
     """Retry a pending phone clear while no current watering warning applies."""
-    return (
-        record.get("status") in CLEAR_STATUSES
-        and not record.get("calibration_confirmation_pending")
-        and bool(record.get("clear_pending"))
-    )
+    return _clear_applies(record) and bool(record.get("clear_pending"))
 
 
 def acknowledge_delivery(record: dict[str, Any], status: str) -> None:
@@ -336,7 +350,7 @@ async def async_setup(hass: Any, config: Any) -> bool:
         if manager.unsub_calibration_service:
             manager.unsub_calibration_service()
         await manager.store.async_save(manager.records)
-        await manager.calibration.async_save()
+        await manager.calibration.async_save_final()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop)
     _register_photo_service(hass, manager)
@@ -518,10 +532,10 @@ class CareManager:
     def __init__(self, hass: Any, config: Any) -> None:
         """Initialize the adapter without changing upstream plant state."""
         self.hass, self.config = hass, config
-        self.store = self._new_store(DOMAIN)
+        self.store = new_store(hass, DOMAIN)
         self.calibration = CalibrationRuntime(
             hass,
-            self._new_store(CALIBRATION_STORE_KEY),
+            new_store(hass, CALIBRATION_STORE_KEY),
             config,
             hooks=RuntimeHooks(
                 context_factory=Context,
@@ -531,6 +545,7 @@ class CareManager:
                 identity_provider=self._calibration_source_identity,
                 write_ready=lambda: self.hass.state is CoreState.running,
                 read_persisted=lambda: self._read_persisted(CALIBRATION_STORE_KEY),
+                confirm_witnesses=self._confirm_calibration_witnesses,
             ),
         )
         self.records, self.entities, self.details = {}, {}, {}
@@ -582,14 +597,9 @@ class CareManager:
         """Keep existing source subscriptions while recorder history is pending."""
         return self.watched | self._refresh_watched | self.calibration.watched_entities
 
-    def _new_store(self, key: str) -> Store:
-        return Store(
-            self.hass, 1, key, atomic_writes=True, serialize_in_event_loop=False
-        )
-
     async def _read_persisted(self, key: str) -> dict | None:
         """Read through a new Store, excluding the writer's own pending memory."""
-        return await self._new_store(key).async_load()
+        return await new_store(self.hass, key).async_load()
 
     async def load(self) -> None:
         """Restore alert timing through the supported Home Assistant storage API."""
@@ -601,23 +611,39 @@ class CareManager:
         """Keep actual progress and independent uncertainty fences for each source."""
         return collect_witnesses(self.records)
 
+    async def _confirm_calibration_witnesses(
+        self, entry_id: str, witnesses: dict
+    ) -> None:
+        """Confirm the independent witness before each effect, even when unchanged."""
+        if witnesses is None or entry_id not in self.records:
+            message = "Independent calibration witness is unavailable"
+            raise PersistenceNotConfirmedError(message)
+        snapshot = deepcopy(self.records)
+        snapshot[entry_id]["calibration_witnesses"] = witnesses
+        try:
+            await async_save_confirmed(
+                self.store, lambda: self._read_persisted(DOMAIN), snapshot
+            )
+        except Exception:
+            self.calibration.inhibit_writes("witness_unavailable")
+            raise
+        # Other callbacks may update care fields while persistence awaits.
+        # Confirm only this witness; never restore the detached care snapshot.
+        self.records[entry_id]["calibration_witnesses"] = witnesses
+
     async def _persist_calibration_witnesses(self, entry_id: str) -> bool:
+        """Synchronize new observed history; effect authorization uses confirmation."""
         witnesses = self.calibration.witnesses()
         record = self.records[entry_id]
         if witnesses is None or record.get("calibration_witnesses", {}) == witnesses:
             return False
-        snapshot = deepcopy(self.records)
-        snapshot[entry_id]["calibration_witnesses"] = witnesses
         try:
-            await self.store.async_save(snapshot)
-            require_persisted_snapshot(await self._read_persisted(DOMAIN), snapshot)
+            await self._confirm_calibration_witnesses(entry_id, witnesses)
         except Exception:
-            self.calibration.inhibit_writes("witness_unavailable")
             _LOGGER.exception(
                 "Calibration witness could not be persisted; writes disabled"
             )
             return False
-        record["calibration_witnesses"] = witnesses
         return True
 
     def _calibration_source_identity(self, source: str) -> str:
@@ -655,14 +681,16 @@ class CareManager:
                 "manual": "Изменение настройки",
                 "external_discovered": "Обнаружено внешнее изменение",
             }.get(event["kind"], "Калибровка")
+            if event.get("reason") == "concurrent_change":
+                kind = "Автоматическая запись при конфликте настроек"
             message = (
                 f"{kind}: сухая точка {event['old_dry']:g} → {event['new_dry']:g}; "
                 f"мокрая точка {event['old_wet']:g} → {event['new_wet']:g} ADC."
             )
             if event.get("reason") == "concurrent_change":
                 message += (
-                    " Изменение не подтверждено независимыми данными:"
-                    " обнаружено одновременное редактирование настройки."
+                    " Одновременно изменялись настройки."
+                    " Эта запись не подтверждает автоматическую калибровку."
                 )
             if event["at"] is None:
                 message += " Время изменения неизвестно."
@@ -814,13 +842,10 @@ class CareManager:
         """Publish a change; delivery remains pending until acknowledged."""
         current = self.records[entry_id]
         status = current["status"]
-        if (
-            status in CLEAR_STATUSES
-            and not current.get("calibration_confirmation_pending")
-            and (
-                previous in {"due", "overdue"}
-                or current.get("notified_status") in {"due", "overdue"}
-            )
+        if _clear_applies(current) and (
+            previous in {"due", "overdue"}
+            or (previous == "sensor_error" and status != "sensor_error")
+            or current.get("notified_status") in {"due", "overdue"}
         ):
             current["clear_pending"] = True
         notify = needs_notification(current)
@@ -959,13 +984,16 @@ class CareManager:
     ) -> None:
         """Retain independent physical samples for the active calibration."""
         points = current.get("adc_samples", [])
+        conflicts = set(current.get("watering_conflicts", []))
         if "adc_identity" in current and current["adc_identity"] != raw_id:
             points = []
+            conflicts.clear()
             current.pop("adc_calibration", None)
         previous_calibration = current.get("adc_calibration")
         if calibration is not None:
             if previous_calibration is not None and previous_calibration != calibration:
                 points = []
+                conflicts.clear()
             current["adc_calibration"] = calibration
         current["adc_identity"] = raw_id
         if raw is not None:
@@ -977,11 +1005,23 @@ class CareManager:
                 and stamp <= now + MAX_SAMPLE_SKEW_SECONDS
             ):
                 points = [*points, [stamp, value]]
+        current["adc_samples"], current["watering_conflicts"] = (
+            CareManager._deduplicate_adc(points, conflicts, now)
+        )
+
+    @staticmethod
+    def _deduplicate_adc(points: list, conflicts: set, now: float) -> tuple[list, list]:
+        """Keep contradictory timestamps visible instead of choosing a trusted value."""
         unique = {}
         for stamp, value in points:
             if now - 14 * 86400 <= stamp <= now + MAX_SAMPLE_SKEW_SECONDS:
+                if stamp in unique and unique[stamp] != value:
+                    conflicts.add(stamp)
                 unique.setdefault(stamp, value)
-        current["adc_samples"] = [[stamp, unique[stamp]] for stamp in sorted(unique)]
+        return (
+            [[stamp, unique[stamp]] for stamp in sorted(unique)],
+            sorted(stamp for stamp in conflicts if now - 14 * 86400 <= stamp <= now),
+        )
 
     @staticmethod
     def _observed_day(value: Any) -> Any:
@@ -993,30 +1033,44 @@ class CareManager:
         except (ValueError, TypeError):
             return None
 
+    def _configured_report(self, source: str, now: float) -> dict | None:
+        """Validate the reported local day without manufacturing a time."""
+        configured = self.config.get("user_reports", {}).get(source)
+        report = (
+            dict(configured) if isinstance(configured, dict) else {"date": configured}
+        )
+        try:
+            day = datetime.fromisoformat(str(report["date"])).date()
+        except (ValueError, TypeError):
+            return None
+        if day > dt_util.as_local(datetime.fromtimestamp(now, UTC)).date():
+            return None
+        report["date"] = day.isoformat()
+        return report
+
     def _restore_reported_watering(
         self, analysis: dict[str, Any], prior: tuple[Any, str], plant: Any, now: float
     ) -> None:
-        """Preserve user dates without resurrecting a rejected automatic event."""
-        report = self.config.get("user_reports", {}).get(plant.moisture_sensor)
-        # A user supplied a day, not an invented time. A later auto event wins.
-        try:
-            report_day = datetime.fromisoformat(report).date() if report else None
-        except (ValueError, TypeError):
-            report_day = None
+        """Persist user uncertainty while retaining a later trustworthy estimate."""
+        report = self._configured_report(plant.moisture_sensor, now)
         detected = analysis.get("last_watering_at")
         detected_day = self._observed_day(detected)
-        if report_day and (
-            detected_day is None
-            or report_day > detected_day
-            or (
+        if report:
+            report_day = self._observed_day(report["date"])
+            same_day_auto = (
                 report_day == detected_day
                 and analysis.get("last_watering_source") == "auto"
+                and (
+                    report.get("precision") != "approximate_day"
+                    or analysis.get("last_watering_precision") != "interval"
+                )
             )
-        ):
-            analysis["last_watering_at"] = report_day.isoformat()
-            analysis["last_watering_source"] = "user_report"
-        elif (
-            detected is None
+            preferred = (
+                detected_day is None or report_day > detected_day or same_day_auto
+            )
+            record_report(analysis, report, now, select=preferred)
+        if (
+            analysis.get("last_watering_at") is None
             and prior[0]
             and analysis.get("untrusted_last_watering_at") != prior[0]
         ):
@@ -1037,6 +1091,10 @@ class CareManager:
             ).date() and (prior_day is None or upstream_day > prior_day):
                 analysis["last_watering_at"] = upstream_day.isoformat()
                 analysis["last_watering_source"] = "upstream"
+                for key in WATERING_METADATA:
+                    analysis[f"last_watering_{key}"] = None
+                analysis["last_watering_precision"] = "day"
+                analysis["last_watering_note"] = None
         except (ValueError, TypeError):
             pass
 

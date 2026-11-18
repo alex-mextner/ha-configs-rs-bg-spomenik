@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from datetime import UTC, datetime, timedelta
+from inspect import iscoroutinefunction
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -83,7 +84,7 @@ class TestManagerRegressions(unittest.IsolatedAsyncioTestCase):
         self.source_changed = next(
             call.args[1]
             for call in self.hass.bus.async_listen.call_args_list
-            if call.args[0] == EVENT_STATE_CHANGED
+            if call.args[0] == EVENT_STATE_CHANGED and iscoroutinefunction(call.args[1])
         )
         return {
             call.args[1]: call.args[2]

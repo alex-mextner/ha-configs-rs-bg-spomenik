@@ -170,6 +170,8 @@ def _hysteresis(s: dict, reading: dict, now: float, cfg: dict) -> None:
     s.update(dry_threshold=dry, recovery_threshold=recovery)
     if avg >= recovery:
         if s["due_since"] is None or len(s["samples"]) >= cfg["min_samples"]:
+            if s.get("notified_status") in {"due", "overdue"}:
+                s["clear_pending"] = True
             s.update(dry_since=None, due_since=None, notified_status=None)
     elif avg > dry and s["due_since"] is None:
         s["dry_since"] = None

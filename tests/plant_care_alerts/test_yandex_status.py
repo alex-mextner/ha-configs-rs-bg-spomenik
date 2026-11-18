@@ -290,6 +290,34 @@ class YandexStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.deliveries[0][0]["media_content_id"], report["message"])
         self.announce.assert_not_called()
 
+    async def test_approximate_user_report_never_speaks_an_invented_time(self) -> None:
+        self.set_care(
+            last_watering_at="2026-11-17",
+            last_watering_source="user_report",
+            last_watering_precision="approximate_day",
+        )
+        report = await self.report()
+        self.assertIn("примерно 17 ноября", report["message"])
+        self.assertNotIn("00:00", report["message"])
+        self.assertEqual(report["last_watering_precision"], "approximate_day")
+        self.assert_no_speech()
+
+    async def test_automatic_watering_keeps_the_estimate_interval(self) -> None:
+        start = "2026-11-18T10:00:00+00:00"
+        end = "2026-11-18T10:05:00+00:00"
+        self.set_care(
+            last_watering_at=end,
+            last_watering_source="auto",
+            last_watering_precision="interval",
+            last_watering_window_start=start,
+            last_watering_window_end=end,
+        )
+        report = await self.report()
+        self.assertIn("Автоматически определён вероятный полив", report["message"])
+        self.assertEqual(report["last_watering_window_start"], start)
+        self.assertEqual(report["last_watering_window_end"], end)
+        self.assert_no_speech()
+
     async def test_requested_station_receives_default_speech(self) -> None:
         """A renamed requesting Station must never use the reminder speaker."""
         for target in (STATION_A, STATION_B):

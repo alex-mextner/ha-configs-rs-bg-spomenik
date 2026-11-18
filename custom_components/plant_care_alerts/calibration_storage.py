@@ -25,10 +25,14 @@ from .calibration_policy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
 FORMAT_VERSION = 1
 UNKNOWN_OUTCOME = "interrupted_unknown"
+ABORTED_OUTCOME = "aborted"
+PRE_ENROLLMENT_REASON = "pre_enrollment"
+AMBIGUOUS_ORDER_REASON = "ambiguous_order"
+INVALID_TIME_REASON = "invalid_time"
 PAIR_SIZE = 2
 type EpochIntervals = dict[str, tuple[float, float]]
 ENVELOPE_FIELDS = frozenset({"format_version", "initialized_sources", "records"})
@@ -139,8 +143,10 @@ HELPER_OBSERVATION_FIELDS = frozenset(
         "reason",
     }
 )
-ATTEMPT_OUTCOMES = frozenset({"aborted", UNKNOWN_OUTCOME})
-HELPER_REASONS = frozenset({"pre_enrollment", "ambiguous_order", "invalid_time"})
+ATTEMPT_OUTCOMES = frozenset({ABORTED_OUTCOME, UNKNOWN_OUTCOME})
+HELPER_REASONS = frozenset(
+    {PRE_ENROLLMENT_REASON, AMBIGUOUS_ORDER_REASON, INVALID_TIME_REASON}
+)
 QUALIFIED_REASONS = {"automatic": "qualified_drift", "rollback": "contradiction"}
 EXCLUDED_REASONS = frozenset({"concurrent_change", "pending_effect_reconciled"})
 EVENT_REASONS = {
@@ -767,7 +773,7 @@ def _event_exclusions(event: dict) -> list[str]:
 
 def _attempt_exclusions(record: dict) -> dict[str, float]:
     blocked_at: dict[str, float] = {}
-    for attempt in _unknown_attempts(record):
+    for attempt in _unknown_attempts(record.get("attempts", [])):
         identifier = attempt["evidence_id"]
         blocked_at[identifier] = min(
             blocked_at.get(identifier, math.inf), attempt["resolved_at"]
@@ -775,29 +781,34 @@ def _attempt_exclusions(record: dict) -> dict[str, float]:
     return blocked_at
 
 
-def _unknown_attempts(record: dict) -> Iterator[dict]:
-    return (
-        attempt
-        for attempt in record.get("attempts", [])
-        if attempt["outcome"] == UNKNOWN_OUTCOME
-    )
+def _unknown_attempts(attempts: Sequence[dict]) -> Iterator[dict]:
+    return (attempt for attempt in attempts if attempt["outcome"] == UNKNOWN_OUTCOME)
 
 
-def decision_fence(record: dict, *, before: float | None = None) -> float | None:
+def _decision_fence(
+    actual_at: float | None,
+    attempts: Sequence[dict],
+    *,
+    attempts_resolved_through: float | None = None,
+) -> float | None:
     """
-    Derive a decision cutoff from validated actual and uncertain facts.
+    Combine validated actual time with unknown resolutions through an inclusive cutoff.
 
-    The before argument filters uncertainty resolutions only. Historical replay
-    must supply its prior actual cutoff as last_applied_at, never the final time.
+    The cutoff applies only to attempt resolution times; actual_at is always included.
     """
-    actual = record.get("last_applied_at")
-    times = [] if actual is None else [actual]
+    times = [] if actual_at is None else [actual_at]
     times.extend(
         attempt["resolved_at"]
-        for attempt in _unknown_attempts(record)
-        if before is None or attempt["resolved_at"] <= before
+        for attempt in _unknown_attempts(attempts)
+        if attempts_resolved_through is None
+        or attempt["resolved_at"] <= attempts_resolved_through
     )
     return max(times, default=None)
+
+
+def decision_fence(record: dict) -> float | None:
+    """Derive the current decision cutoff from a validated persisted record."""
+    return _decision_fence(record.get("last_applied_at"), record.get("attempts", []))
 
 
 def _reference_keys(value: dict) -> set[tuple[str, str, str]]:
@@ -839,13 +850,14 @@ def _decision_constraints(
 
 def _decision_replay(record: dict, path: str) -> None:
     """Replay known exclusions, consumed cycles and temporal decision fences."""
-    replayed = {"last_applied_at": None, "attempts": record.get("attempts", [])}
+    attempts = record.get("attempts", [])
+    prior_actual_at = None
     blocked_at = _attempt_exclusions(record)
     consumed: set[tuple[str, str, str]] = set()
     for index, event in enumerate(record["history"]):
         event_path = f"{path}.history[{index}]"
         at = _event_time(event)
-        prior = decision_fence(replayed, before=at)
+        prior = _decision_fence(prior_actual_at, attempts, attempts_resolved_through=at)
         if _qualified(event):
             _decision_constraints(event, at, prior, consumed, event_path)
             if blocked_at.get(event["evidence_id"], math.inf) <= at:
@@ -856,7 +868,7 @@ def _decision_replay(record: dict, path: str) -> None:
             consumed.update(_reference_keys(event))
         for identifier in _event_exclusions(event):
             blocked_at[identifier] = min(blocked_at.get(identifier, math.inf), at)
-        replayed["last_applied_at"] = at
+        prior_actual_at = at
     if not set(blocked_at) <= set(record["blocked_evidence_ids"]):
         _fail(
             f"{path}.blocked_evidence_ids",
@@ -867,7 +879,7 @@ def _decision_replay(record: dict, path: str) -> None:
         _decision_constraints(
             pending,
             pending["started_at"],
-            decision_fence(replayed),
+            _decision_fence(prior_actual_at, attempts),
             consumed,
             f"{path}.pending",
         )

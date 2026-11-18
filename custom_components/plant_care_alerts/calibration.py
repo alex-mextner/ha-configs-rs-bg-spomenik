@@ -11,7 +11,7 @@ from typing import Literal, TypedDict
 from . import calibration_policy as policy
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PhysicalSample:
     """One explicitly qualified physical burst, independent of its read count."""
 
@@ -26,7 +26,7 @@ class PhysicalSample:
         object.__setattr__(self, "burst", tuple(self.burst))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class QualifiedWetReference:
     """A reference qualified by the runtime's configured independent source."""
 
@@ -102,6 +102,9 @@ CalibrationReason = Literal[
 ]
 
 
+WindowRejection = Literal["coverage", "stationarity", "clipped"]
+
+
 class CalibrationDiagnostics(TypedDict, total=False):
     """
     Available facts plus a required persistence directive on accepted rollback.
@@ -138,6 +141,11 @@ class _Window:
     q25_raw: float
     q75_raw: float
     sample_digest: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class _RejectedWindow:
+    reason: WindowRejection
 
 
 def _finite(value: object) -> bool:
@@ -240,11 +248,11 @@ def _sample_good(sample: PhysicalSample, state: CalibrationState) -> bool:
         _finite(value) and 0 <= value <= policy.ADC_MAX for value in burst
     ):
         return False
-    return abs(
-        sample.raw - median(burst)
-    ) <= policy.RAW_MEDIAN_TOLERANCE and _robust_spread_ok(
+    median_ok = abs(sample.raw - median(burst)) <= policy.RAW_MEDIAN_TOLERANCE
+    spread_ok = _robust_spread_ok(
         burst, state.original_span, policy.BURST_SPREAD_FRACTION
     )
+    return median_ok and spread_ok
 
 
 def _sample_unclipped(sample: PhysicalSample) -> bool:
@@ -374,18 +382,20 @@ def _robust_spread_ok(
 ) -> bool:
     center = median(values)
     mad = median(abs(value - center) for value in values)
-    return mad <= max(
-        policy.MIN_MAD_COUNTS, policy.MAD_SPAN_FRACTION * span
-    ) and _quantile(values, 0.9) - _quantile(values, 0.1) <= max(
+    mad_ok = mad <= max(policy.MIN_MAD_COUNTS, policy.MAD_SPAN_FRACTION * span)
+    spread_ok = _quantile(values, 0.9) - _quantile(values, 0.1) <= max(
         policy.MIN_SPREAD_COUNTS, spread_fraction * span
     )
+    return mad_ok and spread_ok
 
 
 def _stationary(values: Sequence[float], span: float) -> bool:
     third = max(1, len(values) // 3)
-    return _robust_spread_ok(values, span, policy.WINDOW_SPREAD_FRACTION) and abs(
-        median(values[:third]) - median(values[-third:])
-    ) <= max(policy.MIN_TREND_COUNTS, policy.TREND_SPAN_FRACTION * span)
+    spread_ok = _robust_spread_ok(values, span, policy.WINDOW_SPREAD_FRACTION)
+    trend_ok = abs(median(values[:third]) - median(values[-third:])) <= max(
+        policy.MIN_TREND_COUNTS, policy.TREND_SPAN_FRACTION * span
+    )
+    return spread_ok and trend_ok
 
 
 def _temporal_votes(samples: Sequence[PhysicalSample]) -> list[PhysicalSample]:
@@ -403,16 +413,16 @@ def _window(
     samples: Sequence[PhysicalSample],
     reference: QualifiedWetReference,
     state: CalibrationState,
-) -> _Window | Literal["coverage_or_stationarity", "clipped"]:
+) -> _Window | _RejectedWindow:
     # Votes establish independence; every good observation informs statistics.
     votes = _temporal_votes(samples)
     if len(votes) < policy.MIN_VOTES or not _coverage_good(samples, reference):
-        return "coverage_or_stationarity"
+        return _RejectedWindow(reason="coverage")
     if not all(_sample_unclipped(sample) for sample in samples):
-        return "clipped"
+        return _RejectedWindow(reason="clipped")
     values = [sample.raw for sample in samples]
     if not _stationary(values, state.original_span):
-        return "coverage_or_stationarity"
+        return _RejectedWindow(reason="stationarity")
     digest = policy.canonical_digest(
         [
             (float(s.sampled_at), float(s.raw), tuple(float(v) for v in s.burst))
@@ -469,8 +479,8 @@ def _collect_windows(
             )
         ]
         window = _window(subset, reference, state)
-        if isinstance(window, str):
-            rejected[reference.reference_id] = window
+        if isinstance(window, _RejectedWindow):
+            rejected[reference.reference_id] = window.reason
         elif reference.cycle_id in cycles or (
             windows and reference.start_at <= windows[-1].reference.end_at
         ):

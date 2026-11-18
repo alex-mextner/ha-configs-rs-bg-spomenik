@@ -166,6 +166,8 @@ assert.match(explained, /Проверено по текущим настройк
 assert.doesNotMatch(explained, /после перезапуска/);
 assert.match(explained, /автор изменения неизвест/);
 
+// Real hass updates and persistent DOM are verified by verify_card_interactions.cjs in CI.
+// This bounded test retains independent open/closed state for both plants.
 const rerendered = new Card();
 const observed = {
   states: Object.fromEntries(['sensor.alpha', 'sensor.beta'].map(entity => [entity, {
@@ -173,23 +175,23 @@ const observed = {
     attributes: {plant_care: true, plant_name: entity, reliability_valid: false, ...active},
   }])),
 };
-rerendered.hass = observed;
+rerendered._hass = observed;
 const sections = [
   {dataset: {entity: 'sensor.alpha'}, open: true},
   {dataset: {entity: 'sensor.beta'}, open: false},
 ];
 rerendered.shadowRoot.querySelectorAll = selector =>
   selector === '.calibration-details[data-entity]' ? sections : [];
-rerendered.hass = observed;
-const alphaTag = rerendered.shadowRoot.innerHTML.match(/<details[^>]*data-entity="sensor.alpha"[^>]*>/)?.[0] || '';
-const betaTag = rerendered.shadowRoot.innerHTML.match(/<details[^>]*data-entity="sensor.beta"[^>]*>/)?.[0] || '';
+rerendered._rememberCalibrationSections();
+const alphaTag = rerendered._calibration(active, 'sensor.alpha').match(/<details[^>]*>/)?.[0] || '';
+const betaTag = rerendered._calibration(active, 'sensor.beta').match(/<details[^>]*>/)?.[0] || '';
 assert.match(alphaTag, /\bopen(?:\s|>)/);
 assert.doesNotMatch(betaTag, /\bopen(?:\s|>)/);
 sections[0].open = false;
 sections[1].open = true;
-rerendered.hass = observed;
-const closedAlpha = rerendered.shadowRoot.innerHTML.match(/<details[^>]*data-entity="sensor.alpha"[^>]*>/)?.[0] || '';
-const openedBeta = rerendered.shadowRoot.innerHTML.match(/<details[^>]*data-entity="sensor.beta"[^>]*>/)?.[0] || '';
+rerendered._rememberCalibrationSections();
+const closedAlpha = rerendered._calibration(active, 'sensor.alpha').match(/<details[^>]*>/)?.[0] || '';
+const openedBeta = rerendered._calibration(active, 'sensor.beta').match(/<details[^>]*>/)?.[0] || '';
 assert.doesNotMatch(closedAlpha, /\bopen(?:\s|>)/);
 assert.match(openedBeta, /\bopen(?:\s|>)/);
 

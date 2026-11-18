@@ -15,10 +15,14 @@ def make_service_registry() -> SimpleNamespace:
         name: str,
         handler: object,
         schema: object | None = None,
+        supports_response: object | None = None,
         **metadata: object,
     ) -> None:
         registered.setdefault(domain, {})[name] = SimpleNamespace(
-            func=handler, schema=schema, **metadata
+            func=handler,
+            schema=schema,
+            supports_response=supports_response,
+            **metadata,
         )
 
     def remove(domain: str, name: str) -> None:

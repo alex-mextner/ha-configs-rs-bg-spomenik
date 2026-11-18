@@ -1,498 +1,62 @@
 {
   "schema": "plant-care-live-snapshot/v1",
   "source": "Home Assistant REST API",
-  "observed_at": "2026-11-18T12:57:32.214427+00:00",
+  "observed_at": "2026-11-18T20:14:24.181174+00:00",
   "time_zone": "Europe/Belgrade",
+  "voice_enabled": true,
   "plant": {
     "entity_id": "sensor.strelitsiia_poliv",
-    "state": "sensor_error",
+    "state": "ok",
     "attributes": {
       "plant_care": true,
       "plant_name": "Стрелиция",
       "entry_id": "01M5Y093N12GT32H7QPMS697KE",
       "source_entity": "sensor.strelitzia_soil_smoothed",
       "freshness_entity": "sensor.strelitzia_soil_adc",
+      "picture": "/local/adaptive_plant/1907fb5ebe5a4f62a57d668c206fd614.jpg",
       "confirmation_hours": 6.0,
-      "moisture": null,
-      "raw_moisture": null,
-      "last_sample_at": 1795006424.957614,
+      "moisture": 98.9,
+      "raw_moisture": 99.1,
+      "last_sample_at": 1795032579.958445,
       "due_since": null,
       "snoozed_until": null,
       "dry_threshold": 25.0,
-      "reliability_valid": false,
-      "reliability_reason": "saturated",
-      "reliability_incident_reason": "saturated",
-      "reliability_incident_started_at": 1794972389.345793,
-      "last_value_change_at": 1794540549.494462,
+      "reliability_valid": true,
+      "reliability_reason": null,
+      "reliability_incident_reason": null,
+      "reliability_incident_started_at": null,
+      "last_value_change_at": 1795031679.95458,
       "last_watering_at": "2026-11-03",
-      "wet_since": null,
+      "wet_since": "2026-11-18T19:29:39.957996+00:00",
       "forecast_due_at": null,
       "voice_next_at": null,
       "last_watering_source": "user_report",
-      "wet_risk": "unknown",
-      "forecast_status": "invalid_readings",
-      "voice_unavailable_reason": "Показания датчика недостоверны",
+      "last_watering_precision": "day",
+      "wet_risk": "checking",
+      "forecast_status": "insufficient_data",
+      "voice_unavailable_reason": "Нет достоверной оценки времени полива",
       "voice_target_name": "Станция Мини Гостиная"
     }
   },
-  "voice_enabled": true,
   "history": {
     "entity_id": "sensor.strelitzia_soil_smoothed",
-    "start": "2026-11-11T12:57:32.214427+00:00",
-    "end": "2026-11-18T12:57:32.214427+00:00",
+    "start": "2026-11-11T20:14:24.181174+00:00",
+    "end": "2026-11-18T20:14:24.181174+00:00",
     "points": [
       {
-        "state": "42.5",
-        "last_changed": "2026-11-11T12:57:32.214427+00:00",
-        "last_updated": "2026-11-11T12:57:32.214427+00:00"
-      },
-      {
-        "state": "42.9",
-        "last_changed": "2026-11-11T13:02:05.349256+00:00"
-      },
-      {
-        "state": "44.8",
-        "last_changed": "2026-11-11T13:02:05.427856+00:00"
-      },
-      {
-        "state": "40.0",
-        "last_changed": "2026-11-11T13:07:05.348068+00:00"
-      },
-      {
-        "state": "42.9",
-        "last_changed": "2026-11-11T13:12:05.314198+00:00"
-      },
-      {
-        "state": "51.6",
-        "last_changed": "2026-11-11T13:12:05.431363+00:00"
-      },
-      {
-        "state": "42.9",
-        "last_changed": "2026-11-11T13:17:05.313802+00:00"
-      },
-      {
-        "state": "51.3",
-        "last_changed": "2026-11-11T13:17:05.422069+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T13:22:05.347627+00:00"
-      },
-      {
-        "state": "57.1",
-        "last_changed": "2026-11-11T13:27:05.353629+00:00"
-      },
-      {
-        "state": "58.4",
-        "last_changed": "2026-11-11T13:27:05.440810+00:00"
-      },
-      {
-        "state": "57.1",
-        "last_changed": "2026-11-11T13:32:05.390315+00:00"
-      },
-      {
-        "state": "58.4",
-        "last_changed": "2026-11-11T13:37:05.347614+00:00"
-      },
-      {
-        "state": "59.0",
-        "last_changed": "2026-11-11T13:42:05.362190+00:00"
-      },
-      {
-        "state": "58.4",
-        "last_changed": "2026-11-11T13:42:05.443652+00:00"
-      },
-      {
-        "state": "57.8",
-        "last_changed": "2026-11-11T13:47:05.346908+00:00"
-      },
-      {
-        "state": "57.1",
-        "last_changed": "2026-11-11T13:47:05.433077+00:00"
-      },
-      {
-        "state": "58.4",
-        "last_changed": "2026-11-11T13:57:05.363085+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T14:02:05.354982+00:00"
-      },
-      {
-        "state": "41.6",
-        "last_changed": "2026-11-11T14:07:05.313609+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T14:07:05.462191+00:00"
-      },
-      {
-        "state": "52.9",
-        "last_changed": "2026-11-11T14:17:05.365505+00:00"
-      },
-      {
-        "state": "58.4",
-        "last_changed": "2026-11-11T14:22:05.313827+00:00"
-      },
-      {
-        "state": "64.6",
-        "last_changed": "2026-11-11T14:22:05.452238+00:00"
-      },
-      {
-        "state": "60.7",
-        "last_changed": "2026-11-11T14:27:05.348358+00:00"
-      },
-      {
-        "state": "63.6",
-        "last_changed": "2026-11-11T14:37:05.388407+00:00"
-      },
-      {
-        "state": "57.1",
-        "last_changed": "2026-11-11T14:37:05.469135+00:00"
-      },
-      {
-        "state": "49.4",
-        "last_changed": "2026-11-11T14:42:05.346796+00:00"
-      },
-      {
-        "state": "57.1",
-        "last_changed": "2026-11-11T14:47:05.390051+00:00"
-      },
-      {
-        "state": "50.6",
-        "last_changed": "2026-11-11T14:52:05.381786+00:00"
-      },
-      {
-        "state": "49.4",
-        "last_changed": "2026-11-11T14:52:05.476977+00:00"
-      },
-      {
-        "state": "48.1",
-        "last_changed": "2026-11-11T14:57:05.315087+00:00"
-      },
-      {
-        "state": "47.8",
-        "last_changed": "2026-11-11T14:57:05.434921+00:00"
-      },
-      {
-        "state": "51.0",
-        "last_changed": "2026-11-11T15:02:05.390688+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T15:07:05.347007+00:00"
-      },
-      {
-        "state": "45.1",
-        "last_changed": "2026-11-11T15:17:05.379504+00:00"
-      },
-      {
-        "state": "47.8",
-        "last_changed": "2026-11-11T15:22:05.349509+00:00"
-      },
-      {
-        "state": "42.9",
-        "last_changed": "2026-11-11T15:27:05.347490+00:00"
-      },
-      {
-        "state": "46.8",
-        "last_changed": "2026-11-11T15:27:05.440184+00:00"
-      },
-      {
-        "state": "43.8",
-        "last_changed": "2026-11-11T15:32:05.386902+00:00"
-      },
-      {
-        "state": "49.0",
-        "last_changed": "2026-11-11T15:42:05.395250+00:00"
-      },
-      {
-        "state": "60.7",
-        "last_changed": "2026-11-11T15:57:05.387576+00:00"
-      },
-      {
-        "state": "58.4",
-        "last_changed": "2026-11-11T16:12:05.365628+00:00"
-      },
-      {
-        "state": "58.8",
-        "last_changed": "2026-11-11T16:17:05.348592+00:00"
-      },
-      {
-        "state": "47.1",
-        "last_changed": "2026-11-11T16:22:05.346757+00:00"
-      },
-      {
-        "state": "47.4",
-        "last_changed": "2026-11-11T16:42:05.366331+00:00"
-      },
-      {
-        "state": "48.7",
-        "last_changed": "2026-11-11T16:50:35.083455+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T16:52:05.314154+00:00"
-      },
-      {
-        "state": "48.7",
-        "last_changed": "2026-11-11T16:54:02.365811+00:00"
-      },
-      {
-        "state": "47.4",
-        "last_changed": "2026-11-11T16:57:05.319583+00:00"
-      },
-      {
-        "state": "49.0",
-        "last_changed": "2026-11-11T16:59:02.355181+00:00"
-      },
-      {
-        "state": "50.6",
-        "last_changed": "2026-11-11T17:02:05.315330+00:00"
-      },
-      {
-        "state": "58.1",
-        "last_changed": "2026-11-11T17:04:02.373661+00:00"
-      },
-      {
-        "state": "50.6",
-        "last_changed": "2026-11-11T17:06:27.767784+00:00"
-      },
-      {
-        "state": "49.0",
-        "last_changed": "2026-11-11T17:07:05.314919+00:00"
-      },
-      {
-        "state": "47.4",
-        "last_changed": "2026-11-11T17:07:23.015706+00:00"
-      },
-      {
-        "state": "48.7",
-        "last_changed": "2026-11-11T17:11:18.575950+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T17:12:05.313859+00:00"
-      },
-      {
-        "state": "50.3",
-        "last_changed": "2026-11-11T17:16:18.554312+00:00"
-      },
-      {
-        "state": "50.6",
-        "last_changed": "2026-11-11T17:18:20.142686+00:00"
-      },
-      {
-        "state": "60.0",
-        "last_changed": "2026-11-11T17:19:05.859703+00:00"
-      },
-      {
-        "state": "69.5",
-        "last_changed": "2026-11-11T17:19:21.986150+00:00"
-      },
-      {
-        "state": "60.0",
-        "last_changed": "2026-11-11T17:20:35.013988+00:00"
-      },
-      {
-        "state": "69.5",
-        "last_changed": "2026-11-11T17:23:11.502331+00:00"
-      },
-      {
-        "state": "66.2",
-        "last_changed": "2026-11-11T17:34:02.300636+00:00"
-      },
-      {
-        "state": "63.0",
-        "last_changed": "2026-11-11T17:36:22.288448+00:00"
-      },
-      {
-        "state": "66.2",
-        "last_changed": "2026-11-11T17:37:22.972722+00:00"
-      },
-      {
-        "state": "63.0",
-        "last_changed": "2026-11-11T17:38:11.450767+00:00"
-      },
-      {
-        "state": "66.2",
-        "last_changed": "2026-11-11T17:41:18.523451+00:00"
-      },
-      {
-        "state": "63.0",
-        "last_changed": "2026-11-11T17:43:11.489440+00:00"
-      },
-      {
-        "state": "60.4",
-        "last_changed": "2026-11-11T17:46:18.520975+00:00"
-      },
-      {
-        "state": "57.8",
-        "last_changed": "2026-11-11T17:48:11.468666+00:00"
-      },
-      {
-        "state": "54.8",
-        "last_changed": "2026-11-11T17:49:21.922056+00:00"
-      },
-      {
-        "state": "60.4",
-        "last_changed": "2026-11-11T17:58:11.450302+00:00"
-      },
-      {
-        "state": "64.3",
-        "last_changed": "2026-11-11T18:03:11.457527+00:00"
-      },
-      {
-        "state": "70.8",
-        "last_changed": "2026-11-11T18:08:11.418949+00:00"
-      },
-      {
-        "state": "61.3",
-        "last_changed": "2026-11-11T18:08:11.579638+00:00"
-      },
-      {
-        "state": "70.8",
-        "last_changed": "2026-11-11T18:18:46.626524+00:00"
-      },
-      {
-        "state": "60.4",
-        "last_changed": "2026-11-11T18:20:16.373212+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T18:23:11.423206+00:00"
-      },
-      {
-        "state": "50.3",
-        "last_changed": "2026-11-11T18:23:37.319652+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T18:28:11.419393+00:00"
-      },
-      {
-        "state": "49.4",
-        "last_changed": "2026-11-11T18:28:37.366825+00:00"
-      },
-      {
-        "state": "48.7",
-        "last_changed": "2026-11-11T18:33:11.422389+00:00"
-      },
-      {
-        "state": "49.4",
-        "last_changed": "2026-11-11T18:33:37.335586+00:00"
-      },
-      {
-        "state": "50.0",
-        "last_changed": "2026-11-11T18:38:11.540234+00:00"
-      },
-      {
-        "state": "48.0",
-        "last_changed": "2026-11-11T18:38:37.315666+00:00"
-      },
-      {
-        "state": "46.1",
-        "last_changed": "2026-11-11T18:40:04.068054+00:00"
-      },
-      {
-        "state": "43.9",
-        "last_changed": "2026-11-11T18:40:56.282283+00:00"
-      },
-      {
-        "state": "46.1",
-        "last_changed": "2026-11-11T18:43:11.424371+00:00"
-      },
-      {
-        "state": "43.9",
-        "last_changed": "2026-11-11T18:44:48.731193+00:00"
-      },
-      {
-        "state": "46.1",
-        "last_changed": "2026-11-11T18:48:38.914106+00:00"
-      },
-      {
-        "state": "45.2",
-        "last_changed": "2026-11-11T18:49:48.710485+00:00"
-      },
-      {
-        "state": "44.2",
-        "last_changed": "2026-11-11T18:50:16.332689+00:00"
-      },
-      {
-        "state": "45.2",
-        "last_changed": "2026-11-11T18:55:08.946249+00:00"
-      },
-      {
-        "state": "46.1",
-        "last_changed": "2026-11-11T18:58:37.291338+00:00"
-      },
-      {
-        "state": "45.2",
-        "last_changed": "2026-11-11T18:59:10.452238+00:00"
-      },
-      {
-        "state": "44.2",
-        "last_changed": "2026-11-11T19:03:45.776275+00:00"
-      },
-      {
-        "state": "42.5",
-        "last_changed": "2026-11-11T19:04:10.465217+00:00"
-      },
-      {
-        "state": "40.9",
-        "last_changed": "2026-11-11T19:08:37.282979+00:00"
-      },
-      {
-        "state": "42.5",
-        "last_changed": "2026-11-11T19:09:10.431824+00:00"
-      },
-      {
-        "state": "40.9",
-        "last_changed": "2026-11-11T19:09:48.639378+00:00"
-      },
-      {
-        "state": "41.2",
-        "last_changed": "2026-11-11T19:10:56.236002+00:00"
-      },
-      {
-        "state": "44.2",
-        "last_changed": "2026-11-11T19:14:10.447967+00:00"
-      },
-      {
-        "state": "48.4",
-        "last_changed": "2026-11-11T19:14:48.690695+00:00"
-      },
-      {
-        "state": "52.6",
-        "last_changed": "2026-11-11T19:19:10.429119+00:00"
-      },
-      {
-        "state": "57.2",
-        "last_changed": "2026-11-11T19:19:48.677896+00:00"
-      },
-      {
-        "state": "61.7",
-        "last_changed": "2026-11-11T19:24:10.433536+00:00"
-      },
-      {
-        "state": "65.0",
-        "last_changed": "2026-11-11T19:25:08.899165+00:00"
-      },
-      {
-        "state": "64.0",
-        "last_changed": "2026-11-11T19:39:10.470563+00:00"
-      },
-      {
-        "state": "62.3",
-        "last_changed": "2026-11-11T19:54:10.451729+00:00"
-      },
-      {
-        "state": "64.9",
-        "last_changed": "2026-11-11T20:09:10.401151+00:00"
-      },
-      {
+        "entity_id": "sensor.strelitzia_soil_smoothed",
         "state": "61.0",
-        "last_changed": "2026-11-11T20:09:10.683760+00:00"
+        "attributes": {
+          "state_class": "measurement",
+          "buffer_usage_ratio": 0.3,
+          "age_coverage_ratio": 0.83,
+          "source_value_valid": true,
+          "unit_of_measurement": "%",
+          "icon": "mdi:calculator",
+          "friendly_name": "Strelitzia Soil Smoothed"
+        },
+        "last_changed": "2026-11-11T20:14:24.181174+00:00",
+        "last_updated": "2026-11-11T20:14:24.181174+00:00"
       },
       {
         "state": "56.5",
@@ -2389,6 +1953,58 @@
       {
         "state": "100.0",
         "last_changed": "2026-11-18T05:34:03.361364+00:00"
+      },
+      {
+        "state": "unavailable",
+        "last_changed": "2026-11-18T17:38:57.761017+00:00"
+      },
+      {
+        "state": "100.0",
+        "last_changed": "2026-11-18T17:43:58.001166+00:00"
+      },
+      {
+        "state": "unavailable",
+        "last_changed": "2026-11-18T17:54:37.320102+00:00"
+      },
+      {
+        "state": "100.0",
+        "last_changed": "2026-11-18T18:00:29.767840+00:00"
+      },
+      {
+        "state": "97.0",
+        "last_changed": "2026-11-18T19:14:39.565439+00:00"
+      },
+      {
+        "state": "96.7",
+        "last_changed": "2026-11-18T19:14:39.821246+00:00"
+      },
+      {
+        "state": "97.0",
+        "last_changed": "2026-11-18T19:19:39.960988+00:00"
+      },
+      {
+        "state": "97.3",
+        "last_changed": "2026-11-18T19:39:39.964544+00:00"
+      },
+      {
+        "state": "97.7",
+        "last_changed": "2026-11-18T19:44:39.563569+00:00"
+      },
+      {
+        "state": "98.8",
+        "last_changed": "2026-11-18T19:44:39.815737+00:00"
+      },
+      {
+        "state": "100.0",
+        "last_changed": "2026-11-18T19:44:39.964500+00:00"
+      },
+      {
+        "state": "98.8",
+        "last_changed": "2026-11-18T19:49:39.963722+00:00"
+      },
+      {
+        "state": "99.1",
+        "last_changed": "2026-11-18T20:09:39.963049+00:00"
       }
     ]
   }

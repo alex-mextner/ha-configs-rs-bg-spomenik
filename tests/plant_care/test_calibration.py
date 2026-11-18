@@ -1,24 +1,13 @@
 """Bounded deterministic calibration tests, independent of Home Assistant."""
 
-import importlib.util
 import json
-import sys
-import types
 import unittest
 from collections.abc import Sequence
 from dataclasses import asdict, replace
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-PACKAGE = "_plant_calibration_engine_test"
-package = types.ModuleType(PACKAGE)
-package.__path__ = [str(ROOT / "custom_components/plant_care_alerts")]
-sys.modules[PACKAGE] = package
-MODULE_PATH = ROOT / "custom_components/plant_care_alerts/calibration.py"
-SPEC = importlib.util.spec_from_file_location(PACKAGE + ".calibration", MODULE_PATH)
-calibration = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = calibration
-SPEC.loader.exec_module(calibration)
+from calibration_fixtures import load_component_module
+
+calibration = load_component_module("calibration")
 
 START = 1_800_000_000.0
 DAY = 86400.0
@@ -190,6 +179,12 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(result.reason, "unreliable_sample")
         self.assertIsNone(result.proposed_wet)
 
+    def test_physical_inputs_require_named_constructor_arguments(self) -> None:
+        values = (reading(START, 209.2), reference_window(0)[1])
+        for value in values:
+            with self.subTest(kind=type(value).__name__), self.assertRaises(TypeError):
+                type(value)(*asdict(value).values())
+
     def test_frozen_inputs_do_not_retain_mutable_json_list_aliases(self) -> None:
         original = reading(START, 209.2)
         burst = list(original.burst)
@@ -249,6 +244,9 @@ class CalibrationTests(unittest.TestCase):
         samples, refs, now = custom_history([i * 300 for i in range(12)])
         result = calibration.evaluate_calibration(samples, refs, baseline(), now)
         self.assertEqual(result.reason, "poor_reference_quality")
+        self.assertEqual(
+            set(result.diagnostics["rejected_references"].values()), {"coverage"}
+        )
         self.assertIsNone(result.proposed_wet)
 
     def test_replaying_one_burst_does_not_create_independent_observations(self) -> None:
@@ -395,6 +393,9 @@ class CalibrationTests(unittest.TestCase):
         ]
         result = calibration.evaluate_calibration(samples, refs, baseline(), now)
         self.assertEqual(result.reason, "poor_reference_quality")
+        self.assertEqual(
+            set(result.diagnostics["rejected_references"].values()), {"stationarity"}
+        )
         self.assertIsNone(result.proposed_wet)
 
     def test_full_window_target_is_not_hidden_by_sample_envelope_filter(self) -> None:

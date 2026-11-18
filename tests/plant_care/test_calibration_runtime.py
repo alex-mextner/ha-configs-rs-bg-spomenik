@@ -1,42 +1,22 @@
 """Calibration transitions must not manufacture physical recovery or watering."""
 
 import copy
-import importlib.util
-import sys
-import types
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from calibration_fixtures import (
+    load_component_module,
     physical_attributes,
     qualified_cycle_windows,
     reference_attributes,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
-PACKAGE = "_plant_calibration_runtime_test"
-package = types.ModuleType(PACKAGE)
-package.__path__ = [str(ROOT / "custom_components/plant_care_alerts")]
-sys.modules[PACKAGE] = package
-
-
-def load(name: str) -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        PACKAGE + "." + name,
-        ROOT / "custom_components/plant_care_alerts" / (name + ".py"),
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-state_machine = load("state_machine")
-runtime_module = load("calibration_runtime")
+state_machine = load_component_module("state_machine")
+runtime_module = load_component_module("calibration_runtime")
+persistence_module = load_component_module("persistence")
 MISSING = object()
 
 
@@ -189,6 +169,36 @@ class CalibrationReliabilityTests(unittest.TestCase):
                 self.assertEqual(current["status"], "sensor_error")
                 self.assertEqual(current["reliability_reason"], "invalid_sample")
 
+    def test_confirmed_wet_after_barrier_retains_delayed_clear_intent(self) -> None:
+        record = {
+            "source_identity": "sensor.smooth",
+            "raw_source_identity": "sensor.raw",
+            "last_observed_value": 20,
+            "last_value_change_at": NOW - 600,
+            "last_source_value": 98,
+            "last_source_change_at": NOW - 600,
+            "reliability_last_sample_at": NOW - 300,
+            "reliability_valid": True,
+            "due_since": NOW - 90000,
+            "dry_since": NOW - 100000,
+            "notified_status": "overdue",
+        }
+        current = reading(NOW + 60, 90, 205)
+        current["calibration_current"] = [67, 222]
+        record = state_machine.evaluate(record, current, NOW + 60)
+        self.assertEqual(record["status"], "calibrating")
+        for offset in (1801, 2101, 2401):
+            current = {**current, "sample_at": NOW + offset, "raw_source_value": 206}
+            record = state_machine.evaluate(record, current, NOW + offset)
+            self.assertEqual(record["status"], "checking")
+            self.assertTrue(record["calibration_confirmation_pending"])
+            self.assertEqual(record["notified_status"], "overdue")
+        current = {**current, "sample_at": NOW + 2701, "raw_source_value": 207}
+        record = state_machine.evaluate(record, current, NOW + 2701)
+        self.assertEqual(record["status"], "ok")
+        self.assertFalse(record["calibration_confirmation_pending"])
+        self.assertTrue(record["clear_pending"])
+
     def test_healthy_calibration_barrier_creates_no_sensor_incident(self) -> None:
         previous = {
             "source_identity": "sensor.smooth",
@@ -297,10 +307,22 @@ class FakeServices:
 class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     """Exercise persistence and actual helper effects through the runtime adapter."""
 
+    async def confirm_witnesses(self, entry: str, witnesses: dict) -> None:
+        await persistence_module.async_save_confirmed(
+            self.care_store, self.care_store.async_load, {entry: witnesses}
+        )
+
+    def runtime_hooks(self, **options: Any) -> Any:
+        return runtime_module.RuntimeHooks(
+            read_persisted=self.store.async_load,
+            confirm_witnesses=self.confirm_witnesses,
+            **options,
+        )
+
     def new_runtime(
         self, hass: Any, store: MemoryStore, config: dict, *, hooks: Any = None
     ) -> Any:
-        hooks = hooks or self.runtime_module.RuntimeHooks()
+        hooks = hooks or self.runtime_hooks()
         return self.runtime_module.CalibrationRuntime(
             hass,
             store,
@@ -311,6 +333,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.runtime_module = runtime_module
         self.store = MemoryStore()
+        self.care_store = MemoryStore()
         self.config = {
             "freshness_sources": {"sensor.smooth": "sensor.raw"},
             "calibration_sources": {
@@ -553,7 +576,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass,
             self.store,
             self.config,
-            hooks=self.runtime_module.RuntimeHooks(
+            hooks=self.runtime_hooks(
                 clock=lambda: self.hass.now,
                 quality_provider=lambda _entry, _now: self.quality,
                 context_factory=lambda: SimpleNamespace(id="calibration-context"),
@@ -603,6 +626,127 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.manager.reading_fields("plant")["calibration_verified_revision"], 1
         )
         self.assertEqual(attrs["calibration_baseline_wet"], 221)
+
+    async def test_care_witness_failure_prevents_the_current_helper_effect(
+        self,
+    ) -> None:
+        await self.qualified_fixture()
+
+        async def failed_witness(_entry: str, _witnesses: dict) -> None:
+            message = "Independent care-store confirmation failed"
+            raise OSError(message)
+
+        self.manager._confirm_witnesses = failed_witness
+        await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
+        self.assertEqual(self.hass.services.writes, [])
+        self.assertEqual(float(self.hass.values["input_number.wet"].state), 221)
+        self.assertEqual(
+            self.manager.attributes("plant")["calibration_status"],
+            "witness_unavailable",
+        )
+
+    async def test_witness_is_confirmed_after_pending_save_before_arming(self) -> None:
+        await self.qualified_fixture()
+        observed = []
+
+        async def confirm(entry: str, witnesses: dict) -> None:
+            pending = self.store.data["records"]["sensor.smooth"]["pending"]
+            self.assertIsNotNone(pending)
+            self.assertEqual(self.hass.services.writes, [])
+            self.assertEqual(self.manager._write_checks, {})
+            self.assertEqual(witnesses, self.manager.witnesses())
+            observed.append(entry)
+
+        self.manager._confirm_witnesses = confirm
+        await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
+        self.assertEqual(observed, ["plant"])
+        self.assertEqual(self.hass.services.writes, [("input_number.wet", 222)])
+
+    async def test_manual_event_during_care_confirmation_wins_before_arming(
+        self,
+    ) -> None:
+        await self.qualified_fixture()
+        confirmed = self.confirm_witnesses
+
+        async def manual_during_confirmation(entry: str, witnesses: dict) -> None:
+            await confirmed(entry, witnesses)
+            self.external_wet_change(230)
+
+        self.manager._confirm_witnesses = manual_during_confirmation
+        await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
+        self.assertEqual(self.hass.services.writes, [])
+        self.assertEqual(float(self.hass.values["input_number.wet"].state), 230)
+        record = self.store.data["records"]["sensor.smooth"]
+        self.assertEqual(
+            [
+                (row["kind"], row["old_wet"], row["new_wet"])
+                for row in record["history"]
+            ],
+            [("manual", 221, 230)],
+        )
+        self.assertIsNone(record["verified_revision"])
+        self.assertEqual(record["attempts"][-1]["outcome"], "aborted")
+
+    async def test_shutdown_final_save_never_claims_an_independent_receipt(
+        self,
+    ) -> None:
+        before = self.manager.witnesses()
+        self.store.drop_save = True
+        with self.assertNoLogs(self.runtime_module.__name__, level="ERROR"):
+            await self.manager.async_save_final()
+        self.assertTrue(self.manager._stopping)
+        self.assertEqual(self.manager.witnesses(), before)
+        self.assertFalse(await self.manager.async_save())
+        self.assertEqual(self.hass.services.writes, [])
+
+    async def test_conflicting_duplicate_revokes_both_training_flags(self) -> None:
+        await self.qualified_fixture(raw=203)
+        await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
+        record = self.manager.records["sensor.smooth"]
+        self.assertEqual(record["current"], [67, 220])
+        for offset, raw, burst in (
+            (1801, 210, [209] * 11),
+            (2101, 209, [208] * 11),
+        ):
+            with self.subTest(raw=raw, burst=burst):
+                at = NOW + offset
+                original = ha_state(
+                    209, sampled_at=at, samples=[209] * 11, physical_pin=22
+                )
+                self.hass.values["sensor.raw"] = original
+                self.manager._append_sample(record, original, self.quality, at)
+                point = record["samples"][-1]
+                self.assertTrue(point["reliable"])
+                self.assertTrue(point["rollback_eligible"])
+                conflict = ha_state(raw, sampled_at=at, samples=burst, physical_pin=22)
+                self.manager._append_sample(record, conflict, self.quality, at)
+                self.assertFalse(point["reliable"])
+                self.assertFalse(point["rollback_eligible"])
+                self.assertEqual(point["raw"], 209)
+                self.assertEqual(point["burst"], [209] * 11)
+
+    async def test_pending_future_events_remain_validated_observations(self) -> None:
+        await self.qualified_fixture()
+
+        def future_change() -> None:
+            before = self.hass.values["input_number.wet"]
+            after = ha_state(230, NOW + 120)
+            self.hass.values["input_number.wet"] = after
+            self.manager.note_helper_event(
+                helper_event("input_number.wet", before, after, "external-future")
+            )
+
+        self.hass.services.after_write = future_change
+        await self.manager.async_observe("plant", self.quality, NOW, allow_write=True)
+        record = self.store.data["records"]["sensor.smooth"]
+        self.assertEqual(record["current"], [67, 230])
+        facts = record["helper_observations"]
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["at"], NOW + 120)
+        self.assertEqual(facts[0]["context_id"], "external-future")
+        self.assertEqual(facts[0]["reason"], "invalid_time")
+        self.assertIsNone(facts[0]["source_fingerprint"])
+        self.assertIsNone(record["verified_revision"])
 
     async def test_silent_store_write_failure_never_authorizes_helper_effect(
         self,
@@ -772,7 +916,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass,
             self.store,
             self.config,
-            hooks=self.runtime_module.RuntimeHooks(clock=lambda: self.hass.now),
+            hooks=self.runtime_hooks(clock=lambda: self.hass.now),
         )
         await restarted.async_load()
         await restarted.async_prepare("plant", "sensor.smooth", NOW + 1, "rest:raw")
@@ -1018,7 +1162,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         attempt = record["attempts"][-1]
         self.assertEqual(attempt["outcome"], "interrupted_unknown")
         self.assertEqual(
-            [(row["before"], row["after"]) for row in attempt["observed_events"]],
+            [(row["before"], row["after"]) for row in record["helper_observations"]],
             [(221, 222), (221, 230)],
         )
         self.assertIn(attempt["evidence_id"], record["blocked_evidence_ids"])
@@ -1266,7 +1410,7 @@ class CalibrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass,
             self.store,
             self.config,
-            hooks=self.runtime_module.RuntimeHooks(
+            hooks=self.runtime_hooks(
                 clock=lambda: self.hass.now,
                 quality_provider=lambda _entry, _now: self.quality,
                 context_factory=lambda: SimpleNamespace(id="after-unknown-attempt"),

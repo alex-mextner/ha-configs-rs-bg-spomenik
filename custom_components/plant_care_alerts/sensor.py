@@ -8,7 +8,7 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.start import async_at_started
 
-from . import DOMAIN
+from .const import DOMAIN
 
 
 async def async_setup_platform(
@@ -25,7 +25,7 @@ class PlantCareSensor(SensorEntity):
     """Expose one plant alert with controls and photo metadata."""
 
     _attr_should_poll = False
-    _unrecorded_attributes = frozenset({"calibration_history"})
+    _unrecorded_attributes = frozenset({"calibration_history", "watering_history"})
     _attr_icon = "mdi:flower"
 
     def __init__(self, manager: Any, entry_id: Any) -> None:
@@ -101,6 +101,9 @@ class PlantCareSensor(SensorEntity):
                 key: iso(record.get(key))
                 for key in (
                     "last_watering_at",
+                    "last_watering_window_start",
+                    "last_watering_window_end",
+                    "last_watering_detected_at",
                     "wet_since",
                     "forecast_due_at",
                     "forecast_voice_at",
@@ -113,13 +116,46 @@ class PlantCareSensor(SensorEntity):
                 else None
             ),
             "last_watering_source": record.get("last_watering_source", "unknown"),
-            "last_watering_precision": (
+            "last_watering_precision": record.get("last_watering_precision")
+            or (
                 "sample"
                 if record.get("last_watering_source") == "auto"
                 else "day"
-                if record.get("last_watering_source") == "user_report"
+                if record.get("last_watering_source") in {"user_report", "upstream"}
                 else None
             ),
+            "last_watering_retroactive": record.get("last_watering_retroactive", False),
+            "last_watering_note": record.get("last_watering_note"),
+            "watering_detection_status": record.get(
+                "watering_detection_status", "insufficient_history"
+            ),
+            "watering_history": [
+                {
+                    **{
+                        key: event.get(key)
+                        for key in (
+                            "event_id",
+                            "source",
+                            "precision",
+                            "retroactive",
+                            "note",
+                            "timezone",
+                            "valid",
+                        )
+                    },
+                    **{
+                        key: iso(event.get(key))
+                        for key in (
+                            "at",
+                            "window_start",
+                            "window_end",
+                            "detected_at",
+                            "retracted_at",
+                        )
+                    },
+                }
+                for event in record.get("watering_history", [])
+            ],
             "wet_risk": record.get("wet_risk", "unknown"),
             "forecast_status": record.get("forecast_status", "insufficient_data"),
             "voice_unavailable_reason": record.get("voice_unavailable_reason"),
