@@ -10,8 +10,9 @@ from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, EVENT_STATE_CHANGED
-from homeassistant.exceptions import HomeAssistantError, Unauthorized
+from homeassistant.exceptions import HomeAssistantError, Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import discovery
 from homeassistant.helpers import entity_registry as er
@@ -30,6 +31,7 @@ from .voice import async_announce, configured_target, target_available
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import Context
 
 DOMAIN = "plant_care_alerts"
 RETRY_DELAYS = (60, 300, 900, 3600)
@@ -37,6 +39,14 @@ HISTORY_RETRY_SECONDS = 900
 HISTORY_DAYS = 14
 VOICE_START_HOUR = 8
 VOICE_END_HOUR = 21
+VOICE_METADATA_KEYS = (
+    "forecast_voice_at",
+    "voice_unavailable_reason",
+    "voice_target",
+    "voice_target_name",
+    "voice_target_available",
+    "voice_next_at",
+)
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = vol.Schema(
     {
@@ -101,16 +111,39 @@ def needs_notification(record: Any) -> bool:
     )
 
 
+def needs_clear(record: dict[str, Any]) -> bool:
+    """Retry a failed phone clear while the plant remains in a sensor fault."""
+    return record.get("status") == "sensor_error" and bool(record.get("clear_pending"))
+
+
 def acknowledge_delivery(record: dict[str, Any], status: str) -> None:
     """Record delivery, or allow a new warning after a fault cleared the phone tag."""
     # A completed clear removed the phone tag even if the sensor recovered
     # while notify awaited delivery. Re-arm that current warning for retry.
     if status == "sensor_error":
+        record.pop("clear_pending", None)
         record["notified_status"] = None
         record["delivery_attempts"] = 0
     elif record["status"] == status:
         record["notified_status"] = status
         record["delivery_attempts"] = 0
+
+
+async def _require_entity_control(
+    hass: Any, context: Context, entity_id: str | None
+) -> None:
+    """Apply native entity control permissions without restricting automations."""
+    if not context.user_id:
+        return
+    user = await hass.auth.async_get_user(context.user_id)
+    if user is None:
+        raise UnknownUser(context=context)
+    if entity_id is None or not user.permissions.check_entity(
+        entity_id, POLICY_CONTROL
+    ):
+        raise Unauthorized(
+            context=context, entity_id=entity_id, permission=POLICY_CONTROL
+        )
 
 
 def _observed_day(value: Any) -> Any:
@@ -186,44 +219,18 @@ def _register_photo_service(hass: Any, manager: CareManager) -> None:
     )
 
 
-async def async_setup(hass: Any, config: Any) -> bool:
-    """Register the companion sensor, persistence and internal delivery services."""
-    manager = CareManager(hass, config[DOMAIN])
-    hass.data[DOMAIN] = manager
-    await manager.load()
-    await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
-    manager.unsub_timer = async_track_time_interval(
-        hass, manager.async_refresh, timedelta(minutes=1)
-    )
+def _register_delivery_services(hass: Any, manager: CareManager) -> None:
+    """Register report and delivery callbacks with their caller context."""
 
-    async def source_changed(event: Any) -> None:
-        """Handle an integration lifecycle event."""
-        if event.data.get("entity_id") in manager.watched:
-            await manager.async_refresh()
+    async def refresh(_call: Any) -> None:
+        """Finish any pending refresh before a service caller reads its report."""
+        await manager.async_refresh(wait=True)
 
-    manager.unsub_state = hass.bus.async_listen(EVENT_STATE_CHANGED, source_changed)
-
-    async def registry_changed(_event: Any) -> None:
-        """Handle an integration lifecycle event."""
-        manager.button_cache.clear()
-
-    manager.unsub_registry = hass.bus.async_listen(
-        "entity_registry_updated", registry_changed
-    )
-
-    async def stop(_event: Any) -> None:
-        """Handle an integration lifecycle event."""
-        manager.unsub_timer()
-        manager.unsub_state()
-        manager.unsub_registry()
-        await manager.store.async_save(manager.records)
-
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop)
-    _register_photo_service(hass, manager)
-    hass.services.async_register(DOMAIN, "refresh", manager.async_refresh)
+    hass.services.async_register(DOMAIN, "refresh", refresh)
 
     async def acknowledge(call: Any) -> None:
         """Handle an integration lifecycle event."""
+        await _require_entity_control(hass, call.context, call.data["entity_id"])
         for key, entity in manager.entities.items():
             if entity.entity_id == call.data["entity_id"]:
                 record = manager.records[key]
@@ -245,13 +252,14 @@ async def async_setup(hass: Any, config: Any) -> bool:
 
     async def snooze(call: Any) -> None:
         """Pause only companion reminders; do not touch upstream schedules."""
+        await _require_entity_control(hass, call.context, call.data["entity_id"])
         for key, entity in manager.entities.items():
             if entity.entity_id == call.data["entity_id"]:
                 now = dt_util.utcnow().timestamp()
                 record = manager.records[key]
                 record["snoozed_until"] = now + 86400
                 record["notified_status"] = None
-                await manager.async_refresh()
+                await manager.async_refresh(wait=True)
                 manager.store.async_delay_save(lambda: manager.records, 1)
                 break
 
@@ -263,7 +271,9 @@ async def async_setup(hass: Any, config: Any) -> bool:
     )
 
     async def announce(call: Any) -> None:
-        await async_announce(hass, manager.voice_target, call.data["message"])
+        target = manager.voice_target
+        await _require_entity_control(hass, call.context, target)
+        await async_announce(hass, target, call.data["message"], context=call.context)
 
     hass.services.async_register(
         DOMAIN,
@@ -271,6 +281,47 @@ async def async_setup(hass: Any, config: Any) -> bool:
         announce,
         schema=vol.Schema({vol.Required("message"): cv.string}),
     )
+
+
+async def async_setup(hass: Any, config: Any) -> bool:
+    """Register the companion sensor, persistence and internal delivery services."""
+    manager = CareManager(hass, config[DOMAIN])
+    hass.data[DOMAIN] = manager
+    await manager.load()
+    await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
+    manager.unsub_timer = async_track_time_interval(
+        hass, manager.async_refresh, timedelta(minutes=1)
+    )
+
+    async def source_changed(event: Any) -> None:
+        """Handle an integration lifecycle event."""
+        entity_id = event.data.get("entity_id")
+        if entity_id in manager.voice_entities:
+            manager.refresh_voice_metadata()
+        elif entity_id in manager.watched_sources:
+            await manager.async_refresh()
+
+    manager.unsub_state = hass.bus.async_listen(EVENT_STATE_CHANGED, source_changed)
+
+    async def registry_changed(_event: Any) -> None:
+        """Handle an integration lifecycle event."""
+        manager.button_cache.clear()
+
+    manager.unsub_registry = hass.bus.async_listen(
+        "entity_registry_updated", registry_changed
+    )
+
+    async def stop(_event: Any) -> None:
+        """Handle an integration lifecycle event."""
+        manager.unsub_timer()
+        manager.unsub_state()
+        manager.unsub_registry()
+        await manager.store.async_save(manager.records)
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop)
+    _register_photo_service(hass, manager)
+
+    _register_delivery_services(hass, manager)
     return True
 
 
@@ -311,6 +362,11 @@ class CareManager:
         self.history_loaded = set()
         self.history_attempts = {}
         self.busy = False
+        self._refresh_pending = False
+        self._refresh_owner = None
+        self._refresh_finished = asyncio.Event()
+        self._refresh_finished.set()
+        self._refresh_watched = set()
         self.voice_entry = None
         self.settings = {
             "confirm_seconds": config["confirmation_hours"] * 3600,
@@ -322,6 +378,25 @@ class CareManager:
     def voice_target(self) -> str | None:
         """One setting drives the card and the delivery path."""
         return configured_target(self.voice_entry, self.config.get("voice_speaker"))
+
+    @property
+    def voice_entities(self) -> set[str]:
+        """Inputs that only change voice metadata, never plant analytics."""
+        return {
+            entity_id
+            for entity_id in (
+                self.config.get(
+                    "voice_toggle", "input_boolean.plant_care_voice_enabled"
+                ),
+                self.voice_target,
+            )
+            if entity_id
+        }
+
+    @property
+    def watched_sources(self) -> set[str]:
+        """Keep existing source subscriptions while recorder history is pending."""
+        return self.watched | self._refresh_watched
 
     async def load(self) -> None:
         """Restore alert timing through the supported Home Assistant storage API."""
@@ -421,8 +496,13 @@ class CareManager:
         """Publish a change; delivery remains pending until acknowledged."""
         current = self.records[entry_id]
         status = current["status"]
+        if status == "sensor_error" and (
+            previous in {"due", "overdue"}
+            or current.get("notified_status") in {"due", "overdue"}
+        ):
+            current["clear_pending"] = True
         notify = needs_notification(current)
-        if notify:
+        if notify or needs_clear(current):
             self.last_attempt[entry_id] = dt_util.utcnow().timestamp()
             current["delivery_attempts"] = current.get("delivery_attempts", 0) + 1
         if status == "ok" and current.get("due_since") is None:
@@ -529,15 +609,7 @@ class CareManager:
         calibration = (
             [dry, wet] if dry is not None and wet is not None and wet > dry else None
         )
-        self.watched.update(
-            x
-            for x in [
-                *calibration_ids.values(),
-                self.config.get("voice_toggle"),
-                self.voice_target,
-            ]
-            if x
-        )
+        self.watched.update(x for x in calibration_ids.values() if x)
         return calibration
 
     @staticmethod
@@ -611,11 +683,16 @@ class CareManager:
                 pass
 
     def _update_voice_estimates(self, current: dict[str, Any], now: float) -> None:
-        """Apply confirmation timing and publish unchanged voice availability."""
+        """Apply confirmation timing once after a full plant analysis."""
         forecast = current.get("forecast_due_at")
         if forecast is not None:
             forecast += self.settings["confirm_seconds"]
             current["forecast_due_at"] = forecast
+        self._update_voice_metadata(current, now)
+
+    def _update_voice_metadata(self, current: dict[str, Any], now: float) -> None:
+        """Update voice availability without changing the watering forecast."""
+        forecast = current.get("forecast_due_at")
         current["forecast_voice_at"] = (
             self._voice_hour(forecast + self.settings["overdue_seconds"], now)
             if forecast
@@ -654,6 +731,22 @@ class CareManager:
             if reason is None
             else None
         )
+
+    def refresh_voice_metadata(self) -> None:
+        """Publish speaker or toggle changes without reading history or samples."""
+        now = dt_util.utcnow().timestamp()
+        changed = False
+        for entry_id in self.active_plants:
+            current = self.records[entry_id]
+            before = tuple(current.get(key) for key in VOICE_METADATA_KEYS)
+            self._update_voice_metadata(current, now)
+            if before != tuple(current.get(key) for key in VOICE_METADATA_KEYS):
+                changed = True
+                entity = self.entities.get(entry_id)
+                if entity is not None and getattr(entity, "hass", None) is not None:
+                    entity.async_write_ha_state()
+        if changed:
+            self.store.async_delay_save(lambda: self.records, 10)
 
     def _analytics(self, current: dict, plant: Any, reading: dict, now: float) -> None:
         """Update estimates without changing upstream watering or fertilizing."""
@@ -739,7 +832,7 @@ class CareManager:
         delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
         retry_ready = now - self.last_attempt.get(entry_id, 0) >= delay
         if old.get("status") != current["status"] or (
-            needs_notification(current) and retry_ready
+            (needs_notification(current) or needs_clear(current)) and retry_ready
         ):
             self.emit_transition(entry_id, old.get("status"))
 
@@ -765,27 +858,46 @@ class CareManager:
             records.pop(entry_id, None)
         return True
 
-    async def async_refresh(self, _event: Any = None) -> None:
-        """Refresh loaded plants and preserve timers across options reloads."""
-        if self.busy or self.add_entities is None:
-            return
+    async def _refresh_once(self) -> None:
+        """Refresh one snapshot of loaded plants and their subscriptions."""
         plants = self.hass.data.get("adaptive_plant")
         if not isinstance(plants, dict):
             return
+        now = dt_util.utcnow().timestamp()
+        changed = False
+        self._refresh_watched = self.watched
+        self.watched = set()
+        for entry_id, plant in list(plants.items()):
+            if hasattr(plant, "moisture_sensor"):
+                await self._load_history(entry_id, plant, now)
+                changed = self._refresh_plant(entry_id, plant, now) or changed
+        for entry_id in set(self.entities) - set(plants):
+            changed = await self._remove_missing(entry_id) or changed
+        if changed:
+            self.store.async_delay_save(lambda: self.records, 10)
+
+    async def async_refresh(self, _event: Any = None, *, wait: bool = False) -> None:
+        """Coalesce refreshes and let explicit callers await the latest pass."""
+        if self.add_entities is None:
+            return
+        if self.busy:
+            self._refresh_pending = True
+            if wait and asyncio.current_task() is not self._refresh_owner:
+                await self._refresh_finished.wait()
+            return
         self.busy = True
+        self._refresh_owner = asyncio.current_task()
+        self._refresh_finished.clear()
         try:
-            now = dt_util.utcnow().timestamp()
-            changed = False
-            self.watched = set()
-            for entry_id, plant in list(plants.items()):
-                if hasattr(plant, "moisture_sensor"):
-                    await self._load_history(entry_id, plant, now)
-                    changed = self._refresh_plant(entry_id, plant, now) or changed
-            for entry_id in set(self.entities) - set(plants):
-                changed = await self._remove_missing(entry_id) or changed
-            if changed:
-                self.store.async_delay_save(lambda: self.records, 10)
+            while True:
+                self._refresh_pending = False
+                await self._refresh_once()
+                if not self._refresh_pending:
+                    break
         except Exception:
             _LOGGER.exception("Failed to update plant care alerts")
         finally:
             self.busy = False
+            self._refresh_owner = None
+            self._refresh_watched = set()
+            self._refresh_finished.set()

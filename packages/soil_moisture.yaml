@@ -71,16 +71,22 @@ template:
         unit_of_measurement: "%"
         state_class: measurement
         availability: >-
+          {% set dry = states('input_number.strelitzia_soil_dry_adc') %}
+          {% set wet = states('input_number.strelitzia_soil_wet_adc') %}
           {{ is_state('input_boolean.strelitzia_soil_dry_calibrated', 'on')
              and is_number(states('sensor.strelitzia_soil_adc'))
-             and (states('input_number.strelitzia_soil_wet_adc') | float(0)) >
-                 (states('input_number.strelitzia_soil_dry_adc') | float(0)) }}
+             and is_number(dry) and is_number(wet)
+             and wet | float > dry | float }}
         state: >-
-          {% set raw = states('sensor.strelitzia_soil_adc') | float(0) %}
-          {% set dry = states('input_number.strelitzia_soil_dry_adc') | float(0) %}
-          {% set wet = states('input_number.strelitzia_soil_wet_adc') | float(0) %}
-          {% set pct = 100 * (raw - dry) / (wet - dry) if wet > dry else 0 %}
-          {{ ([0, [pct, 100] | min] | max) | round(1) }}
+          {% set raw = states('sensor.strelitzia_soil_adc') | float(none) %}
+          {% set dry = states('input_number.strelitzia_soil_dry_adc') | float(none) %}
+          {% set wet = states('input_number.strelitzia_soil_wet_adc') | float(none) %}
+          {% if is_number(raw) and is_number(dry) and is_number(wet) and wet > dry %}
+            {% set pct = 100 * (raw - dry) / (wet - dry) %}
+            {{ ([0, [pct, 100] | min] | max) | round(1) }}
+          {% else %}
+            {{ none }}
+          {% endif %}
         attributes:
           meaning: "Relative index between two substrate calibration points, not volumetric water %."
           dry_adc: "{{ states('input_number.strelitzia_soil_dry_adc') }}"

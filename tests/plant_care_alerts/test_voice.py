@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,6 +42,7 @@ class TestVoice(unittest.IsolatedAsyncioTestCase):
             "send_message",
             {"entity_id": target, "message": "Проверка"},
             blocking=True,
+            context=None,
         )
 
     async def test_yandex_station_uses_text_media(self) -> None:
@@ -59,7 +61,26 @@ class TestVoice(unittest.IsolatedAsyncioTestCase):
                 "media_content_id": "Полив",
             },
             blocking=True,
+            context=None,
         )
+
+    async def test_both_transports_preserve_the_authenticated_caller(self) -> None:
+        context = Context(user_id="speaker-observer")
+        for target in (
+            "notify.aisis_speaker_local_notify",
+            "media_player.yandex_station_livingroom",
+        ):
+            with self.subTest(target=target):
+                hass = SimpleNamespace(
+                    states=SimpleNamespace(
+                        get=lambda _, target=target: self.state(target, "idle")
+                    ),
+                    services=SimpleNamespace(async_call=AsyncMock()),
+                )
+                await voice.async_announce(hass, target, "Полив", context=context)
+                self.assertIs(
+                    hass.services.async_call.call_args.kwargs["context"], context
+                )
 
     async def test_unavailable_target_cannot_send(self) -> None:
         target = "notify.speaker"

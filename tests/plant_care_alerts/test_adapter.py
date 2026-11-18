@@ -206,6 +206,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["delivery_attempts"], 0)
 
     async def test_clear_ack_service_accepts_recovered_status(self) -> None:
+        from homeassistant.core import Context
+
         from custom_components.plant_care_alerts import (
             DOMAIN,
             async_setup,
@@ -239,7 +241,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             if c.args[1] == "acknowledge"
         )
         await registration.args[2](
-            SimpleNamespace(data={"entity_id": "sensor.test", "status": "sensor_error"})
+            SimpleNamespace(
+                data={"entity_id": "sensor.test", "status": "sensor_error"},
+                context=Context(),
+            )
         )
         self.assertIsNone(self.manager.records["a"]["notified_status"])
         self.manager.store.async_delay_save.assert_called()

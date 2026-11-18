@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.exceptions import HomeAssistantError
+
+if TYPE_CHECKING:
+    from homeassistant.core import Context
 
 CONF_VOICE_TARGET = "voice_target"
 
@@ -26,7 +29,9 @@ def target_available(state: Any) -> bool:
     return state.entity_id.startswith("notify.") or state.state != "unknown"
 
 
-async def async_announce(hass: Any, target: str | None, message: str) -> None:
+async def async_announce(
+    hass: Any, target: str | None, message: str, *, context: Context | None = None
+) -> None:
     """Speak exactly once through the configured target, never a guessed fallback."""
     if not message.strip():
         return
@@ -40,6 +45,7 @@ async def async_announce(hass: Any, target: str | None, message: str) -> None:
             "send_message",
             {"entity_id": target, "message": message.strip()},
             blocking=True,
+            context=context,
         )
         return
     if target.startswith("media_player.") and (
@@ -55,6 +61,7 @@ async def async_announce(hass: Any, target: str | None, message: str) -> None:
                 "media_content_id": message.strip(),
             },
             blocking=True,
+            context=context,
         )
         return
     message = "У выбранной колонки нет действия для озвучивания текста"  # noqa: RUF001 - Russian message
