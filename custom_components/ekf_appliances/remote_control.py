@@ -426,7 +426,13 @@ class RemoteController:
             and domain in {"remote", "androidtv_remote", "media_player"}
             and service
             not in {"turn_on", "turn_off", "toggle", "select_source", "play_media"}
-            and (self._tv_power_state() is False or self.mode.targets["tv"] is False)
+            and (
+                self.mode.targets["tv"] is False
+                or (
+                    self._tv_power_state() is False
+                    and self.mode.targets["tv"] is not True
+                )
+            )
         ):
             # Ordinary keys can wake Chromecast through HDMI-CEC. Only an
             # explicit power/source/app action may wake a stopped TV pair.

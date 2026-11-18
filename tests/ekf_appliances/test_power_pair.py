@@ -335,6 +335,85 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.states, {"display": False, "player": False})
         self.assertIs(self.pair.last_intent, expr2=False)
 
+    async def test_delayed_actual_off_cannot_reverse_a_newer_completed_on(self) -> None:
+        await self.pair.request(target=True)
+
+        async def delayed_player_feedback(target) -> None:
+            self.calls.append(("player", target))
+            if target:
+                self.states["player"] = True
+                self.pair.observe()
+
+        self.pair.endpoints["player"] = PowerEndpoint(
+            lambda: self.states["player"], delayed_player_feedback
+        )
+        old = asyncio.create_task(self.pair.request(target=False))
+        await self.settle()
+        await self.pair.request(target=True)
+        with self.assertRaises(HomeAssistantError):
+            await old
+        revision = self.pair.intent_revision
+        await self.physical("player", value=False)
+        self.assertEqual(self.states, {"display": True, "player": True})
+        self.assertEqual(self.pair.intent_revision, revision)
+        self.assertIs(self.pair.last_intent, expr2=True)
+
+    async def test_read_ahead_off_confirmation_does_not_record_another_intent(
+        self,
+    ) -> None:
+        await self.pair.request(target=True)
+        self.states["display"] = False
+        pending_on = asyncio.Event()
+
+        async def display_power(target) -> None:
+            if target:
+                await pending_on.wait()
+
+        async def player_power(target) -> None:
+            self.states["player"] = target
+
+        self.pair.endpoints["display"] = PowerEndpoint(
+            lambda: self.states["display"], display_power
+        )
+        self.pair.endpoints["player"] = PowerEndpoint(
+            lambda: self.states["player"], player_power
+        )
+        old = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        await self.pair.request(target=False)
+        with self.assertRaises(HomeAssistantError):
+            await old
+        revision = self.pair.intent_revision
+        self.pair.observe()
+        await self.settle()
+        self.assertEqual(self.pair.intent_revision, revision)
+        self.assertEqual(self.states, {"display": False, "player": False})
+
+    async def test_forced_off_then_new_on_does_not_mask_a_native_off(self) -> None:
+        pending_on = asyncio.Event()
+
+        async def display_power(target) -> None:
+            self.calls.append(("display", target))
+            if target and self.calls.count(("display", True)) == 1:
+                await pending_on.wait()
+            self.states["display"] = target
+            self.pair.observe()
+
+        self.pair.endpoints["display"] = PowerEndpoint(
+            lambda: self.states["display"], display_power
+        )
+        old = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        await self.pair.request(target=False)
+        with self.assertRaises(HomeAssistantError):
+            await old
+        self.assertEqual(self.states, {"display": False, "player": False})
+        await self.pair.request(target=True)
+        self.assertEqual(self.states, {"display": True, "player": True})
+        await self.physical("display", value=False)
+        self.assertEqual(self.states, {"display": False, "player": False})
+        self.assertIs(self.pair.last_intent, expr2=False)
+
     async def test_physical_player_off_during_tv_boot_is_latest_intent(self) -> None:
         self.hold["display"] = asyncio.Event()
         old = asyncio.create_task(self.pair.request(target=True))

@@ -266,6 +266,36 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"sent": False, "blocked": "tv_off"})
         self.assertEqual(self.device_calls(), [])
 
+    async def test_tv_navigation_remains_available_during_an_accepted_startup(
+        self,
+    ) -> None:
+        self.runtime.tv_power_pair = SimpleNamespace(
+            endpoints={"display": SimpleNamespace(read=lambda: False)},
+            intent_revision="tv:1",
+            last_intent=True,
+            target=True,
+        )
+        result = await self.controller.async_dispatch(
+            {
+                "pair": "tv",
+                "domain": "remote",
+                "service": "send_command",
+                "service_data": {
+                    "entity_id": "remote.televizor",
+                    "command": "KEYCODE_BACK",
+                },
+            }
+        )
+        self.assertEqual(result, {"sent": True})
+        self.assertEqual(
+            self.device_calls()[0][:3],
+            (
+                "remote",
+                "send_command",
+                {"entity_id": "remote.televizor", "command": "KEYCODE_BACK"},
+            ),
+        )
+
     async def test_tv_navigation_still_dispatches_to_a_confirmed_on_display(
         self,
     ) -> None:

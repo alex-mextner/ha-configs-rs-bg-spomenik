@@ -279,10 +279,14 @@ class PowerPair:
                 continue
             attempted.add((generation, side))
             self._retry_sides.discard(side)
-            self._expected[side, target] = (
-                generation,
-                asyncio.get_running_loop().time() + self.timeout,
-            )
+            if values[side] is not target or self._last[side] is not target:
+                self._expected[side, target] = (
+                    generation,
+                    asyncio.get_running_loop().time() + self.timeout,
+                )
+            # A forced inverse still sends, but an already-observed matching
+            # state has no future edge to acknowledge. Keep any older genuine
+            # expectation without creating a marker that could mask native power.
             commands.append(endpoint.command(target))
         return commands
 

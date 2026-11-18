@@ -681,7 +681,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await pair.close()
 
-    async def test_failed_on_does_not_discard_queued_off(self) -> None:
+    async def test_opposite_off_supersedes_every_pending_on_caller(self) -> None:
         release = asyncio.Event()
 
         async def send(call) -> None:
@@ -690,9 +690,8 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             if len(self.commands) == 1:
                 await release.wait()
                 self.set_native("on")
-                error_message = "Power acknowledgment failed"
-                raise HomeAssistantError(error_message)
-            self.set_native("off")
+            else:
+                self.set_native("off")
 
         self.hass.services.async_register("remote", "send_command", send)
         first = asyncio.create_task(self.player.async_turn_on())
