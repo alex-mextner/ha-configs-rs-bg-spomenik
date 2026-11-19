@@ -43,6 +43,9 @@ www/network-devices/*
 !www/ma-sidebar-sync/
 www/ma-sidebar-sync/*
 !www/ma-sidebar-sync/ma-sidebar-sync.js
+!www/floorhouse/
+www/floorhouse/*
+!www/floorhouse/floorhouse-card.js
 backups/
 *.log
 *.log.*
