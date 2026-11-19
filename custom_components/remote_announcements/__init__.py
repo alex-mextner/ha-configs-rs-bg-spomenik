@@ -196,6 +196,7 @@ class Manager:
         self.generation = 0
         self.closing = False
         self.services = ServiceCalls(hass)
+        self.aisis_volume_recovery: dict[str, tuple[float, float]] = {}
 
     async def close(self) -> None:
         """Stop target listening while retaining unfinished provider ownership."""
@@ -417,12 +418,37 @@ class Manager:
             guard=guard,
         )
 
+    def check_aisis_volume_recovery(self, state: State) -> None:
+        """Reject stale volume after an unconfirmed restore of this entity."""
+        pending = self.aisis_volume_recovery.get(state.entity_id)
+        if pending is None:
+            return
+        original, applied = pending
+        volume = state.attributes.get("volume_level")
+        valid_volume = (
+            state.state not in ("unknown", "unavailable")
+            and isinstance(volume, (int, float))
+            and not isinstance(volume, bool)
+            and 0.0 <= volume <= 1.0
+        )
+        if valid_volume and (
+            state.attributes.get("is_volume_muted") is True
+            or can_restore_volume(volume, original, muted=False)
+            or not can_restore_volume(volume, applied, muted=False)
+        ):
+            self.aisis_volume_recovery.pop(state.entity_id)
+            return
+        message = "aisis_volume_recovery_pending"
+        raise ProviderNotReadyError(message)
+
     def playback(self, backend: str, entity: str) -> SpeechPlayback:
         """Validate speaker capabilities and snapshot recoverable playback."""
         before = self.hass.states.get(entity)
         if before is None:
             message = "speaker_unavailable"
             raise ProviderNotReadyError(message)
+        if backend == "aisis":
+            self.check_aisis_volume_recovery(before)
         muted_before = bool(before.attributes.get("is_volume_muted"))
         if backend == "yandex" and "alice_state" not in before.attributes:
             message = "yandex_local_speech_connection_unavailable"
@@ -553,6 +579,11 @@ class Manager:
         if not self.volume_unchanged(playback, playback.applied):
             return
         try:
+            if playback.verify_volume:
+                self.aisis_volume_recovery[playback.entity] = (
+                    playback.old_volume,
+                    playback.applied,
+                )
             sent = await self.call(
                 "volume_set",
                 playback.entity,
@@ -561,9 +592,12 @@ class Manager:
                 guard=lambda: self.volume_unchanged(playback, playback.applied),
             )
             if not sent:
+                if playback.verify_volume:
+                    self.aisis_volume_recovery.pop(playback.entity, None)
                 return
             if playback.verify_volume:
                 await self.confirm_restored_volume(playback)
+                self.aisis_volume_recovery.pop(playback.entity, None)
             # A human can change volume/mute while the restore service is awaited.
             # Check again immediately before restoring mute.
             restored = self.hass.states.get(playback.entity)

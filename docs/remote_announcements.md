@@ -86,6 +86,14 @@ deadline; absent readback reports `recovery_unconfirmed`, without a retry or ext
 volume command. The tests assert published device volume, and intervening human
 volume changes still prevent restore.
 
+An AISIS restore keeps a per-speaker recovery record until actual volume readback
+confirms the original level, or a valid different human volume/mute state is observed.
+While HA still reports the temporary speech level, another announcement is rejected
+as `aisis_volume_recovery_pending`, even after the service acknowledgement completes.
+Unrelated state attributes do not release this guard. A restore that was never sent
+clears its own record. Clearing the guard does not replay speech or send a restore;
+only a later regular announcement request can proceed.
+
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,
 and unfinished provider-call count. Failed recovery is explicitly
