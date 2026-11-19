@@ -25,13 +25,12 @@ install = [
   "git", "curl", "ca-certificates", "jq", "tar", "libicu76",
   # day-to-day
   "htop", "tmux", "rsync", "less", "vim-tiny",
-  # ultra's login shell (installed before the users module sets it; the dotfiles are a zsh setup)
+  # ultra's login shell (installed before the login-shell module sets it; the dotfiles are a zsh setup)
   "zsh",
 ]
 
 [[modules.users.users]]
 name = "ultra"
-shell = "/usr/bin/zsh"
 groups = ["sudo", "docker", "systemd-journal", "adm"]
 # No password is ever set by this spec: key-only login, so sudo must not ask for one.
 sudo = "nopasswd"
@@ -44,6 +43,9 @@ authorized_keys = [
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINpnCxVsKPqVbKHtg5fKYabNIO8Ue8qYMkeJh/UFNtLd",
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGpvc8Es/UxcnDgKsAn84iu+oofvL0yWbDOxTie4aTwC",
 ]
+
+[modules.login-shell.shells]
+ultra = "/usr/bin/zsh"
 
 [modules.ssh-server]
 password_authentication = false

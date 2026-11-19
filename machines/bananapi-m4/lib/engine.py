@@ -18,7 +18,8 @@ never stops at the first failure: a failed module only blocks the modules that
 observed, not assumed.
 
 Exit codes: 0 converged, 2 usage / bad config / not the host machine.toml names,
-3 drift (preview, check), 6 not root (everything but `list`), 7 failed or blocked.
+3 drift (preview, check), 6 not root (everything but `list`), 7 failed or blocked,
+130 / 143 stopped by SIGINT / SIGTERM (see Stops).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -38,6 +40,50 @@ DRIFT = 3
 USAGE = 2
 NO_ROOT = 6
 FAILED = 7
+
+
+class StopSignalError(Exception):
+    """SIGINT or SIGTERM arrived while a module ran: the run stops after it."""
+
+    def __init__(self, signum: int) -> None:
+        """Keep the signal number; the message is its name."""
+        super().__init__(signal.Signals(signum).name)
+        self.signum = signum
+
+
+class Stops:
+    """
+    SIGINT and SIGTERM during a run: passed on to the running module.
+
+    A module ends once its current command has finished (the traps in
+    lib/common.sh), so apt or dpkg is never left running on its own; the
+    dotfiles module also stops the installer it runs in a session of its own.
+    The run then stops before the next module (StopSignalError).
+    """
+
+    def __init__(self) -> None:
+        """No signal yet, no module running."""
+        self.signum = 0
+        self.module: subprocess.Popen | None = None
+
+    def catch(self) -> None:
+        """Handle both signals from now on."""
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, self.handle)
+
+    def handle(self, signum: int, _frame: object) -> None:
+        """Remember the first signal, pass every one on to the running module."""
+        self.signum = self.signum or signum
+        if self.module is not None:
+            self.module.send_signal(signum)
+
+    def check(self) -> None:
+        """Stop the run once a signal has arrived."""
+        if self.signum:
+            raise StopSignalError(self.signum)
+
+
+STOPS = Stops()
 
 
 @dataclass(frozen=True)
@@ -92,7 +138,7 @@ def load(machine_file: Path) -> tuple[dict, list[Module]]:
 
 
 def call(module: Module, verb: str, config: dict, *, quiet: bool) -> int:
-    """Run one verb of one module; return its exit code."""
+    """Run one verb of one module; return its exit code (STOPS: signals)."""
     env = dict(
         os.environ,
         DT_OPTIONS=json.dumps(module.options),
@@ -100,9 +146,19 @@ def call(module: Module, verb: str, config: dict, *, quiet: bool) -> int:
         DT_DIR=str(DIR),
     )
     out = subprocess.DEVNULL if quiet else None
-    return subprocess.run(
-        [str(module.run), verb], env=env, stdout=out, stderr=out, check=False
-    ).returncode
+    STOPS.check()
+    with subprocess.Popen(
+        [str(module.run), verb], env=env, stdout=out, stderr=out
+    ) as proc:
+        STOPS.module = proc
+        if STOPS.signum:  # arrived while the module was starting
+            proc.send_signal(STOPS.signum)
+        try:
+            code = proc.wait()
+        finally:
+            STOPS.module = None
+    STOPS.check()
+    return code
 
 
 def classify(code: int) -> str:
@@ -186,17 +242,24 @@ def host_mismatch(
     Explain why machine_file must not converge this box, or return None.
 
     The declared name is [modules.system] hostname (read even with the module
-    off): a machine.toml copied to another box must not converge that box.
-    --force-host overrides it only when it names this box, so a wrong ssh
-    target still stops (a fresh board, or a rename, is the intended case).
+    off; required): a machine.toml copied to another box must not converge
+    that box. --force-host overrides it only when it names this box, so a
+    wrong ssh target still stops (a fresh board, or a rename, is the intended
+    case).
     """
     declared = config.get("modules", {}).get("system", {}).get("hostname")
     actual = socket.gethostname()
+    if not isinstance(declared, str) or not declared:
+        return (
+            f"debian-tweak: {machine_file} declares no [modules.system] hostname: "
+            f"set it to the name of the box it is for (this is {actual}), also "
+            "with the system module off"
+        )
     names = (actual, actual.split(".", 1)[0])
-    if declared is None or declared in names or force_host in names:
+    if declared in names or force_host in names:
         return None
     return (
-        f"install.sh: {machine_file} is for {declared}, this is {actual}: pass "
+        f"debian-tweak: {machine_file} is for {declared}, this is {actual}: pass "
         f"the right --machine, or --force-host {actual} if this box is to "
         f"become {declared} (a fresh board, or a rename)"
     )
@@ -247,7 +310,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return NO_ROOT
-    results = run_selected(modules, config, only, args)
+    STOPS.catch()
+    try:
+        results = run_selected(modules, config, only, args)
+    except StopSignalError as stop:
+        print(f"debian-tweak: stopped on {stop}", file=sys.stderr)
+        return 128 + stop.signum
     preview = args.command == "apply" and not args.commit
     return summarize(results, preview=preview)
 

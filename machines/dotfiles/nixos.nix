@@ -5,9 +5,10 @@
 # The dotfiles.service oneshot runs once per boot (after network-online) and again on a switch that changes it
 # (RemainAfterExit: an unchanged unit stays active, so other switches leave it alone); re-run it by hand with
 # `sudo systemctl restart dotfiles`. It brings ~/.files to the pinned `rev` with debian/checkout (shared with the
-# Debian module: a fresh clone, a fast-forward, or back over upstream commits only; local commits on top of `rev`
-# stay; stale detached submodules synced and updated), then runs install-ubuntu.sh. The installer runs as a
-# root-equivalent user, so a push to .files reaches a host only once its pin is bumped in this repo. The unit
+# Debian module: a fresh clone, a fast-forward, or a move that drops only upstream commits or those of the pin it
+# applied before, recorded in refs/dotfiles/applied; local commits on top of `rev` stay; stale detached submodules
+# synced and updated), then runs install-ubuntu.sh. The installer runs as a root-equivalent user, so a push to .files
+# reaches a host only once its pin is bumped in this repo. The unit
 # succeeds on the installer's exit 0 or 10 (only manual steps remain: GitHub access for the private submodules, bun;
 # logged, `journalctl -u dotfiles`); anything else fails it, and so does a whole run longer than 15 minutes.
 {

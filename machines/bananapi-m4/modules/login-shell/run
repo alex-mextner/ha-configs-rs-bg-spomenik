@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# login-shell: [modules.login-shell.shells] maps a user (who must exist: the users module creates the declared ones)
+# to a login shell, e.g. ultra = "/usr/bin/zsh". A shell is set only once it is usable (shell_usable: installed and in
+# /etc/shells, or nologin/false), as sshd refuses a user whose shell is missing. Until then the user keeps the current
+# shell and the module fails, naming the shell; so does a declared shell that is set but was removed since.
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+unusable=()
+while IFS=$'\t' read -r user shell; do
+	[[ -n $user ]] || continue
+	if ! entry=$(getent passwd "$user"); then
+		# a preview runs before the users module has created the user
+		drift "$user: login shell -> $shell once the user exists" || continue
+		echo "  login-shell: user $user does not exist (declare it in the users module or create it first)" >&2
+		exit 1
+	fi
+	current=$(cut -d: -f7 <<<"$entry")
+	if ! shell_usable "$shell"; then
+		if [[ $current == "$shell" ]]; then
+			drift "$user: login shell $shell is no longer installed (or not in /etc/shells): sshd refuses $user" || true
+		else
+			drift "$user: login shell $current -> $shell once $shell is installed (and in /etc/shells); keeping" \
+				"$current" || true
+		fi
+		unusable+=("$shell")
+		continue
+	fi
+	[[ $current != "$shell" ]] || continue
+	drift "$user: login shell $current -> $shell" && usermod --shell "$shell" "$user"
+done < <(opt '.shells // {} | to_entries[] | "\(.key)\t\(.value)"')
+if [[ $MODE == install ]] && ((${#unusable[@]})); then
+	echo "  login-shell: not installed or not in /etc/shells: ${unusable[*]} (its package, then re-run)" >&2
+	exit 1
+fi
+finish

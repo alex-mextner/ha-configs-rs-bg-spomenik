@@ -1,0 +1,29 @@
+name: Machines
+
+on:
+  pull_request:
+    paths:
+      - machines/**
+      - Makefile
+      - .github/workflows/machines.yml
+  push:
+    branches:
+      - main
+    paths:
+      - machines/**
+      - Makefile
+      - .github/workflows/machines.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-tests:
+    name: machines/ shell tests (debian:trixie)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: make test-machines
+        run: make test-machines

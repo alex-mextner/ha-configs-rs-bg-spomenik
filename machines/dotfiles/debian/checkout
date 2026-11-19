@@ -5,10 +5,13 @@
 #   checkout status FILES REPO BRANCH REV   read-only, no network: one line per change `apply` would make (none when
 #                                           converged); exit 1 on a state it refuses to change (reason on stderr)
 #   checkout apply  FILES REPO BRANCH REV   makes those changes, printing the same lines
-# Converged: FILES is a checkout on BRANCH at REV, or at REV plus local commits (ones not on origin/BRANCH). It gets
-# there by a fresh clone (made next to FILES, moved into place only once REV is checked out), a fast-forward, or a
-# move back over upstream commits only (the pin was rolled back, or the checkout followed BRANCH before it was
-# pinned). Upstream commits past REV mixed with local ones are refused; another checked-out branch is left alone.
+# Converged: FILES is a checkout on BRANCH at REV, or at REV plus local commits, and refs/dotfiles/applied (the pin
+# last applied here) is REV. Local commits are the ones neither on origin/BRANCH nor reachable from that ref: so after
+# a force-push of BRANCH the commits of an earlier pin still count as upstream, and rolling the pin back drops them.
+# It gets there by a fresh clone (made next to FILES, moved into place only once REV is checked out), a fast-forward,
+# or a move to REV that drops upstream commits only (the pin was rolled back, BRANCH was force-pushed, or the
+# checkout followed BRANCH before it was pinned). Local commits that REV does not contain, under or over upstream
+# ones past REV, are refused; another checked-out branch is left alone.
 # Initialised submodules in detached HEAD away from the commit their superproject records ($sha1 in
 # `git submodule foreach`) get their URL synced from .gitmodules (a moved repository) and are updated; one checked
 # out on a branch is someone's work in progress and keeps its commit and remotes. Initialising the others is
@@ -38,7 +41,12 @@ if [[ ! -e $files ]]; then
 		clone=$files.clone
 		rm -rf "$clone"
 		git clone --quiet --no-checkout --branch "$branch" "$repo" "$clone"
-		git -C "$clone" checkout --quiet -B "$branch" "$rev"
+		pin=$(git -C "$clone" rev-parse --verify --quiet "$rev^{commit}") || {
+			echo "dotfiles: $rev is not a commit of $repo" >&2
+			exit 1
+		}
+		git -C "$clone" checkout --quiet -B "$branch" "$pin"
+		git -C "$clone" update-ref -m "dotfiles: pin" refs/dotfiles/applied "$pin"
 		mv -T "$clone" "$files"
 	fi
 	exit 0
@@ -52,32 +60,50 @@ if [[ $(g symbolic-ref --short -q HEAD || true) != "$branch" ]]; then
 	exit 0
 fi
 
-if g merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
-	# where HEAD leaves upstream: at or before the pin, everything after the pin is local
-	upstream=$(g merge-base HEAD "refs/remotes/origin/$branch" 2>/dev/null || true)
-	if [[ -z $upstream ]] || g merge-base --is-ancestor "$upstream" "$rev"; then
-		:
-	elif [[ $upstream == "$(g rev-parse HEAD)" ]]; then
-		if change "move $files back to the pinned ${rev:0:12} (the commits after it are upstream ones)"; then
-			g reset --quiet --keep --no-recurse-submodules "$rev"
-		fi
-	else
-		echo "dotfiles: $files has upstream commits past the pinned ${rev:0:12} mixed with local ones: move the" \
-			"local work to another branch, then reset $branch to the pin" >&2
-		exit 1
+# apply fetches a pin it does not have before it decides, so local work on an older pin is named on the first run
+# (status never touches the network: it reports the fetch and fast-forward a missing pin needs)
+if ! g cat-file -e "$rev^{commit}" 2>/dev/null; then
+	if [[ $mode == status ]]; then
+		echo "fetch $branch and fast-forward $files to the pinned ${rev:0:12}"
+		exit 0
 	fi
-elif g cat-file -e "$rev^{commit}" 2>/dev/null && ! g merge-base --is-ancestor HEAD "$rev"; then
-	echo "dotfiles: $files has commits that are not in the pinned ${rev:0:12} (local work on an older pin?): move" \
-		"them to another branch, then reset $branch to the pin" >&2
-	exit 1
-elif change "fast-forward $files to the pinned ${rev:0:12}"; then
 	# the superproject only: the submodules' own fetch comes after their URL sync below
-	g cat-file -e "$rev^{commit}" 2>/dev/null || g fetch --quiet --recurse-submodules=no origin "$branch"
+	g fetch --quiet --recurse-submodules=no origin "$branch"
 	if ! g cat-file -e "$rev^{commit}" 2>/dev/null; then
 		echo "dotfiles: $rev is not in $files, not even after fetching $branch from its origin" >&2
 		exit 1
 	fi
-	g merge --ff-only --quiet "$rev"
+fi
+# the commit (rev could name an annotated tag): what HEAD and refs/dotfiles/applied are compared with
+pin=$(g rev-parse "$rev^{commit}")
+# local commits: HEAD's commits that are neither in the pin, nor upstream, nor in the pin applied before
+not_local=("^$pin")
+for ref in "refs/remotes/origin/$branch" refs/dotfiles/applied; do
+	if g rev-parse -q --verify "$ref^{commit}" >/dev/null; then not_local+=("^$ref"); fi
+done
+local_commits=$(g rev-list --count HEAD "${not_local[@]}")
+past_pin=$(($(g rev-list --count "$pin..HEAD") - local_commits))
+if g merge-base --is-ancestor HEAD "$pin"; then
+	if [[ $(g rev-parse HEAD) != "$pin" ]] && change "fast-forward $files to the pinned ${rev:0:12}"; then
+		g merge --ff-only --quiet "$pin"
+	fi
+elif ((local_commits == 0)); then
+	if change "move $files to the pinned ${rev:0:12} (the commits it drops are upstream ones or an earlier pin's)"; then
+		g reset --quiet --keep --no-recurse-submodules "$pin"
+	fi
+elif ! g merge-base --is-ancestor "$pin" HEAD; then
+	echo "dotfiles: $files has $local_commits local commit(s) that are not in the pinned ${rev:0:12} (local work on" \
+		"an older pin): move them to another branch, then reset $branch to the pin" >&2
+	exit 1
+elif ((past_pin > 0)); then
+	echo "dotfiles: $files has upstream commits past the pinned ${rev:0:12} mixed with $local_commits local one(s):" \
+		"move the local work to another branch, then reset $branch to the pin" >&2
+	exit 1
+fi
+# at the pin (plus local commits): remember it, so its commits stay upstream ones after a force-push of $branch
+if [[ $(g rev-parse -q --verify refs/dotfiles/applied || true) != "$pin" ]] &&
+	change "record ${rev:0:12} as the applied pin (refs/dotfiles/applied)"; then
+	g update-ref -m "dotfiles: pin" refs/dotfiles/applied "$pin"
 fi
 
 # install-ubuntu.sh fetches GitHub ssh submodule URLs over https once git uses gh's credential helper; so does this

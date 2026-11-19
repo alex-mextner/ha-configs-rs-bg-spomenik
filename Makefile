@@ -15,7 +15,7 @@ LOCAL_HGA_TESTS := tests/custom_components/home_generative_agent
 PYTEST_ARGS := -q --import-mode=importlib
 TEST_LOG_DIR := .cache/test-results
 
-.PHONY: venv devdeps testdeps runtimedeps check lint format fix test test-standalone test-entity-note test-home-generative-agent test-home-generative-agent-deps test-copied-home-generative-agent test-regressions all clean typecheck
+.PHONY: venv devdeps testdeps runtimedeps check lint format fix test test-standalone test-entity-note test-home-generative-agent test-home-generative-agent-deps test-copied-home-generative-agent test-regressions test-machines all clean typecheck
 
 # Create venv and basic packaging tooling only. No linting here.
 venv:
@@ -52,7 +52,7 @@ fix: devdeps
 	$(RUFF) check --fix custom_components tests
 
 # The full local suite is split by the Home Assistant version it requires.
-test: test-standalone test-entity-note test-home-generative-agent test-copied-home-generative-agent
+test: test-standalone test-entity-note test-home-generative-agent test-copied-home-generative-agent test-machines
 
 # Unlike the strict diagnostic above, allow only identical failures in unchanged
 # copied HGA snapshots, freshly verified against the actual Git base.
@@ -61,6 +61,20 @@ test-regressions: test-standalone test-entity-note test-home-generative-agent
 
 test-standalone: test-entity-note-deps
 	PYTHONPATH=$(CURDIR):$(CURDIR)/scripts $(ENTITY_NOTE_PYTEST) $(PYTEST_ARGS) $(wildcard tests/test_*.py)
+
+# Shell tests of machines/ (the dotfiles checkout, install.sh's host guard, signals reaching the dotfiles installer) in
+# the Debian release the hosts run, machines/ mounted read-only; the packages are install.sh's and the dotfiles
+# module's. Without docker they run here instead, minus the root-only signal test.
+MACHINES_TEST_IMAGE ?= debian:trixie
+MACHINES_TEST_PACKAGES := git python3 jq gpg curl ca-certificates zsh vim python3-yaml gh openssh-client
+test-machines:
+	if command -v docker >/dev/null; then \
+		docker run --rm -v "$(CURDIR)/machines:/machines:ro" $(MACHINES_TEST_IMAGE) bash -c \
+			'apt-get update -qq && apt-get install -y -qq --no-install-recommends $(MACHINES_TEST_PACKAGES) >/dev/null && /machines/tests/run.sh'; \
+	else \
+		echo "test-machines: no docker, running on this host"; \
+		machines/tests/run.sh; \
+	fi
 
 # The U1 inspector/ghost tests live in 3d-cli (integrations/homeassistant/tests) and run in its
 # gate; this repo's HA pytest plugin blocks the sockets and threads they use (alex-mextner/3d-cli#156).

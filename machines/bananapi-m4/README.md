@@ -13,11 +13,13 @@ sudo ./install.sh check        # read-only, exit 0 converged / 3 drift (for a ti
 sudo ./install.sh --only docker,sysctl --commit
 ```
 
-Exit codes: `0` converged, `2` usage, bad config or the wrong host (`hostname` is not `[modules.system] hostname`:
-a `machine.toml` copied to another box; `--force-host <current hostname>` overrides it), `3` drift, `6` not root,
-`7` a module failed or was blocked by a failed module it `requires`. A failure never stops the run: independent
-modules still converge. Everything except `list` needs root (`sudo`): without it, files such as `/etc/sudoers.d/*`
-cannot be read and would show as drift.
+Exit codes: `0` converged, `2` usage, bad config or the wrong host (`hostname` is not `[modules.system] hostname`,
+which every `machine.toml` must declare: a file copied to another box; `--force-host <current hostname>` overrides a
+mismatch), `3` drift, `6` not root, `7` a module failed or was blocked by a failed module it `requires`, `130`/`143`
+stopped by Ctrl-C/SIGTERM (passed on to the running module, which ends once its current command has: apt is never
+cut off, the dotfiles installer is stopped; no further module runs). A failure never stops the run:
+independent modules still converge. Everything except `list` needs root (`sudo`): without it, files such as
+`/etc/sudoers.d/*` cannot be read and would show as drift.
 
 ## Layout
 
@@ -38,13 +40,14 @@ cannot be read and would show as drift.
 | 10 | `system` | hostname (+ `127.0.1.1` in `/etc/hosts`), timezone |
 | 20 | `apt-sources` | deb822 repositories; the signing key is written only if its fingerprint equals the declared one (Docker CE) |
 | 30 | `packages` | `install` (missing ones, `--no-install-recommends`) and `purge` lists |
-| 40 | `users` | users, groups, shell (set only once it is usable: in `/etc/shells`, or `nologin`/`false`; a failed shell blocks `ssh-server`), sudo rule (validated by `visudo`), exclusive `authorized_keys`, lingering for `systemd --user` |
+| 40 | `users` | users, groups, sudo rule (validated by `visudo`), exclusive `authorized_keys`, lingering for `systemd --user` |
 | 45 | `ssh-server` | sshd drop-in: no passwords, no root login; refuses while no user with a key can sudo (`nopasswd`, or `password` with a password set); `sshd -t` before reload |
 | 50 | `zram` | zram swap: Armbian's `/etc/default/armbian-zram-config` (applied at next boot), else zram-tools |
 | 55 | `sysctl` | `/etc/sysctl.d/90-debian-tweaks.conf`; live values are checked and set too |
 | 60 | `docker` | the whole `/etc/docker/daemon.json` (validated by `dockerd --validate`), docker + containerd enabled and running |
 | 70 | `systemd-units` | system units from `units/system`, user units from `units/user` (per user), enabled and started |
 | 90 | `dotfiles` | `~/.files` of ultra applied by its `install-ubuntu.sh`; a link to the shared [`../dotfiles/debian`](../dotfiles/debian) (manual steps: [`../dotfiles/README.md`](../dotfiles/README.md)) |
+| 95 | `login-shell` | login shells (`[modules.login-shell.shells]`, user = path), each set only once it is usable: installed and in `/etc/shells`, or `nologin`/`false`. Nothing requires it, so a shell that did not install (apt failed) fails only this module and `ssh-server` still turns off Armbian's password and root login |
 
 Every file a module writes starts with `# Managed by debian-tweaks (<module>)`. A file without that line is copied
 to `/var/backups/debian-tweaks/` before it is replaced. Adding a module: a new `modules/<name>/` with `module.toml`

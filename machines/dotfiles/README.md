@@ -5,7 +5,7 @@ applied by its own user-level installer, `install-ubuntu.sh` (links, one marked 
 `~/.zshrc`, the `.gitconfig.shared` include, submodules, zplug, vim-plug, rig global config merge), the same way
 ubuntu-pc has it. The installer calls no apt, snap or ubuntu-tweak, so it runs unchanged on Debian (arm64 too) and
 NixOS; it only needs `bash git curl sha256sum awk zsh vim python3` + PyYAML, which both modules below provide.
-Login shell: zsh (the dotfiles are a zsh setup).
+Login shell: zsh (the dotfiles are a zsh setup): `zshLoginShell` on NixOS, the `login-shell` module on Debian.
 
 | Host kind | Module | Hosts |
 |---|---|---|
@@ -13,26 +13,33 @@ Login shell: zsh (the dotfiles are a zsh setup).
 | Debian / Armbian | [`debian/`](debian/) (a debian-tweaks module: `check` / `plan` / `install`) | `bananapi-m4` (as `modules/dotfiles`), ODROID-N2+ while on Armbian ([`debian/hosts/odroidn2-armbian.toml`](debian/hosts/odroidn2-armbian.toml)) |
 
 Both bring `~/.files` to the pinned commit with one script, [`debian/checkout`](debian/checkout): a fresh clone
-(checked out next to `~/.files` and moved into place only then), a fast-forward, or a move back over upstream commits
-only. Local commits on top of the pin and another checked-out branch are left alone; upstream commits past the pin
-mixed with local ones, or a diverged `master`, fail loudly. Stale submodules in detached HEAD get their URL synced
-from `.gitmodules` and are updated; one checked out on a branch is left alone. Then `install-ubuntu.sh` runs: its
-exit 0 or 10 (only manual steps remain, printed) counts as converged, anything else as a failure, and so does a run
-longer than 15 minutes (NixOS: the whole unit; Debian: the installer).
+(checked out next to `~/.files` and moved into place only then), a fast-forward, or a move that drops upstream
+commits only. Each pin it reaches is recorded in the checkout's `refs/dotfiles/applied`: its commits count as
+upstream ones even after a force-push of `master`, so rolling the pin back still drops them. Local commits (on neither
+`origin/master` nor that ref) on top of the pin and another checked-out branch are left alone; local commits the
+pin does not contain (work on an older pin; named on the first run, after fetching the new pin) or mixed with
+upstream commits past the pin fail loudly. Stale submodules in detached HEAD get their URL synced from `.gitmodules`
+and are updated; one checked out on a branch is left alone. Then `install-ubuntu.sh` runs: its exit 0 or 10 (only
+manual steps remain, printed) counts as converged, anything else as a failure, and so does a run longer than 15
+minutes (NixOS: the whole unit; Debian: the installer, which Ctrl-C or SIGTERM to `install.sh` stops too).
 
 - NixOS: `dotfiles.service` (oneshot with `RemainAfterExit`, after `network-online.target`: once per boot and on a
   switch that changes the unit; `SuccessExitStatus=10`, `TimeoutStartSec=15min`). Output: `journalctl -u dotfiles`.
   Re-run by hand: `sudo systemctl restart dotfiles`.
-- Debian: `sudo ./install.sh --commit` in the host's debian-tweaks directory; `./install.sh check` is 0 once
-  converged. ODROID-N2+ on Armbian (only this module), with its own host file installed as `machine.toml` there
-  (bananapi-m4's would converge the ODROID into a bananapi; `install.sh` also refuses a `machine.toml` whose
-  `[modules.system] hostname` is not the box's `hostname`, exit 2, unless `--force-host <current hostname>`):
+- Debian: `sudo ./install.sh --commit` in the host's debian-tweaks directory; `sudo ./install.sh check` is 0 once
+  converged. ODROID-N2+ on Armbian (only this module and `login-shell`), with its own host file installed as
+  `machine.toml` there (bananapi-m4's would converge the ODROID into a bananapi; `install.sh` also refuses, exit 2,
+  a `machine.toml` without `[modules.system] hostname`, and one whose hostname is not the box's `hostname` unless
+  `--force-host <current hostname>`):
 
   ```sh
   rsync -aL --delete --exclude /machine.toml machines/bananapi-m4/ ultra@odroidn2:debian-tweaks/   # -L: modules/dotfiles is a symlink
   rsync machines/dotfiles/debian/hosts/odroidn2-armbian.toml ultra@odroidn2:debian-tweaks/machine.toml
-  ssh -t ultra@odroidn2 'cd debian-tweaks && sudo ./install.sh --only dotfiles --commit'
+  ssh -t ultra@odroidn2 'cd debian-tweaks && sudo ./install.sh --only dotfiles,login-shell --commit'
   ```
+
+Tests: `make test-machines` runs [`../tests/run.sh`](../tests/run.sh) (`checkout`, the host guard, Ctrl-C and
+SIGTERM reaching the installer) in a `debian:trixie` container; `make test` and the `Machines` workflow run it.
 
 ## The pin: which .files commit the hosts run
 

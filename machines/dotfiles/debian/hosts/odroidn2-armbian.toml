@@ -1,16 +1,19 @@
 # ODROID-N2+ while it still runs Armbian (until it moves to NixOS: machines/odroid-n2plus/ then imports
-# ../dotfiles/nixos.nix instead). Only ~/.files is declared here; the rest of that machine is not managed by this
-# spec. Applied with bananapi-m4's engine, this file installed as the ODROID's machine.toml (bananapi-m4's own
-# machine.toml is never copied there):
+# ../dotfiles/nixos.nix instead). Only ~/.files and ultra's login shell are declared here; the rest of that machine
+# is not managed by this spec. Applied with bananapi-m4's engine, this file installed as the ODROID's machine.toml
+# (bananapi-m4's own machine.toml is never copied there):
 #   rsync -aL --delete --exclude /machine.toml machines/bananapi-m4/ ultra@odroidn2:debian-tweaks/
 #   rsync machines/dotfiles/debian/hosts/odroidn2-armbian.toml ultra@odroidn2:debian-tweaks/machine.toml
-#   ssh -t ultra@odroidn2 'cd debian-tweaks && sudo ./install.sh --only dotfiles --commit'
-# The engine runs every module it knows unless the machine file switches it off, so each bananapi-m4 module is
-# off here (a module added there later must be added here as off too; --only dotfiles is the second guard).
+#   ssh -t ultra@odroidn2 'cd debian-tweaks && sudo ./install.sh --only dotfiles,login-shell --commit'
+# The engine runs every module it knows unless the machine file switches it off, so each other bananapi-m4 module is
+# off here (a module added there later must be added here as off too; --only is the second guard).
 
 [modules.dotfiles]
 user = "ultra"
-login_shell = "/usr/bin/zsh"
+
+# zsh comes from the dotfiles module, which runs first
+[modules.login-shell.shells]
+ultra = "/usr/bin/zsh"
 
 [modules.system]
 enabled = false

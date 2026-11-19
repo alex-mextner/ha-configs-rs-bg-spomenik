@@ -1,34 +1,29 @@
 #!/usr/bin/env bash
-# users: [[modules.users.users]] name, shell, groups, sudo ("nopasswd" | "password" | "none"), linger, authorized_keys.
+# users: [[modules.users.users]] name, groups, sudo ("nopasswd" | "password" | "none"), linger, authorized_keys.
 # authorized_keys is exclusive: the file holds exactly the declared keys. A user without a password is created with a
 # locked password (key-only login), which is why such a user wants sudo = "nopasswd".
 # Groups that do not exist yet are created as system groups; extra groups the user has are left alone.
-# A shell is set only once it is usable (shell_usable), as sshd refuses a user whose shell is missing: until then an
-# existing user keeps the current shell, a new one gets /usr/sbin/nologin (never a login shell it was not declared
-# with), and the module reports drift.
+# The login shell is the login-shell module's: a new user is created with the shell it declares there once that shell
+# is usable (nologin for an account that must not log in), else with useradd's default until login-shell sets it.
 source "$(dirname "$0")/../../lib/common.sh" "$@"
 
 count=$(opt '.users // [] | length')
 for ((i = 0; i < count; i++)); do
 	u=$(opt ".users[$i]")
 	name=$(jq -r '.name' <<<"$u")
-	shell=$(jq -r '.shell // "/bin/bash"' <<<"$u")
+	if [[ $(jq 'has("shell")' <<<"$u") == true ]]; then
+		echo "  $name: shell is declared in [modules.login-shell.shells] now, not in [[modules.users.users]]" >&2
+		exit 2
+	fi
 	sudo_rule=$(jq -r '.sudo // "none"' <<<"$u")
 	linger=$(jq -r '.linger // false' <<<"$u")
 
-	entry=$(getent passwd "$name" || true)
-	current=$(cut -d: -f7 <<<"$entry")
-	# the shell to set now: the declared one once usable, else the current one (nologin for a new user)
-	want=$shell
-	if ! shell_usable "$shell"; then
-		if [[ -n $entry ]]; then want=$current; else want=/usr/sbin/nologin; fi
-		drift "$name: shell $shell once it is installed (and listed in /etc/shells); until then ${want:-unchanged}" ||
-			true
-	fi
-	if [[ -z $entry ]]; then
-		drift "create user $name ($want)" && useradd --create-home --user-group --shell "$want" "$name"
-	elif [[ $current != "$want" ]]; then
-		drift "$name: shell -> $want" && usermod --shell "$want" "$name"
+	if ! getent passwd "$name" >/dev/null; then
+		shell=$(jq -r --arg name "$name" '.modules["login-shell"].shells[$name] // ""' <<<"${DT_CONFIG:-{\}}")
+		with_shell=()
+		if shell_usable "$shell"; then with_shell=(--shell "$shell"); fi
+		drift "create user $name${with_shell[*]:+ (${with_shell[1]})}" &&
+			useradd --create-home --user-group "${with_shell[@]}" "$name"
 	fi
 	home=$(getent passwd "$name" | cut -d: -f6 || true)
 	home=${home:-/home/$name}

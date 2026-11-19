@@ -17,6 +17,14 @@ DRIFT=0
 MARKER="# Managed by debian-tweaks ($(basename "$(dirname "$0")")): edit machine.toml, not this file."
 BACKUP_DIR=/var/backups/debian-tweaks
 
+# stop_on_signals: SIGINT/SIGTERM (the engine passes them on) end the module only once the command it is running has
+# finished (bash runs a trap after the foreground command), so apt or dpkg is never left running on its own
+stop_on_signals() {
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+stop_on_signals
+
 # opt JQ_FILTER: read this module's options (DT_OPTIONS); `jq -r`, so a missing key prints "null".
 opt() { jq -r "$1" <<<"${DT_OPTIONS:-{\}}"; }
 # cfg JQ_FILTER: read the whole machine.toml (DT_CONFIG).
@@ -74,7 +82,7 @@ absent() {
 	return 0
 }
 
-# shell_usable PATH: PATH may become a user's shell: an executable file listed in /etc/shells, or a non-login shell
+# shell_usable PATH: PATH may become a user's shell: an executable listed in /etc/shells, or a non-login shell
 # (nologin, false: never listed there). sshd refuses a user whose shell is missing, so setting one before its package
 # is installed locks the user out of this headless box.
 shell_usable() {
