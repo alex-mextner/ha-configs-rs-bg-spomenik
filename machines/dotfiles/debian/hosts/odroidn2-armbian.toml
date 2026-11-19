@@ -1,0 +1,31 @@
+# ODROID-N2+ while it still runs Armbian (until it moves to NixOS: machines/odroid-n2plus/ then imports
+# ../dotfiles/nixos.nix instead). Only ~/.files is declared here; the rest of that machine is not managed by this
+# spec. Applied with bananapi-m4's engine (its modules/dotfiles links here, so this file travels along):
+#   rsync -aL --delete machines/bananapi-m4/ ultra@odroidn2:debian-tweaks/
+#   ssh -t ultra@odroidn2 'cd debian-tweaks &&
+#     sudo ./install.sh --machine modules/dotfiles/hosts/odroidn2-armbian.toml --only dotfiles --commit'
+# The engine runs every module it knows unless the machine file switches it off, so each bananapi-m4 module is
+# off here (a module added there later must be added here as off too; --only dotfiles is the second guard).
+
+[modules.dotfiles]
+user = "ultra"
+login_shell = "/usr/bin/zsh"
+
+[modules.system]
+enabled = false
+[modules.apt-sources]
+enabled = false
+[modules.packages]
+enabled = false
+[modules.users]
+enabled = false
+[modules.ssh-server]
+enabled = false
+[modules.zram]
+enabled = false
+[modules.sysctl]
+enabled = false
+[modules.docker]
+enabled = false
+[modules.systemd-units]
+enabled = false

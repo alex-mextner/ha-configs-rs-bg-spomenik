@@ -14,6 +14,7 @@ in
   imports = [
     "${modulesPath}/profiles/minimal.nix"
     ./modules/nic-alive.nix
+    ../dotfiles/nixos.nix
   ];
 
   networking.hostName = "odroidn2-nixos";
@@ -74,6 +75,9 @@ in
     usbutils
     htop
   ];
+
+  # ~/.files for ultra, zsh as its login shell (../dotfiles/nixos.nix)
+  homelab.dotfiles.enable = true;
 
   nix.settings = {
     experimental-features = [

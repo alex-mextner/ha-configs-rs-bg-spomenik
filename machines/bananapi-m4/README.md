@@ -42,6 +42,7 @@ failed module it `requires`. A failure never stops the run: independent modules 
 | 55 | `sysctl` | `/etc/sysctl.d/90-debian-tweaks.conf`; live values are checked and set too |
 | 60 | `docker` | the whole `/etc/docker/daemon.json` (validated by `dockerd --validate`), docker + containerd enabled and running |
 | 70 | `systemd-units` | system units from `units/system`, user units from `units/user` (per user), enabled and started |
+| 90 | `dotfiles` | `~/.files` of ultra applied by its `install-ubuntu.sh`; a link to the shared [`../dotfiles/debian`](../dotfiles/debian) (manual steps: [`../dotfiles/README.md`](../dotfiles/README.md)) |
 
 Every file a module writes starts with `# Managed by debian-tweaks (<module>)`. A file without that line is copied
 to `/var/backups/debian-tweaks/` before it is replaced. Adding a module: a new `modules/<name>/` with `module.toml`
@@ -76,7 +77,7 @@ and an executable `run` that sources `lib/common.sh`; its options arrive as JSON
    `rsync` + `--commit` re-applies it):
 
    ```sh
-   rsync -a --delete machines/bananapi-m4/ ultra@<ip>:debian-tweaks/
+   rsync -aL --delete machines/bananapi-m4/ ultra@<ip>:debian-tweaks/   # -L: modules/dotfiles is a symlink
    ssh -t ultra@<ip> 'cd debian-tweaks && sudo ./install.sh && sudo ./install.sh --commit'
    ssh ultra@<ip> 'cd debian-tweaks && sudo ./install.sh check'   # exit 0
    ```

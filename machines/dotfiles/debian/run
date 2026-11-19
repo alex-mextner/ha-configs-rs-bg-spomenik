@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# dotfiles: github.com/alex-mextner/.files at ~/.files of one user, applied by its own install-ubuntu.sh,
+# the way ubuntu-pc has it. Options ([modules.dotfiles]):
+#   user         whose home gets ~/.files (default "ultra"; the user must already exist)
+#   repo         clone URL for a fresh checkout (default the public https URL: no GitHub auth needed)
+#   branch       the branch ~/.files follows (default "master")
+#   login_shell  optional, e.g. "/usr/bin/zsh": set the user's login shell here. Leave it out on a host whose
+#                `users` module declares the shell, so one module owns it.
+# Converged means: the packages the installer needs are installed, ~/.files is a checkout at the tip of `branch`
+# (a fast-forward only; local commits or another checked-out branch are left alone) and
+# `install-ubuntu.sh --check` has nothing pending. Its exit 10 (only manual steps remain, such as GitHub access
+# for a private submodule or bun) is converged: no run of this module can do those; they are printed.
+# This module never calls apt from install-ubuntu.sh: the installer is user level and needs no root.
+# DT_DIR (set by the engine), not $0/../..: modules/dotfiles is a symlink in the repo, and `..` after it would leave
+# the host directory
+source "${DT_DIR:-$(dirname "$0")/../..}/lib/common.sh" "$@"
+
+user=$(opt '.user // "ultra"')
+repo=$(opt '.repo // "https://github.com/alex-mextner/.files.git"')
+branch=$(opt '.branch // "master"')
+login_shell=$(opt '.login_shell // ""')
+# install-ubuntu.sh: git and curl (clones, vim-plug), zsh (zplug), vim (plugins), python3 + PyYAML (rig config
+# merge), gh (the credential helper the private submodules need once `gh auth login` is done), ssh (ssh submodule
+# URLs); sha256sum, awk, timeout come with coreutils/mawk on every Debian.
+deps=(git ca-certificates curl zsh vim python3 python3-yaml gh openssh-client)
+
+installed() { [[ $(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null) == installed ]]; }
+missing=()
+for pkg in "${deps[@]}"; do installed "$pkg" || missing+=("$pkg"); done
+if ((${#missing[@]})); then
+	if drift "install: ${missing[*]}"; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update -o Acquire::Retries=3
+		apt-get install -y --no-install-recommends -o Acquire::Retries=3 "${missing[@]}"
+	fi
+fi
+
+if ! entry=$(getent passwd "$user"); then
+	echo "  dotfiles: user $user does not exist (declare it in the users module or create it first)" >&2
+	exit 1
+fi
+home=$(cut -d: -f6 <<<"$entry")
+shell=$(cut -d: -f7 <<<"$entry")
+files=$home/.files
+# git and the installer run as the user: from root (runuser) or as the user itself (`./install.sh check`)
+if ((EUID != 0)) && [[ $(id -un) != "$user" ]]; then
+	echo "  dotfiles: run as root or as $user" >&2
+	exit 1
+fi
+
+if [[ -n $login_shell && $shell != "$login_shell" ]]; then
+	if drift "$user: login shell $shell -> $login_shell"; then
+		usermod --shell "$login_shell" "$user"
+		shell=$login_shell
+	fi
+fi
+
+# as_user CMD...: run as the user in a clean environment from their home. No terminal prompts: an unreachable
+# private repository must fail fast (the installer reports it as a manual step), never wait for a password or
+# an ssh host key confirmation.
+as_user() {
+	local env=(
+		HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" LANG=C.UTF-8
+		PATH="$home/.local/bin:$home/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+		GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+	)
+	if ((EUID == 0)); then
+		runuser -u "$user" -- env -i -C "$home" "${env[@]}" "$@"
+	else
+		env -i -C "$home" "${env[@]}" "$@"
+	fi
+}
+
+if [[ ! -e $files ]]; then
+	drift "clone $repo ($branch) into $files" && as_user git clone --quiet --branch "$branch" "$repo" "$files"
+elif ! as_user git -C "$files" rev-parse --git-dir >/dev/null 2>&1; then
+	echo "  dotfiles: $files exists but is not a git checkout; move it aside" >&2
+	exit 1
+elif [[ $(as_user git -C "$files" symbolic-ref --short -q HEAD || true) != "$branch" ]]; then
+	say "$files is not on $branch: left as it is"
+else
+	if ! tip=$(as_user git -C "$files" ls-remote --exit-code origin "refs/heads/$branch" | cut -f1) || [[ -z $tip ]]; then
+		echo "  dotfiles: cannot read $branch from the origin of $files (network?)" >&2
+		exit 1
+	fi
+	head=$(as_user git -C "$files" rev-parse HEAD)
+	# HEAD already contains the tip: nothing to do (local commits on top are the user's)
+	if [[ $head != "$tip" ]] && ! as_user git -C "$files" merge-base --is-ancestor "$tip" HEAD 2>/dev/null; then
+		if drift "fast-forward $files to $branch ${tip:0:12}"; then
+			as_user git -C "$files" fetch --quiet origin "$branch"
+			as_user git -C "$files" merge --ff-only --quiet FETCH_HEAD
+		fi
+	fi
+	# initialised submodules at the commits HEAD records (a fast-forward moves the pointers, not the checkouts);
+	# initialising the others is install-ubuntu.sh's business
+	submodules=$(as_user git -C "$files" submodule status --recursive)
+	if grep -q '^+' <<<"$submodules"; then
+		drift "check out the submodule commits $files records" &&
+			as_user git -C "$files" submodule update --quiet --recursive
+	fi
+fi
+
+# install-ubuntu.sh --check: 0 nothing pending, 10 only manual steps remain, 1 pending, anything else an error.
+# In install mode the checkout above already exists, so the installer always runs.
+quote_output() { sed 's/^/  | /' >&2; }
+if [[ -x $files/install-ubuntu.sh ]]; then
+	if [[ $MODE == install ]]; then
+		rc=0
+		out=$(as_user "$files/install-ubuntu.sh" 2>&1) || rc=$?
+		grep -E '^(apply|manual):' <<<"$out" | sed 's/^/  /' || true
+		case $rc in
+		0) ;;
+		10) echo "  install-ubuntu.sh: done; the manual steps above remain" ;;
+		*)
+			quote_output <<<"$out"
+			echo "  dotfiles: install-ubuntu.sh failed (exit $rc)" >&2
+			exit 1
+			;;
+		esac
+	else
+		rc=0
+		out=$(as_user "$files/install-ubuntu.sh" --check 2>&1) || rc=$?
+		case $rc in
+		0 | 10) ;;
+		1) drift "install-ubuntu.sh: $(grep -c '^pending:' <<<"$out") pending" || true ;;
+		*)
+			[[ $MODE == check ]] || quote_output <<<"$out"
+			exit 1
+			;;
+		esac
+		if [[ $MODE == plan ]]; then grep -E '^(pending|manual):' <<<"$out" | sed 's/^/    /' || true; fi
+	fi
+else
+	say "then: $files/install-ubuntu.sh"
+fi
+finish

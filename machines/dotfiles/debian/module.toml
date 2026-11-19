@@ -1,0 +1,4 @@
+description = "~/.files (github.com/alex-mextner/.files) for one user, applied by its install-ubuntu.sh"
+# Last: the user, its shell and the network (apt sources, packages) are in place by now.
+order = 90
+requires = ["users", "packages"]
