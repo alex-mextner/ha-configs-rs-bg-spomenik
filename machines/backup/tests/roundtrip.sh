@@ -167,6 +167,16 @@ pass "retention: $((before + 1)) nightly snapshots -> $after ($days_kept distinc
 hb "$config" check || fail "check"
 pass "check --read-data-subset ok"
 
+# 5b. the status copy goes only into a Drive folder that exists: a token that cannot see the real folder must not
+# create a second one of the same name (watch with an empty list: an uploading verb that does not touch restic)
+jq --arg folder ":local:$(folder no-such-host)" '.drive_folder = $folder' "$config" >"$tmp/config-no-folder.json"
+hb "$tmp/config-no-folder.json" watch || fail "watch with a missing Drive folder"
+jq -e .ok "$tmp/state/status-watch.json" >/dev/null || fail "status-watch.json is not ok"
+[[ ! -e $(folder no-such-host) ]] || fail "status upload created the missing Drive folder"
+grep -q "status not uploaded: cannot list :local:$(folder no-such-host): .*directory not found" "$tmp/config-no-folder-watch.log" ||
+	fail "skipped status upload not logged with rclone's reason"
+pass "status upload skipped and logged when the host's Drive folder does not exist"
+
 # 6. a failing dump: reported (status + notify), the rest is still backed up
 jq '.dumps += [{type: "sqlite", name: "gone", source: "/nonexistent/x.db"}]' "$config" >"$tmp/config-bad.json"
 if hb "$tmp/config-bad.json" run; then fail "run with a missing db succeeded"; fi
@@ -201,7 +211,9 @@ for _ in $(seq 100); do [[ -e $tmp/locked ]] && break; sleep 0.1; done
 hb "$config" dump || fail "dump after waiting for the lock"
 grep -q "another run or dump is in progress: waiting for it" "$tmp/config-dump.log" || fail "dump did not wait for the lock"
 wait $!
-pass "a dump waits for a run or dump in progress"
+# dump is not a timer verb: its status stays local, so the watch never reads one that no timer refreshes
+[[ ! -e $(folder test-host)/status/status-dump.json ]] || fail "dump status uploaded to the Drive folder"
+pass "a dump waits for a run or dump in progress; its status is not uploaded"
 
 # 7. missing secret: clear message, no restic call
 mv "$tmp/password" "$tmp/password.away"

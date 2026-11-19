@@ -15,8 +15,8 @@
 # Everything host-specific comes from one JSON file ($HOMELAB_BACKUP_CONFIG, default /etc/homelab-backup/config.json
 # for root, ~/.config/homelab-backup/config.json otherwise), rendered from machines/backup/hosts/<host>.toml and
 # policy.toml by debian/run or nixos.nix. Secrets are never in it, only the paths of the files that hold them.
-# Each verb writes <state_dir>/status-<verb>.json, and a copy to <drive_folder>/status/ for the watch; a failure
-# also runs the configured notify command (if any).
+# Each verb writes <state_dir>/status-<verb>.json; the verbs the timers run also copy it to <drive_folder>/status/
+# for the watch (only into a folder that exists). A failure also runs the configured notify command (if any).
 set -euo pipefail
 
 if [[ -n ${HOMELAB_BACKUP_CONFIG:-} ]]; then
@@ -91,7 +91,7 @@ need_secrets() {
 # record VERB ok|fail [MESSAGE]: status JSON for monitoring, a copy of it in this host's Drive folder for the watch
 # on ubuntu-pc, and on failure the notify command
 record() {
-	local verb=$1 result=$2 message=${3:-} tmp folder
+	local verb=$1 result=$2 message=${3:-} tmp folder err
 	tmp=$(mktemp "$STATE/.status.XXXXXX")
 	jq -n --arg verb "$verb" --arg host "$HOST" --arg result "$result" --arg message "$message" \
 		--arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg started "${STARTED:-}" \
@@ -103,10 +103,12 @@ record() {
 	# Best effort: when the upload fails, the watch reports this host's status as stale.
 	folder=$(cfg '.drive_folder // ""')
 	if [[ -n $folder && -r ${RCLONE_CONFIG:-} && $verb =~ ^(run|check|drill|tasks|watch)$ ]]; then
-		if "$RCLONE" lsf --max-depth 1 "$folder" >/dev/null 2>&1; then
+		# a missing folder, an expired token and a network error all fail here: log rclone's own reason, on one line
+		# (the journal takes one line per entry, and Google's errors can span several)
+		if err=$("$RCLONE" lsf --max-depth 1 "$folder" 2>&1 >/dev/null | tr -s '\n' ' '); then
 			"$RCLONE" copyto "$STATE/status-$verb.json" "$folder/status/status-$verb.json" || log "status upload to $folder failed"
 		else
-			log "status not uploaded: $folder is not visible to this token"
+			log "status not uploaded: cannot list $folder: $err"
 		fi
 	fi
 	if [[ $result != ok ]] && [[ $(cfg '.notify | length') -gt 0 ]]; then
@@ -342,7 +344,7 @@ do_tasks() {
 #   - exactly one folder of that name: Drive allows duplicates, and a path would resolve to either of them,
 #   - a restic snapshot file under policy.watch.max_age_hours old (one made by hand counts too: the tags are
 #     encrypted and the watcher has no password for that repository),
-#   - the status files the host uploads after every verb (record): none failed, the last run under that age.
+#   - the status files the host uploads after each timer verb (record): none failed, the last run under that age.
 # Hosts without a notify command, and hosts that are down entirely, get noticed here.
 do_watch() {
 	local host folder parent name count max_age now newest finished statuses failed problems=() message

@@ -67,7 +67,8 @@ All times Europe/Belgrade, from `policy.toml`; `Persistent=true` catches up afte
 | daily 09:00 (ubuntu-pc, when `watch` lists hosts) | watch: each listed host has one Drive folder, a snapshot and a finished run under 36 h old, and no failed verb |
 
 Each run writes `<state_dir>/status-<verb>.json` (`ok`, `message`, times): `/var/lib/homelab-backup` for system
-hosts, `~/.local/state/homelab-backup` on ubuntu-pc, and copies it to `<drive folder>/status/`. A failure also runs
+hosts, `~/.local/state/homelab-backup` on ubuntu-pc. The verbs the timers run (`run`, `check`, `drill`, `tasks`,
+`watch`) also copy it to `<drive folder>/status/`, and only when that folder already exists. A failure also runs
 the host's `notify` command: on ubuntu-pc that is `tg --tag problem`. The other hosts have no Telegram CLI, so
 ubuntu-pc watches them every morning: for each host in `watch` (`hosts/ubuntu-pc.toml`) its full-scope token checks
 that there is exactly one `homelab-backup-<host>` folder, that the newest snapshot file and the last `run` status are
