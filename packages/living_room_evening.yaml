@@ -4,8 +4,9 @@ script:
   living_room_evening:
     alias: Вечер
     description: >-
-      Режим для осени и зимы: гирлянда, обогрев 22 °C, свет в гостиной,
-      лёгкий джаз на станции с громкостью 4 из 10 и камин на проекторе.
+      Гирлянда, свет в гостиной, лёгкий джаз с громкостью 4 из 10 и камин.
+      При температуре на улице ниже 24 °C — обогрев на 30 °C,
+      выше 24 °C — охлаждение на 16 °C.
     icon: mdi:weather-sunset
     mode: single
     sequence:
@@ -14,14 +15,44 @@ script:
         action: light.turn_on
         target:
           entity_id: light.girlianda
-      - alias: Включить обогрев 22 °C
-        continue_on_error: true
-        action: climate.set_temperature
-        target:
-          entity_id: climate.kondei_1
-        data:
-          hvac_mode: heat
-          temperature: 22
+      - alias: Определить температуру на улице
+        variables:
+          evening_outdoor: >-
+            {% set entity = 'weather.forecast_home_assistant' %}
+            {% set temperature = state_attr(entity, 'temperature') %}
+            {% set unit = state_attr(entity, 'temperature_unit') %}
+            {% set valid = has_value(entity)
+               and temperature is not boolean
+               and is_number(temperature)
+               and unit in ['°C', '°F'] %}
+            {{ {'temperature': temperature | float if valid else none,
+                'threshold': 24 if unit == '°C' else 75.2} }}
+      - alias: Выбрать режим кондиционера по погоде
+        choose:
+          - conditions: >-
+              {{ evening_outdoor.temperature is not none
+                 and evening_outdoor.temperature < evening_outdoor.threshold }}
+            sequence:
+              - alias: Включить обогрев 30 °C
+                continue_on_error: true
+                action: climate.set_temperature
+                target:
+                  entity_id: climate.kondei_1
+                data:
+                  hvac_mode: heat
+                  temperature: 30
+          - conditions: >-
+              {{ evening_outdoor.temperature is not none
+                 and evening_outdoor.temperature > evening_outdoor.threshold }}
+            sequence:
+              - alias: Включить охлаждение 16 °C
+                continue_on_error: true
+                action: climate.set_temperature
+                target:
+                  entity_id: climate.kondei_1
+                data:
+                  hvac_mode: cool
+                  temperature: 16
       - alias: Включить свет в гостиной
         continue_on_error: true
         action: light.turn_on

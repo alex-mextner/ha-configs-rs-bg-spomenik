@@ -27,6 +27,7 @@ from homeassistant.helpers.trace import trace_clear, trace_get
 ROOT = Path(__file__).resolve().parents[2]
 STATION = "media_player.yandex_station_m0011hm00z86hg"
 FIREPLACE = "sensor.living_room_fireplace"
+WEATHER = "weather.forecast_home_assistant"
 MUSIC_ACTIONS = (
     "media_player.select_source",
     "media_player.volume_set",
@@ -64,6 +65,9 @@ class LivingRoomEveningTests(unittest.IsolatedAsyncioTestCase):
         self.queue_full = asyncio.Event()
         self.hass.states.async_set(
             FIREPLACE, "playing", {"request_id": "previous-command"}
+        )
+        self.hass.states.async_set(
+            WEATHER, "partlycloudy", {"temperature": 9.5, "temperature_unit": "°C"}
         )
         for action in (
             *MUSIC_ACTIONS,
@@ -224,7 +228,7 @@ class LivingRoomEveningTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "entity_id": ["climate.kondei_1"],
                         "hvac_mode": "heat",
-                        "temperature": 22,
+                        "temperature": 30,
                     },
                 ),
                 ("light.turn_on", {"entity_id": ["light.gostinaia_globus_socket_1"]}),
@@ -248,6 +252,80 @@ class LivingRoomEveningTests(unittest.IsolatedAsyncioTestCase):
         self.assert_matching_playback_sensor()
         self.assertEqual(self.completed, [True])
         self.assertEqual(self.calls[-1][0], "test.evening_completed")
+
+    async def test_outdoor_temperature_selects_heat_or_cool(self) -> None:
+        for temperature, unit, mode, target in (
+            (-5, "°C", "heat", 30),
+            (23.9, "°C", "heat", 30),
+            (24.1, "°C", "cool", 16),
+            (35, "°C", "cool", 16),
+            ("9.5", "°C", "heat", 30),
+            (75.1, "°F", "heat", 30),
+            (75.3, "°F", "cool", 16),
+        ):
+            with self.subTest(temperature=temperature, unit=unit):
+                self.calls.clear()
+                self.hass.states.async_set(
+                    WEATHER,
+                    "partlycloudy",
+                    {"temperature": temperature, "temperature_unit": unit},
+                )
+                await self.launch()
+                self.assertEqual(
+                    [
+                        data
+                        for action, data in self.calls
+                        if action == "climate.set_temperature"
+                    ],
+                    [
+                        {
+                            "entity_id": ["climate.kondei_1"],
+                            "hvac_mode": mode,
+                            "temperature": target,
+                        }
+                    ],
+                )
+                self.assertEqual(self.completed, [True])
+
+    async def test_threshold_or_invalid_weather_preserves_climate(self) -> None:
+        for state, temperature, unit in (
+            ("partlycloudy", 24, "°C"),
+            ("partlycloudy", 75.2, "°F"),
+            ("unavailable", 9.5, "°C"),
+            ("unknown", 28, "°C"),
+            ("partlycloudy", None, "°C"),
+            ("partlycloudy", "invalid", "°C"),
+            ("partlycloudy", True, "°C"),
+            ("partlycloudy", float("nan"), "°C"),
+            ("partlycloudy", float("inf"), "°C"),
+            ("partlycloudy", 9.5, "K"),
+            ("partlycloudy", 9.5, None),
+        ):
+            with self.subTest(state=state, temperature=temperature, unit=unit):
+                self.calls.clear()
+                self.hass.states.async_set(
+                    WEATHER,
+                    state,
+                    {"temperature": temperature, "temperature_unit": unit},
+                )
+                await self.launch()
+                self.assertEqual(
+                    [call for call in self.calls if call[0].startswith("climate.")], []
+                )
+                self.assertEqual(
+                    [
+                        data["entity_id"]
+                        for action, data in self.calls
+                        if action == "light.turn_on"
+                    ],
+                    [["light.girlianda"], ["light.gostinaia_globus_socket_1"]],
+                )
+                self.assertEqual(len(self.music_calls()), 3)
+                self.assertEqual(self.completed, [True])
+                self.assertEqual(
+                    self.hass.states.get(FIREPLACE).attributes["request_id"],
+                    self.child_calls[-1]["request_id"],
+                )
 
     async def test_raw_music_error_waits_for_the_other_branch_to_finish(self) -> None:
         self.fireplace_release.clear()
