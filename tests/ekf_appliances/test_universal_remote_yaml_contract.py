@@ -82,13 +82,18 @@ class UniversalRemoteYamlContractTests(unittest.TestCase):
             for a in self.doc["automation"]
             if a["id"] == "universal_remote_dispatcher"
         )
+        choices = next(
+            step["choose"] for step in automation["action"] if "choose" in step
+        )
         power = next(
             branch
-            for branch in automation["action"][1]["choose"]
+            for branch in choices
             if branch["conditions"] == "{{ button == 'power' }}"
         )
         self.assertEqual(power["sequence"][0]["action"], "ekf_appliances.remote_power")
         self.assertEqual(power["sequence"][0]["data"]["pair"], "{{ route.pair }}")
+        self.assertIn("power_request_id", power["sequence"][0]["data"])
+        self.assertIn("route.blocked", automation["action"][1]["if"])
 
     def test_kodi_queued_text_checks_latch_at_its_final_transport(self) -> None:
         sequence = self.doc["script"]["t9_kodi_text"]["sequence"]

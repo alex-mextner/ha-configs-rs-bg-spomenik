@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     from asyncio import TimerHandle
@@ -22,6 +22,8 @@ class RemoteRoute(TypedDict):
 
     pair: str
     native: bool
+    blocked: NotRequired[str]
+    power_request_id: NotRequired[str]
 
 
 @dataclass(frozen=True)

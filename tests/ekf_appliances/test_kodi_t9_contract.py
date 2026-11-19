@@ -119,11 +119,15 @@ class T9ContractFixture:
         self.hass.services.async_register(
             "test", "record_completed_operation", completed
         )
+        # Editing contracts exercise an available display; off/busy admission is
+        # verified separately against the same real controller boundary.
+        self.hass.states.async_set("media_player.ue48j5500_ue48j5500", "on")
+        self.hass.states.async_set("media_player.projector", "on")
         runtime = SimpleNamespace(
             hass=self.hass,
             entry=SimpleNamespace(data={"tv_kodi_entity_id": "media_player.home"}),
             projector_shutting_down=False,
-            projector_power_state=False,
+            projector_power_state=True,
             projector_power_entity_id="binary_sensor.projector_hdmi_connected",
             projector_power_pair=None,
             tv_power_pair=None,

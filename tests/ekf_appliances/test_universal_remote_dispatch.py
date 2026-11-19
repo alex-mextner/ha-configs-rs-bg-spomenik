@@ -101,6 +101,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.automation_scripts = {}
         actions = {
             "ekf_appliances.wake_if_current",
+            "remote_announcements.reject",
             "rest_command.host_kodi_text_input",
             "media_player.turn_on",
             "media_player.turn_off",
@@ -284,6 +285,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.controller._clear_audio = False
         self.controller._captured_routes.clear()
+        self.controller._pending_power = None
         self.runtime.projector_shutting_down = False
         self.kodi_responses = {}
         self.calls.clear()
@@ -722,7 +724,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     any(x[0] == "script.music_remote_command" for x in self.calls)
                 )
                 calls = self.appliance_calls()
-                if pair == "tv" and state == "off":
+                if state == "off":
                     self.assertEqual(calls, [])
                     continue
                 self.assertEqual(len(calls), 1)
@@ -793,6 +795,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.reset()
+        self.set_power_pair("on", "on")
         await self.scripts["remote_modes_prepare"].async_run(
             {"button": "input"}, context=Context()
         )
@@ -901,7 +904,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(pair=pair, native=native):
                 self.reset()
-                self.hass.states.async_set(TV, "on")
+                self.set_power_pair("on", "on")
                 await self.scripts["remote_nav"].async_run(
                     {"direction": direction, "pair": pair, "native": native},
                     context=Context(),
@@ -1180,6 +1183,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_t9_cycles_are_serialized_text_edit_not_back_navigation(self) -> None:
         self.reset()
+        self.set_power_pair("on", "off")
         await self.scripts["t9_send_char"].async_run(
             {"char": "b", "mode": "cycle", "pair": "tv", "native": False},
             context=Context(),
@@ -1498,6 +1502,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
         self.kodi_responses = {
             "VideoLibrary.GetInProgressTVShows": {"tvshows": [{"tvshowid": 3}]},
             "VideoLibrary.GetEpisodes": {
@@ -1518,6 +1523,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_kodi_text_bridge_response_round_trips_to_the_caller(self) -> None:
         self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
         result = await self.scripts["t9_kodi_text"].async_run(
             {"mode": "cycle", "char": "b"}, context=Context()
         )
@@ -1680,6 +1686,109 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("script.music_remote_command", {"command": "play_pause"}),
             ],
+        )
+
+    async def test_repeated_power_is_rejected_during_each_display_transition(
+        self,
+    ) -> None:
+        for pair, initial in product(("tv", "projector"), ("off", "on")):
+            with self.subTest(pair=pair, initial=initial):
+                self.reset((pair, "off", "off"))
+                self.set_power_pair(
+                    initial if pair == "tv" else "off",
+                    initial if pair == "projector" else "off",
+                )
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def pending_power(call, entered=entered, release=release) -> None:
+                    self.calls.append((f"media_player.{call.service}", dict(call.data)))
+                    entered.set()
+                    await release.wait()
+
+                service = (
+                    "toggle"
+                    if pair == "tv"
+                    else "turn_off"
+                    if initial == "on"
+                    else "turn_on"
+                )
+                self.hass.services.async_register(
+                    "media_player", service, pending_power
+                )
+                first = asyncio.create_task(
+                    self.run_automation("universal_remote_dispatcher", "power")
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), 0.5)
+                    await self.run_automation("universal_remote_dispatcher", "power")
+                    self.assertEqual(len(self.appliance_calls()), 1)
+                    cues = [
+                        call
+                        for call in self.calls
+                        if call[0] == "remote_announcements.reject"
+                    ]
+                    self.assertEqual(len(cues), 1)
+                    self.assertFalse(first.done())
+                    if pair == "projector" and initial == "on":
+                        self.assertEqual(self.controller.mode.target, "chromecast")
+                        self.assertEqual(self.hass.states.get(TV).state, "off")
+                finally:
+                    release.set()
+                    await first
+                    self.hass.services.async_register(
+                        "media_player", service, self.capture
+                    )
+
+    async def test_off_display_text_is_rejected_once_before_native_dispatch(
+        self,
+    ) -> None:
+        for pair in ("tv", "projector"):
+            with self.subTest(pair=pair):
+                self.reset((pair, "off", "off"))
+                await self.scripts["t9_send_char"].async_run(
+                    {
+                        "pair": pair,
+                        "native": False,
+                        "mode": "add",
+                        "char": "a",
+                        "digit": "2",
+                    },
+                    context=Context(),
+                )
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(
+                    len(
+                        [
+                            call
+                            for call in self.calls
+                            if call[0] == "remote_announcements.reject"
+                        ]
+                    ),
+                    1,
+                )
+
+    async def test_disney_hold_stops_after_one_busy_source_rejection(self) -> None:
+        self.reset(("projector", "off", "off"))
+        self.hass.states.async_set(
+            PROJECTOR,
+            "off",
+            {
+                "power_intent_revision": "projector:1",
+                "last_power_intent": True,
+                "power_sync_target": True,
+            },
+        )
+        await self.run_automation("universal_remote_disney", "disney_hold")
+        self.assertEqual(self.appliance_calls(), [])
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in self.calls
+                    if call[0] == "remote_announcements.reject"
+                ]
+            ),
+            1,
         )
 
     async def test_pending_power_does_not_block_smart_ac_or_input(self) -> None:

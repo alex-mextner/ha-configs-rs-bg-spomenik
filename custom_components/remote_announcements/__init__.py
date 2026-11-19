@@ -41,6 +41,7 @@ from .providers import (
     prepare_dialogs,
     validate_native_response,
 )
+from .rejection import CUE_BUDGET, RejectionQueue, play_rejection
 from .service_calls import ServiceCalls
 
 if TYPE_CHECKING:
@@ -107,6 +108,25 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     hass.services.async_register(DOMAIN, "prepare", prepare_service)
 
+    async def reject_service(call: ServiceCall) -> dict[str, str]:
+        """Queue one quiet cue for a rejected logical command."""
+        return manager.rejections.submit(
+            call.data["reason"], call.data.get("press_id") or call.context.id
+        )
+
+    hass.services.async_register(
+        DOMAIN,
+        "reject",
+        reject_service,
+        schema=vol.Schema(
+            {
+                vol.Required("reason"): vol.All(cv.string, vol.Length(min=1, max=128)),
+                vol.Optional("press_id"): vol.All(cv.string, vol.Length(max=256)),
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
     async def start(_event: Event | None = None) -> None:
         """Seed the initial target before enabling change announcements."""
         manager.gate.changed(manager.current_target())
@@ -131,7 +151,13 @@ class SpeechPlayback:
     """State observed during one announcement, including temporary volume changes."""
 
     def __init__(
-        self, before: State, applied: float, *, pause: bool, verify_volume: bool
+        self,
+        before: State,
+        applied: float,
+        *,
+        pause: bool,
+        verify_volume: bool,
+        budget: float = ATTEMPT_BUDGET,
     ) -> None:
         """Snapshot original music and volume with one controller deadline."""
         self.entity = before.entity_id
@@ -142,7 +168,7 @@ class SpeechPlayback:
         self.verify_volume = verify_volume
         self.paused, self.raised = False, False
         self.started = time.monotonic()
-        self.budget = ATTEMPT_BUDGET
+        self.budget = budget
         self.recovery_deadline = self.started + self.budget
         self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
         self.recovery_failed = False
@@ -188,6 +214,11 @@ class Manager:
         self.settings = {}
         self.gate = TargetGate()
         self.queue = LatestAnnouncement(self.announce, on_error=self.failed)
+        self.playback_lock = asyncio.Lock()
+        self.rejections = RejectionQueue(
+            lambda item: play_rejection(self, item, SpeechPlayback),
+            report=self.feedback_status,
+        )
         self.prepare_lock = asyncio.Lock()
         self.status = "starting"
         self.public_status = {"voice": "Брачо", "physical_latency_verified": False}
@@ -204,7 +235,10 @@ class Manager:
         if self.unsubscribe:
             self.unsubscribe()
             self.unsubscribe = None
-        await self.queue.stop(grace_seconds=ATTEMPT_BUDGET)
+        await asyncio.gather(
+            self.queue.stop(grace_seconds=ATTEMPT_BUDGET),
+            self.rejections.stop(grace_seconds=CUE_BUDGET),
+        )
         await self.services.close(0.05)
 
     @callback
@@ -214,6 +248,15 @@ class Manager:
         self.public_status.update(values)
         for listener in self.listeners:
             listener()
+
+    @callback
+    def feedback_status(self, status: str, values: dict[str, Any]) -> None:
+        """Publish cue outcomes without changing spoken-label readiness."""
+        self.update(
+            self.status,
+            rejection_status=status,
+            **{f"rejection_{key}": value for key, value in values.items()},
+        )
 
     @callback
     def failed(self, error: Exception) -> None:
@@ -689,6 +732,11 @@ class Manager:
         return dialogs_command(self.settings, clip.key)
 
     async def announce(self, target: str) -> None:
+        """Serialize spoken labels with quiet cues and their volume recovery."""
+        async with self.playback_lock:
+            await self._announce(target)
+
+    async def _announce(self, target: str) -> None:
         """Dispatch the latest cached label and always attempt guarded recovery."""
         # Never queue stale speech after a later confirmed target has superseded it.
         generation = self.generation

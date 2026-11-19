@@ -15,18 +15,27 @@ the first INPUT of a single, and every accepted universal-remote action renews i
 Display OFF or projector shutdown invalidates stale pending input and affected
 manual focus. Unknown observations never mean OFF.
 
-Power remains bound to the display captured for that press, even if navigation
-falls back during projector shutdown. TV Power reverses an active paired-power
-request; otherwise either known-on member of the TV/Chromecast pair makes it an
-OFF request. A newer opposite request cancels the old confirmation wait and sends
-the discrete inverse without waiting for startup. Late acknowledgements retain
-the latest intent only within the existing bounded confirmation window.
+The universal remote reserves Power synchronously when the physical press is
+captured. Repeated Power is rejected while either pair is starting or stopping:
+it cannot cancel startup, reverse the requested direction, queue another toggle,
+or wake the TV after automatic projector fallback. The captured admission expires
+after five seconds if YAML never claims it. Once dispatched, caller cancellation
+does not release the guard; actual paired/native confirmation or its bounded
+failure ends the operation. The service boundary also bounds an unfinished call
+at 150 seconds. Native feedback reconciliation and its late-acknowledgement fences
+remain independent of remote admission.
 
-Ordinary TV navigation, volume and transport keys are dropped while an OFF
-request is active, or when the display is confirmed OFF and no ON request is
-active. Keys remain available during an accepted startup while network feedback
-lags. An automatic fallback must not wake Chromecast through HDMI-CEC. Explicit
-Power, INPUT and app selection remain the wake controls.
+Ordinary navigation, text, volume and transport keys are rejected for a busy,
+confirmed-off, or unknown display. A rejection captured during a transition stays
+rejected if YAML runs after confirmation. Explicit source/app selection and single
+INPUT may start their named idle pair; Power remains busy until all active pairs
+settle. Independent AC, lighting and speaker controls remain available.
+
+A recognized command rejected by a guard emits the short quiet rejection cue
+through remote_announcements.reject. Unsupported keys/text operations, unavailable
+mute or climate data, and failed native text responses use the same cue.
+Physical capture identities prevent replayed rejection feedback; receiver echoes,
+internal timer events and the short press replaced by a hold remain silent.
 
 The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded
@@ -43,7 +52,10 @@ Only explicit, fresh HDMI OFF newer than the request and any reload releases it.
 The public projector entity exposes `shutting_down`; the effective target sensor
 exposes `projector_shutting_down`. The guard is checked at the remote service
 handoff, after the IR queue and receiver preparation, and in Kodi keyboard mutation
-queues. Accepted internal shutdown confirmation IR remains permitted.
+queues. Accepted internal shutdown confirmation IR remains permitted. This safety
+latch is distinct from transient global Power admission: a failed projector
+transition releases the TV once its active lifecycle ends, while commands aimed
+at the projector still require fresh HDMI OFF to clear the latch.
 
 ## Evidence and validation scope
 

@@ -133,7 +133,14 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         return [
             call
             for call in self.hass.services.calls
-            if not call[0].startswith("input_")
+            if not call[0].startswith("input_") and call[0] != "remote_announcements"
+        ]
+
+    def rejection_calls(self) -> list:
+        return [
+            call
+            for call in self.hass.services.calls
+            if call[:2] == ("remote_announcements", "reject")
         ]
 
     async def test_guard_rechecks_after_a_projector_route_was_captured(self) -> None:
@@ -213,16 +220,18 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"sent": False, "blocked": "projector_shutting_down"})
         self.assertEqual(len(self.device_calls()), 1)
 
-    async def test_fresh_tv_power_remains_available_during_projector_shutdown(
-        self,
-    ) -> None:
+    async def test_power_cannot_wake_tv_after_projector_shutdown_fallback(self) -> None:
         self.runtime.note_projector_off_requested()
-        route = await self.controller.async_select({"pair": "tv"})
-        await self.controller.async_power(route)
-        self.assertEqual(
-            self.device_calls()[0][:3],
-            ("media_player", "toggle", {"entity_id": controller_module.TV}),
+        self.runtime.projector_power_pair = SimpleNamespace(
+            intent_revision="projector:1",
+            last_intent=False,
+            target=False,
         )
+        route = await self.controller.async_select({"pair": "tv"})
+        result = await self.controller.async_power(route)
+        self.assertFalse(result["sent"])
+        self.assertEqual(self.device_calls(), [])
+        self.assertEqual(len(self.rejection_calls()), 1)
 
     async def test_tv_navigation_cannot_wake_a_confirmed_off_fallback(self) -> None:
         self.runtime.note_projector_off_requested()
@@ -263,10 +272,10 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         )
-        self.assertEqual(result, {"sent": False, "blocked": "tv_off"})
+        self.assertEqual(result, {"sent": False, "blocked": "tv_power_transition"})
         self.assertEqual(self.device_calls(), [])
 
-    async def test_tv_navigation_remains_available_during_an_accepted_startup(
+    async def test_tv_navigation_is_rejected_during_an_accepted_startup(
         self,
     ) -> None:
         self.runtime.tv_power_pair = SimpleNamespace(
@@ -286,15 +295,9 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         )
-        self.assertEqual(result, {"sent": True})
-        self.assertEqual(
-            self.device_calls()[0][:3],
-            (
-                "remote",
-                "send_command",
-                {"entity_id": "remote.televizor", "command": "KEYCODE_BACK"},
-            ),
-        )
+        self.assertEqual(result, {"sent": False, "blocked": "tv_power_transition"})
+        self.assertEqual(self.device_calls(), [])
+        self.assertEqual(len(self.rejection_calls()), 1)
 
     async def test_tv_navigation_still_dispatches_to_a_confirmed_on_display(
         self,
@@ -334,6 +337,401 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"ok": True})
         self.assertTrue(self.device_calls()[-1][3])
         self.assertFalse(runtime.UNIVERSAL_PROJECTOR_COMMAND.get())
+
+    async def test_power_rejects_each_pair_transition_without_changing_intent(
+        self,
+    ) -> None:
+        for pair in ("tv", "projector"):
+            for target in (True, False):
+                with self.subTest(pair=pair, target=target):
+                    backend = SimpleNamespace(
+                        endpoints={
+                            "display": SimpleNamespace(
+                                read=lambda target=target: not target
+                            )
+                        },
+                        intent_revision="pending:1",
+                        last_intent=target,
+                        target=target,
+                    )
+                    setattr(self.runtime, pair + "_power_pair", backend)
+                    result = await self.controller.async_power({"pair": pair})
+                    self.assertFalse(result["sent"])
+                    self.assertIs(backend.target, target)
+                    self.assertEqual(self.device_calls(), [])
+                    setattr(self.runtime, pair + "_power_pair", None)
+        self.assertEqual(len(self.rejection_calls()), 4)
+
+    async def test_overlapping_power_cannot_enter_before_first_service_confirms(
+        self,
+    ) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.hass.services.async_call
+
+        async def delayed(domain, service, data, **kwargs: Any) -> Any:
+            await original(domain, service, data, **kwargs)
+            if domain == "media_player":
+                entered.set()
+                await release.wait()
+
+        self.hass.services.async_call = delayed
+        first = asyncio.create_task(self.controller.async_power({"pair": "tv"}))
+        await entered.wait()
+        try:
+            second = await asyncio.wait_for(
+                self.controller.async_power({"pair": "tv"}), 0.1
+            )
+            self.assertFalse(second["sent"])
+            self.assertEqual(len(self.device_calls()), 1)
+        finally:
+            release.set()
+            await first
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}), {"sent": True}
+        )
+        self.assertEqual(len(self.device_calls()), 2)
+
+    async def test_cancelled_caller_does_not_release_running_power_admission(
+        self,
+    ) -> None:
+        entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original = self.hass.services.async_call
+
+        async def delayed(domain, service, data, **kwargs: Any) -> Any:
+            await original(domain, service, data, **kwargs)
+            if domain == "media_player":
+                entered.set()
+                await release.wait()
+                finished.set()
+
+        self.hass.services.async_call = delayed
+        first = asyncio.create_task(self.controller.async_power({"pair": "tv"}))
+        await entered.wait()
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        try:
+            result = await asyncio.wait_for(
+                self.controller.async_power({"pair": "tv"}), 0.1
+            )
+            self.assertFalse(result["sent"])
+            self.assertEqual(len(self.device_calls()), 1)
+        finally:
+            release.set()
+        await finished.wait()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}), {"sent": True}
+        )
+
+    async def test_failed_power_releases_admission_without_hiding_the_error(
+        self,
+    ) -> None:
+        original = self.hass.services.async_call
+
+        async def failing(domain, service, data, **kwargs: Any) -> Any:
+            if domain == "media_player":
+                message = "transmitter unavailable"
+                raise errors.HomeAssistantError(message)
+            return await original(domain, service, data, **kwargs)
+
+        self.hass.services.async_call = failing
+        with self.assertRaisesRegex(
+            errors.HomeAssistantError, "transmitter unavailable"
+        ):
+            await self.controller.async_power({"pair": "tv"})
+        self.assertEqual(len(self.rejection_calls()), 1)
+        self.hass.services.async_call = original
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}), {"sent": True}
+        )
+
+    async def test_physical_power_is_reserved_before_yaml_and_rejection_is_not_replayed(
+        self,
+    ) -> None:
+        self.controller.mode.select("tv")
+        stamp = self.controller.mode.clock()
+        self.controller.physical_press("power", stamp)
+        self.controller.physical_press("power", stamp + 0.3)
+        first = await self.controller.async_prepare(
+            {"button": "power", "received_ms": stamp * 1000}
+        )
+        self.assertIn("power_request_id", first)
+        await self.controller.async_power(first)
+        second = await self.controller.async_prepare(
+            {"button": "power", "received_ms": (stamp + 0.3) * 1000}
+        )
+        self.assertIn("blocked", second)
+        self.assertEqual(len(self.device_calls()), 1)
+        self.assertEqual(len(self.rejection_calls()), 1)
+
+    async def test_press_rejected_while_busy_stays_rejected_after_confirmation(
+        self,
+    ) -> None:
+        backend = SimpleNamespace(
+            endpoints={"display": SimpleNamespace(read=lambda: False)},
+            intent_revision="tv:1",
+            last_intent=True,
+            target=True,
+        )
+        self.runtime.tv_power_pair = backend
+        self.controller.mode.select("tv")
+        stamp = self.controller.mode.clock()
+        self.controller.physical_press("up", stamp)
+        backend.target = None
+        self.hass.states.set(controller_module.TV, "on")
+        route = await self.controller.async_prepare(
+            {"button": "up", "received_ms": stamp * 1000}
+        )
+        self.assertEqual(route["blocked"], "tv_power_transition")
+        self.assertEqual(self.device_calls(), [])
+        self.assertEqual(len(self.rejection_calls()), 1)
+
+    async def test_explicit_source_may_start_idle_tv_but_power_waits_for_both_pairs(
+        self,
+    ) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+        self.runtime.note_projector_off_requested()
+        original = self.hass.services.async_call
+
+        async def delayed(domain, service, data, **kwargs: Any) -> Any:
+            await original(domain, service, data, **kwargs)
+            if domain == "media_player":
+                entered.set()
+                await release.wait()
+
+        self.hass.services.async_call = delayed
+        explicit = asyncio.create_task(
+            self.controller.async_dispatch(
+                {
+                    "pair": "tv",
+                    "domain": "media_player",
+                    "service": "turn_on",
+                    "service_data": {"entity_id": controller_module.TV},
+                }
+            )
+        )
+        await entered.wait()
+        self.runtime.projector_shutting_down = False
+        self.runtime.projector_power_state = False
+        try:
+            result = await asyncio.wait_for(
+                self.controller.async_power({"pair": "projector"}), 0.1
+            )
+            self.assertFalse(result["sent"])
+            self.assertEqual(len(self.device_calls()), 1)
+        finally:
+            release.set()
+            await explicit
+
+    async def test_projector_off_and_native_text_off_are_rejected_without_waking(
+        self,
+    ) -> None:
+        self.runtime.projector_power_state = False
+        for data in (
+            {
+                "pair": "projector",
+                "domain": "kodi",
+                "service": "call_method",
+                "service_data": {
+                    "entity_id": "media_player.home",
+                    "method": "Input.Left",
+                },
+            },
+            {
+                "pair": "tv",
+                "domain": "androidtv_remote",
+                "service": "send_text",
+                "service_data": {
+                    "entity_id": "remote.televizor",
+                    "operation": "insert",
+                    "text": "a",
+                },
+            },
+        ):
+            result = await self.controller.async_dispatch(data)
+            self.assertFalse(result["sent"])
+        self.assertEqual(self.device_calls(), [])
+        self.assertEqual(len(self.rejection_calls()), 2)
+
+    async def test_denied_compatibility_power_cannot_reserve_the_button(self) -> None:
+        async def denied(_entity) -> None:
+            message = "not allowed"
+            raise errors.Unauthorized(message)
+
+        original = self.controller._async_check_control
+        self.controller._async_check_control = denied
+        with self.assertRaises(errors.Unauthorized):
+            await self.controller.async_prepare({"button": "power"})
+        self.controller._async_check_control = original
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}), {"sent": True}
+        )
+
+    async def test_accepted_projector_on_retains_final_native_shutdown_guard(
+        self,
+    ) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+        writes = []
+        original = self.hass.services.async_call
+
+        async def queued(domain, service, data, **kwargs: Any) -> Any:
+            if domain == "media_player":
+                entered.set()
+                await release.wait()
+                if (
+                    runtime.UNIVERSAL_PROJECTOR_COMMAND.get()
+                    and self.runtime.projector_shutting_down
+                ):
+                    message = "Projector is shutting down; remote command was discarded"
+                    raise errors.HomeAssistantError(message)
+                writes.append(service)
+            return await original(domain, service, data, **kwargs)
+
+        self.runtime.projector_power_state = False
+        self.hass.services.async_call = queued
+        first = asyncio.create_task(
+            self.controller.async_dispatch(
+                {
+                    "pair": "projector",
+                    "domain": "media_player",
+                    "service": "turn_on",
+                    "service_data": {"entity_id": controller_module.PROJECTOR},
+                }
+            )
+        )
+        await entered.wait()
+        self.runtime.projector_shutting_down = True
+        self.controller.refresh()
+        release.set()
+        with self.assertRaisesRegex(errors.HomeAssistantError, "discarded"):
+            await first
+        self.assertEqual(writes, [])
+        self.assertEqual(self.controller._power_operations, {})
+
+    async def test_cancelled_before_owned_service_starts_releases_admission(
+        self,
+    ) -> None:
+        # HA shutdown may cancel a created task before its first event-loop turn.
+        def cancel_before_start(coroutine) -> asyncio.Task[Any]:
+            task = asyncio.create_task(coroutine)
+            task.cancel()
+            return task
+
+        self.hass.async_create_task = cancel_before_start
+        with self.assertRaises(asyncio.CancelledError):
+            await self.controller.async_power({"pair": "tv"})
+        self.assertEqual(self.device_calls(), [])
+        self.assertEqual(self.controller._power_operations, {})
+
+    async def test_audio_bluetooth_key_stays_available_during_tv_startup(self) -> None:
+        self.runtime.tv_power_pair = SimpleNamespace(
+            endpoints={"display": SimpleNamespace(read=lambda: False)},
+            intent_revision="tv:1",
+            last_intent=True,
+            target=True,
+        )
+        self.hass.states.set("input_boolean.audio_mode", "on")
+        route = await self.controller.async_prepare({"button": "apple_tv"})
+        self.assertNotIn("blocked", route)
+        self.assertEqual(self.rejection_calls(), [])
+
+    async def test_unpaired_speaker_command_does_not_depend_on_display_power(
+        self,
+    ) -> None:
+        result = await self.controller.async_dispatch(
+            {
+                "domain": "media_player",
+                "service": "volume_up",
+                "service_data": {"entity_id": "media_player.living_room_speaker"},
+            }
+        )
+        self.assertEqual(result, {"sent": True})
+        self.assertEqual(
+            self.device_calls()[0][2]["entity_id"], "media_player.living_room_speaker"
+        )
+
+    async def test_unknown_display_rejects_navigation_without_inventing_off(
+        self,
+    ) -> None:
+        self.hass.states.set(controller_module.TV, "unavailable")
+        result = await self.controller.async_dispatch(
+            {
+                "pair": "tv",
+                "domain": "remote",
+                "service": "send_command",
+                "service_data": {
+                    "entity_id": "remote.televizor",
+                    "command": "KEYCODE_BACK",
+                },
+            }
+        )
+        self.assertEqual(result, {"sent": False, "blocked": "tv_power_unknown"})
+        self.assertEqual(self.device_calls(), [])
+
+    async def test_timed_out_projector_releases_global_power_but_retains_shutdown_safety(
+        self,
+    ) -> None:
+        entered = asyncio.Event()
+        original = self.hass.services.async_call
+
+        async def delayed(domain, service, data, **kwargs: Any) -> Any:
+            if (
+                domain == "media_player"
+                and data.get("entity_id") == controller_module.PROJECTOR
+            ):
+                entered.set()
+                await asyncio.Event().wait()
+            return await original(domain, service, data, **kwargs)
+
+        self.hass.services.async_call = delayed
+        with patch.object(controller_module, "_POWER_OPERATION_TIMEOUT", 0.02):
+            first = asyncio.create_task(
+                self.controller.async_power({"pair": "projector"})
+            )
+            await entered.wait()
+            result = await self.controller.async_power({"pair": "tv"})
+            self.assertFalse(result["sent"])
+            with self.assertRaisesRegex(errors.HomeAssistantError, "timed out"):
+                await first
+        self.assertTrue(self.runtime.projector_shutting_down)
+        self.assertFalse(
+            (await self.controller.async_power({"pair": "projector"}))["sent"]
+        )
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}), {"sent": True}
+        )
+
+    async def test_explicit_projector_off_owns_its_confirmation_during_later_refresh(
+        self,
+    ) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.hass.services.async_call
+
+        async def delayed(domain, service, data, **kwargs: Any) -> Any:
+            await original(domain, service, data, **kwargs)
+            if domain == "media_player":
+                self.runtime.note_projector_off_requested()
+                entered.set()
+                await release.wait()
+
+        self.hass.services.async_call = delayed
+        first = asyncio.create_task(
+            self.controller.async_dispatch(
+                {
+                    "pair": "projector",
+                    "domain": "media_player",
+                    "service": "turn_off",
+                    "service_data": {"entity_id": controller_module.PROJECTOR},
+                }
+            )
+        )
+        await entered.wait()
+        self.controller.refresh()
+        release.set()
+        self.assertEqual(await first, {"sent": True})
+        self.assertEqual(len(self.rejection_calls()), 0)
 
     async def test_audio_changes_effective_sensor_source_without_mutating_pair(
         self,
@@ -376,7 +774,9 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         release.set()
         result = await task
-        self.assertEqual(writes, [])
+        self.assertEqual(
+            [entry for entry in writes if entry[0] != "remote_announcements"], []
+        )
         self.assertEqual(result, {"sent": False, "blocked": "projector_shutting_down"})
 
     async def test_physical_preparation_is_not_replayed_by_late_yaml(self) -> None:
@@ -431,6 +831,7 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         self.hass.loop = SimpleNamespace(call_later=schedule)
         self.controller.mode.clock = lambda: now[0]
+        self.hass.states.set(controller_module.TV, "on")
         self.controller.mode.select("tv", native=True)
         timer = scheduled[-1][1]
         self.runtime.receiver = SimpleNamespace(

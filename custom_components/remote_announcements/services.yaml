@@ -1,3 +1,18 @@
 prepare:
   name: Prepare announcement cache
   description: Generate missing Bracho clips and prepare configured providers without speaker playback.
+reject:
+  name: Rejected remote command
+  description: Play a short native cue at no more than 1/10 volume, with guarded restoration of the previous level.
+  fields:
+    reason:
+      name: Rejection reason
+      description: Fixed reason for the logical command that was rejected.
+      required: true
+      selector:
+        text:
+    press_id:
+      name: Logical press identity
+      description: Reuse this identity across nested guards to produce one cue per rejected press.
+      selector:
+        text:

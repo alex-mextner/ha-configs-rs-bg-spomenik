@@ -37,7 +37,7 @@ The adapter uses one discrete Samsung32 ON (`E0E09966`) or OFF (`E0E019E6`) fram
 
 A passive GET of the selected host's `/api/v2/` endpoint on port 8001 runs every five seconds with a two-second timeout. A 200 response whose `device.modelName` matches the saved native model reports on. Three consecutive endpoint timeouts/refusals/host-unreachable observations report off; a single missed response retains the previous observation. A timeout after HTTP connected is ambiguous, not off. Unexpected status, malformed data, another model, DNS failure, or another ambiguous error reports unknown. This measures network reachability, not the physical panel: a LAN failure can resemble standby. It never opens a control WebSocket. The native integration's slower power status cannot override this observation.
 
-Power requests share a pending task until feedback or a 75-second deadline. Repeated same-direction ON/OFF requests coalesce. An opposite request cancels the earlier confirmation wait and sends the new discrete frame, even when current feedback already matches that new target: the observation may predate the earlier frame. Power-button clicks reverse a pending target; otherwise a paired TV/Chromecast turns off when either member is known on. Known target states are otherwise idempotent; verified discrete ON/OFF can also be requested from unknown state. Commands never optimistically change the displayed state. Failure to observe the requested state raises a clear error without another transmission. Caller cancellation keeps the pending guard; removing the entity cancels the transition, and config-entry unload stops the coordinator. Canonical entity renames keep polling active.
+Power requests share a pending task until feedback or a 75-second deadline. Repeated same-direction ON/OFF requests coalesce. An opposite request cancels the earlier confirmation wait and sends the new discrete frame, even when current feedback already matches that new target: the observation may predate the earlier frame. Explicit native adapter toggle calls reverse a pending target; otherwise a paired TV/Chromecast turns off when either member is known on. Known target states are otherwise idempotent; verified discrete ON/OFF can also be requested from unknown state. Commands never optimistically change the displayed state. Failure to observe the requested state raises a clear error without another transmission. Caller cancellation keeps the pending guard; removing the entity cancels the transition, and config-entry unload stops the coordinator. Canonical entity renames keep polling active.
 
 The paired Chromecast's native ON/OFF services use a POWER toggle gated by their last pushed state. After one such command, the pair waits for its requested native observation before sending another player power command, even if newer ON/OFF intents arrive. Only the latest intent continues after that acknowledgement; Samsung's discrete inverse still sends promptly. A stale matching Chromecast observation cannot finish the pair while an earlier opposite command remains unconfirmed. The original native command's confirmation deadline bounds the wait across newer intents. Missing feedback fails the request without automatic retransmission; a later explicit request can retry after that deadline. Unload clears the pending wait without sending power.
 
@@ -135,16 +135,21 @@ update its attributes.
 | Both ON | Chromecast |
 | Unknown power | No OFF inference; Chromecast is the safe default |
 
-Power keeps the pair captured for that physical press. A projector-targeted
-Power command is blocked while its shutdown latch is active and cannot be
-retargeted through fallback to the TV. A fresh Power press uses its newly
-captured target.
+The universal remote reserves each accepted Power press before asynchronous
+dispatch. Any further Power is rejected while either pair starts or stops,
+including after automatic fallback. It does not cancel startup or queue the
+opposite direction. The operation follows actual paired/native confirmation and
+survives caller cancellation; bounded failure clears transient admission.
+The projector's persistent shutdown latch remains separate and continues to block
+projector commands until fresh HDMI OFF, without permanently locking TV Power.
 
-Ordinary TV navigation, volume and transport are dropped with `tv_off` while an
-OFF request is active, or when the display is confirmed OFF and no ON request
-is active. Keys remain available during an accepted startup while network
-feedback lags. Explicit Power, INPUT and app selection retain their wake paths;
-ordinary fallback keys cannot wake the off TV through Chromecast.
+Ordinary navigation, text, volume and transport are rejected while their pair is
+busy, OFF or unknown. A rejection captured while busy cannot be replayed after
+completion. Explicit source/app selection and INPUT can address an idle named
+pair, while lighting, AC and speaker controls remain independent. Recognized
+rejections produce a short quiet error cue; duplicate receiver frames and
+hold-suppressed short presses do not. The remote boundary does not change the
+native adapter's explicit power reconciliation described above.
 
 A single INPUT changes the display group. It retains the existing wake rule:
 when only the other group is ON, selecting an explicitly OFF display requests
