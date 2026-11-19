@@ -20,7 +20,13 @@ from unittest.mock import patch
 import yaml
 from homeassistant import loader
 from homeassistant.config_entries import ConfigEntries
-from homeassistant.core import Context, HomeAssistant, State, SupportsResponse
+from homeassistant.core import (
+    Context,
+    HomeAssistant,
+    ServiceCall,
+    State,
+    SupportsResponse,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -716,6 +722,9 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     any(x[0] == "script.music_remote_command" for x in self.calls)
                 )
                 calls = self.appliance_calls()
+                if pair == "tv" and state == "off":
+                    self.assertEqual(calls, [])
+                    continue
                 self.assertEqual(len(calls), 1)
                 target = self.expected_transport_target(pair, native, button)
                 self.assertEqual(calls[0][1].get("entity_id"), [target])
@@ -892,6 +901,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(pair=pair, native=native):
                 self.reset()
+                self.hass.states.async_set(TV, "on")
                 await self.scripts["remote_nav"].async_run(
                     {"direction": direction, "pair": pair, "native": native},
                     context=Context(),
@@ -1083,6 +1093,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 {"command": "mute", "pair": pair, "native": False}, context=Context()
             )
             self.assertEqual(self.appliance_calls(), [])
+        self.hass.states.async_set(TV, "on")
         await self.scripts["remote_volume"].async_run(
             {"command": "mute", "pair": "tv", "native": True}, context=Context()
         )
@@ -1390,26 +1401,17 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.appliance_calls(), [])
         self.assertEqual(self.controller.mode.target, "chromecast")
 
-    async def test_stale_projector_native_route_resolves_to_chromecast(self) -> None:
-        self.reset(("projector", "off", "on"))
-        self.set_power_pair("off", "on")
-        self.runtime.note_projector_off_requested()
-        await self.scripts["remote_nav"].async_run(
-            {"pair": "projector", "native": True, "direction": "up"}, context=Context()
-        )
-        self.assertEqual(
-            self.appliance_calls(),
-            [
-                (
-                    "remote.send_command",
-                    {
-                        "entity_id": ["remote.televizor"],
-                        "command": "KEYCODE_DPAD_UP",
-                        "delay_secs": 0,
-                    },
-                )
-            ],
-        )
+    async def test_shutdown_fallback_does_not_wake_the_other_display_with_navigation(
+        self,
+    ) -> None:
+        for button in ("back", "up", "ok_hold"):
+            with self.subTest(button=button):
+                self.reset(("projector", "off", "on"))
+                self.set_power_pair("off", "on")
+                self.runtime.note_projector_off_requested()
+                await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(self.controller.mode.target, "chromecast")
 
     async def test_shutdown_between_resolve_and_dispatch_drops_the_actual_command(
         self,
@@ -1574,8 +1576,8 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             "dialogs": {
                 "skill_id": "11111111-1111-1111-1111-111111111111",
                 "sounds": {
-                    clip.key: "22222222-2222-2222-2222-222222222222"
-                    for clip in manager.cache.clips.values()
+                    clip.key: f"22222222-2222-2222-2222-{index:012d}"
+                    for index, clip in enumerate(manager.cache.clips.values())
                 },
             }
         }
@@ -1586,8 +1588,9 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             manager.target_changed,
         )
 
-        async def speak(call) -> None:
-            self.calls.append(("media_player.play_media", dict(call.data)))
+        async def speak(call: ServiceCall) -> dict[str, str]:
+            self.assertTrue(call.return_response)
+            self.calls.append(("yandex_station.send_command", dict(call.data)))
             entity = call.data["entity_id"]
             state = self.hass.states.get(entity)
             attrs = dict(state.attributes)
@@ -1598,8 +1601,14 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(
                 entity, state.state, {**attrs, "alice_state": "IDLE"}
             )
+            return {"status": "SUCCESS"}
 
-        self.hass.services.async_register("media_player", "play_media", speak)
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            speak,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
         return manager, component, unsubscribe
 
     async def test_audio_transitions_only_announce_the_committed_target(self) -> None:
@@ -1620,10 +1629,30 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 speech = [
                     data
                     for name, data in self.calls
-                    if name == "media_player.play_media"
+                    if name == "yandex_station.send_command"
                 ]
                 self.assertEqual(len(speech), 1)
-                self.assertIn("dialogs-upload/", speech[0]["media_content_id"])
+                sound = manager.settings["dialogs"]["sounds"][
+                    manager.cache.get(target).key
+                ]
+                expected_tag = (
+                    '<speaker audio="dialogs-upload/'
+                    f'11111111-1111-1111-1111-111111111111/{sound}.opus">'
+                )
+                self.assertEqual(speech[0]["command"], "serverAction")
+                slots = speech[0]["serverActionEventPayload"]["payload"]["form_update"][
+                    "slots"
+                ]
+                self.assertEqual(
+                    slots,
+                    [
+                        {
+                            "type": "string",
+                            "name": "phrase_to_repeat",
+                            "value": expected_tag,
+                        }
+                    ],
+                )
                 self.assertEqual(manager.status, "ready")
                 self.assertEqual(
                     [

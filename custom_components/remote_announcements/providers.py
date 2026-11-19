@@ -50,6 +50,50 @@ def dialogs_tag(settings: dict[str, Any], key: str) -> str:
     return f'<speaker audio="dialogs-upload/{skill}/{sound}.opus">'
 
 
+def dialogs_command(settings: dict[str, Any], key: str) -> dict[str, Any]:
+    """Use the native repeat-phrase command for one verified cached audio tag."""
+    return {
+        "command": "serverAction",
+        "serverActionEventPayload": {
+            "type": "server_action",
+            "name": "update_form",
+            "payload": {
+                "form_update": {
+                    "name": "personal_assistant.scenarios.quasar.iot.repeat_phrase",
+                    "slots": [
+                        {
+                            "type": "string",
+                            "name": "phrase_to_repeat",
+                            "value": dialogs_tag(settings, key),
+                        }
+                    ],
+                },
+                "resubmit": True,
+            },
+        },
+    }
+
+
+def validate_native_response(response: dict[str, Any] | None) -> None:
+    """Require native SUCCESS without exposing private provider response bodies."""
+    if not isinstance(response, dict):
+        message = "yandex_native_response_invalid"
+    elif "error" in response:
+        error = response["error"]
+        message = (
+            "yandex_native_ack_timeout"
+            if isinstance(error, str) and error.startswith("TimeoutError(")
+            else "yandex_native_command_failed"
+        )
+    elif not isinstance(response.get("status"), str):
+        message = "yandex_native_response_invalid"
+    elif response["status"] != "SUCCESS":
+        message = "yandex_native_response_rejected"
+    else:
+        return
+    raise ProviderNotReadyError(message)
+
+
 async def processed_sound(
     request: Callable[..., Awaitable[dict[str, Any]]], skill: str, sound: dict[str, Any]
 ) -> str:

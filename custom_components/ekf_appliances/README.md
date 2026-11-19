@@ -37,7 +37,9 @@ The adapter uses one discrete Samsung32 ON (`E0E09966`) or OFF (`E0E019E6`) fram
 
 A passive GET of the selected host's `/api/v2/` endpoint on port 8001 runs every five seconds with a two-second timeout. A 200 response whose `device.modelName` matches the saved native model reports on. Three consecutive endpoint timeouts/refusals/host-unreachable observations report off; a single missed response retains the previous observation. A timeout after HTTP connected is ambiguous, not off. Unexpected status, malformed data, another model, DNS failure, or another ambiguous error reports unknown. This measures network reachability, not the physical panel: a LAN failure can resemble standby. It never opens a control WebSocket. The native integration's slower power status cannot override this observation.
 
-Power requests share a pending task until feedback or a 75-second deadline. Repeated on/off and power-button clicks do not resend while that task is pending. An opposite request waits and rechecks feedback. Known target states are idempotent; verified discrete ON/OFF can also be requested from unknown state. Commands never optimistically change the displayed state. Failure to observe the requested state raises a clear error without another transmission. Caller cancellation keeps the pending guard; removing the entity cancels the transition, and config-entry unload stops the coordinator. Canonical entity renames keep polling active.
+Power requests share a pending task until feedback or a 75-second deadline. Repeated same-direction ON/OFF requests coalesce. An opposite request cancels the earlier confirmation wait and sends the new discrete frame, even when current feedback already matches that new target: the observation may predate the earlier frame. Power-button clicks reverse a pending target; otherwise a paired TV/Chromecast turns off when either member is known on. Known target states are otherwise idempotent; verified discrete ON/OFF can also be requested from unknown state. Commands never optimistically change the displayed state. Failure to observe the requested state raises a clear error without another transmission. Caller cancellation keeps the pending guard; removing the entity cancels the transition, and config-entry unload stops the coordinator. Canonical entity renames keep polling active.
+
+The paired Chromecast's native ON/OFF services use a POWER toggle gated by their last pushed state. After one such command, the pair waits for its requested native observation before sending another player power command, even if newer ON/OFF intents arrive. Only the latest intent continues after that acknowledgement; Samsung's discrete inverse still sends promptly. A stale matching Chromecast observation cannot finish the pair while an earlier opposite command remains unconfirmed. The original native command's confirmation deadline bounds the wait across newer intents. Missing feedback fails the request without automatic retransmission; a later explicit request can retry after that deadline. Unload clears the pending wait without sending power.
 
 Source, volume, mute, channel and media requests are forwarded through public HA services to the selected native backend. The supported feature mask is limited to its existing capabilities. Native ON/OFF services are never called. If passive feedback is unknown but the native backend still reports on, its non-power controls remain usable; a known passive off state takes precedence. The adapter does not improve or claim physical verification of native non-power commands.
 
@@ -111,7 +113,7 @@ reload the EKF entry once the config-entry and YAML references are updated.
 
 Power synchronization watches two independent observations for each pair. Samsung uses the matching passive identity endpoint; Chromecast uses Android TV Remote's pushed on/off state. Google Cast's off/idle playback state is never used as hardware power. The projector uses its matching HDMI display and Kodi uses the authenticated host bridge GET /kodi/status, which reports the actual systemd unit/process state. A loaded inactive/failed unit with a valid zero MainPID is OFF only when an independent Kodi process probe also confirms absence. Supervisor failure/result/exit status remain separate diagnostics; a normal SIGTERM shutdown can leave the wrapper at exit 143. Transitional units, inconsistent process evidence, malformed/read failures, stale polls, and network outages remain unknown.
 
-Explicit canonical power requests drive both partners. An observed external transition (TV remote, Chromecast remote, projector remote, Kodi start or quit) drives its partner. Duplicates and echoes share one request. An opposite request takes precedence over delayed confirmation from the previous request, and each physical side is attempted only once per intent. A request finishes only after both states confirm it; failure is exposed through power_sync_error without optimistically changing either entity. Projector shutdown retains the existing fresh HDMI and 30-second stable-on guards before its two POWER frames.
+Explicit canonical power requests drive both partners. An observed external transition (TV remote, Chromecast remote, projector remote, Kodi start or quit) drives its partner. Duplicates and echoes share one request. An opposite request takes precedence over delayed confirmation from the previous request. Commands normally run once per side for an intent. Preemption can require an inverse despite an already-matching observation; bounded late-feedback correction can reassert the current intent without creating another intent revision. A request finishes only after both states confirm it; failure is exposed through power_sync_error without optimistically changing either entity. Projector shutdown retains the existing fresh HDMI and 30-second stable-on guards before its two POWER frames.
 
 On startup, the first complete pair of live observations is reconciled using the physical display; an explicit request during startup takes precedence. Unloading cancels monitoring and emits no power commands. Projector commands require known, fresh HDMI state; Samsung's discrete ON/OFF remains safe to request when its endpoint is unknown. The host Kodi launcher allows 90 seconds for HDMI so an externally started Kodi cannot prematurely select its headless windowing mode during projector boot.
 
@@ -132,6 +134,17 @@ update its attributes.
 | TV ON, projector OFF | Chromecast |
 | Both ON | Chromecast |
 | Unknown power | No OFF inference; Chromecast is the safe default |
+
+Power keeps the pair captured for that physical press. A projector-targeted
+Power command is blocked while its shutdown latch is active and cannot be
+retargeted through fallback to the TV. A fresh Power press uses its newly
+captured target.
+
+Ordinary TV navigation, volume and transport are dropped with `tv_off` while an
+OFF request is active, or when the display is confirmed OFF and no ON request
+is active. Keys remain available during an accepted startup while network
+feedback lags. Explicit Power, INPUT and app selection retain their wake paths;
+ordinary fallback keys cannot wake the off TV through Chromecast.
 
 A single INPUT changes the display group. It retains the existing wake rule:
 when only the other group is ON, selecting an explicitly OFF display requests

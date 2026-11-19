@@ -36,6 +36,13 @@ ignore = [
 # This existing pytest module deliberately imports its sibling bridge directly.
 "docker/chatgpt-web/test_bridge.py" = ["S101", "INP001"]
 
+# The system service and Kodi load these stable entry-point paths directly.
+"scripts/host/ha-host-actions.py" = ["N999"]
+"scripts/host/ha-mdns-publish.py" = ["N999"]
+"scripts/host/kodi/plugin.video.hayoutube/default.py" = ["INP001"]
+# Actual Home Assistant scene cases use pytest-rewritten assertions.
+"tests/evening_scene/test_*.py" = ["S101"]
+
 [lint.isort]
 # The HACS-managed namespace may be absent in a source-only checkout.
 known-first-party = ["custom_components"]

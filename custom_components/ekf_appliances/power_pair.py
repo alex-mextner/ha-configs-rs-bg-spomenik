@@ -26,19 +26,21 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PowerEndpoint:
-    """Read actual power and issue an idempotent request for one endpoint."""
+    """Read actual power and declare whether a request needs native feedback."""
 
     read: Callable[[], bool | None]
     command: Callable[[bool], Awaitable[None]]
     allow_unknown_command: bool = False
+    wait_for_feedback: bool = False
 
 
 @dataclass(frozen=True)
 class PowerPairHooks:
-    """Bind HA state publication, accepted intent and task creation together."""
+    """Bind lifecycle callbacks and opt-in command cancellation policy."""
 
     changed: Callable[[], None] | None = None
     requested: Callable[[bool], None] | None = None
+    preempt_commands: bool = False
     create_task: (
         Callable[[Coroutine[Any, Any, None], str], asyncio.Task[None]] | None
     ) = None
@@ -61,6 +63,7 @@ class PowerPair:
         self.endpoints = {"display": display, "player": player}
         self.timeout = timeout
         bindings = hooks or PowerPairHooks()
+        self.preempt_commands = bindings.preempt_commands
         self.changed = bindings.changed or (lambda: None)
         self.requested = bindings.requested or (lambda _target: None)
         self._create_task = bindings.create_task or (
@@ -77,12 +80,16 @@ class PowerPair:
         # has finished. The existing confirmation timeout bounds that window.
         self._expected: dict[tuple[str, bool], tuple[int, float]] = {}
         self._retry_sides: set[str] = set()
+        # State-gated POWER services must see their prior pushed state before
+        # another command; cancelling the service cannot recall its frame.
+        self._pending_commands: dict[str, tuple[bool, float]] = {}
         self._started = False
         self._baseline_ready = False
         self._generation = 0
         self._deadline = 0.0
         self._future: asyncio.Future[None] | None = None
         self._worker: asyncio.Task[None] | None = None
+        self._command_batch: asyncio.Future | None = None
         self._wake = asyncio.Event()
 
     @property
@@ -134,14 +141,22 @@ class PowerPair:
         previous = self._last[side]
         if value is None:
             return False
+        pending = self._pending_commands.get(side)
+        confirmed = pending is not None and value is pending[0]
+        if confirmed:
+            del self._pending_commands[side]
         self._last[side] = value
-        if previous is None or value == previous:
+        if (previous is None or value == previous) and not confirmed:
             return False
         expected = self._expected.pop((side, value), None)
         # An older requested ON can arrive after a newer OFF was requested.
         # It is confirmation of that old command, not a new human request.
         if expected and expected[1] >= asyncio.get_running_loop().time():
-            if self.last_intent is not None and value != self.last_intent:
+            if value is self.last_intent:
+                # A current acknowledgement satisfies any retry queued by an
+                # older opposite acknowledgement while this command was pending.
+                self._retry_sides.discard(side)
+            elif self.last_intent is not None:
                 if self.target is None:
                     self._sync_to(target=self.last_intent)
                 else:
@@ -173,8 +188,26 @@ class PowerPair:
                 )
             )
         self._generation += 1
-        self._retry_sides.clear()
+        # An opposite frame may already be in flight while feedback still looks
+        # correct. Discrete endpoints can accept the inverse immediately;
+        # state-gated endpoints wait for their prior command at dispatch.
+        now = asyncio.get_running_loop().time()
+        if self.target is None:
+            self._discard_expired_commands(now)
+        self._retry_sides = {
+            side
+            for (side, expected), (_, deadline) in self._expected.items()
+            if expected is not target and deadline >= now
+        }
         self.target = target
+        # Only bindings with cancellation-safe endpoints may interrupt a batch.
+        # Projector OFF must finish its persistent latch and physical sequence.
+        if (
+            self.preempt_commands
+            and self._command_batch is not None
+            and not self._command_batch.done()
+        ):
+            self._command_batch.cancel()
         self.last_error = None
         self._deadline = asyncio.get_running_loop().time() + self.timeout
         self._future = asyncio.get_running_loop().create_future()
@@ -220,10 +253,23 @@ class PowerPair:
                 values = {
                     side: endpoint.read() for side, endpoint in self.endpoints.items()
                 }
-                if all(value is target for value in values.values()):
+                # A native read can precede its state_changed callback. Consume
+                # that acknowledgement before issuing a state-dependent inverse.
+                for side, (pending, _) in tuple(self._pending_commands.items()):
+                    if values[side] is pending:
+                        self._new_transition(side, value=pending)
+                if (
+                    not self._pending_commands
+                    and not self._retry_sides
+                    and all(value is target for value in values.values())
+                ):
                     self._finish(generation)
                     continue
-                remaining = self._deadline - asyncio.get_running_loop().time()
+                deadline = min(
+                    [self._deadline]
+                    + [deadline for _, deadline in self._pending_commands.values()]
+                )
+                remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     self._finish(
                         generation,
@@ -255,29 +301,79 @@ class PowerPair:
                 and not self.endpoints["display"].allow_unknown_command
             ):
                 break
-            if values[side] is target:
+            if side in self._pending_commands:
+                continue
+            if values[side] is target and side not in self._retry_sides:
                 continue
             if (generation, side) in attempted and side not in self._retry_sides:
                 continue
             if values[side] is None and not endpoint.allow_unknown_command:
                 continue
-            attempted.add((generation, side))
-            self._retry_sides.discard(side)
-            self._expected[side, target] = (
-                generation,
-                asyncio.get_running_loop().time() + self.timeout,
+            commands.append(
+                self._async_command(
+                    side, generation, target=target, attempted=attempted
+                )
             )
-            commands.append(endpoint.command(target))
         return commands
+
+    async def _async_command(
+        self,
+        side: str,
+        generation: int,
+        *,
+        target: bool,
+        attempted: set[tuple[int, str]],
+    ) -> None:
+        if not self._started or (
+            self.preempt_commands and generation != self._generation
+        ):
+            return
+        endpoint = self.endpoints[side]
+        value = endpoint.read()
+        if value is None and not endpoint.allow_unknown_command:
+            return
+        attempted.add((generation, side))
+        self._retry_sides.discard(side)
+        deadline = asyncio.get_running_loop().time() + self.timeout
+        if value is not target or self._last[side] is not target:
+            self._expected[side, target] = (generation, deadline)
+        # Register only when this coroutine actually starts. Cancellation before
+        # dispatch creates no phantom expectation or native feedback fence.
+        if endpoint.wait_for_feedback and value is not target:
+            self._pending_commands[side] = (target, deadline)
+        # A forced discrete inverse may still send from a matching observation;
+        # retain older genuine expectations without inventing a new state edge.
+        await endpoint.command(target)
+
+    def _discard_expired_commands(self, now: float) -> None:
+        self._pending_commands = {
+            side: pending
+            for side, pending in self._pending_commands.items()
+            if pending[1] > now
+        }
 
     async def _async_run_commands(
         self, commands: list[Awaitable[None]], generation: int, remaining: float
     ) -> None:
+        self._command_batch = asyncio.gather(*commands, return_exceptions=True)
         try:
             async with asyncio.timeout(remaining):
-                results = await asyncio.gather(*commands, return_exceptions=True)
+                results = await self._command_batch
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if (
+                generation != self._generation
+                and self._started
+                and caller is not None
+                and not caller.cancelling()
+            ):
+                # Keep the one driver alive; only this obsolete batch ended.
+                return
+            raise
         except TimeoutError:
             results = [HomeAssistantError("Power command confirmation timed out")]
+        finally:
+            self._command_batch = None
         if generation != self._generation:
             return
         failures = [result for result in results if isinstance(result, BaseException)]
@@ -296,6 +392,7 @@ class PowerPair:
         if generation != self._generation:
             return
         self.target = None
+        self._discard_expired_commands(asyncio.get_running_loop().time())
         self.last_error = error
         self._retry_sides.clear()
         if self._future is not None and not self._future.done():
@@ -317,3 +414,4 @@ class PowerPair:
         self.target = None
         self._expected.clear()
         self._retry_sides.clear()
+        self._pending_commands.clear()
