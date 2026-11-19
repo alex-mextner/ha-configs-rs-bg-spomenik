@@ -211,6 +211,7 @@ def install_power_pairs(
                 hass, routing.entity_id(CONF_TV_ANDROIDTV_ENTITY_ID)
             ),
             lambda target: android_power(target=target),
+            wait_for_feedback=True,
         ),
         hooks=PowerPairHooks(
             changed=notify(television),

@@ -594,5 +594,253 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, calls)
 
 
+class StateGatedPowerPairTests(unittest.IsolatedAsyncioTestCase):
+    """Exercise native state-gated POWER commands with delayed pushed feedback."""
+
+    async def asyncSetUp(self) -> None:
+        self.states = {"display": False, "player": False}
+        self.physical_player = False
+        self.frames = []
+        self.calls = []
+        self.player_hold = None
+
+        async def display_power(target) -> None:
+            self.calls.append(("display", target))
+            self.states["display"] = target
+            self.pair.observe()
+
+        async def player_power(target) -> None:
+            self.calls.append(("player", target))
+            # The pinned Android integration's ON/OFF services gate POWER on
+            # their last pushed is_on value; they return before the next push.
+            if self.states["player"] is not target:
+                self.physical_player = not self.physical_player
+                self.frames.append(self.physical_player)
+            if self.player_hold is not None:
+                await self.player_hold.wait()
+
+        self.pair = PowerPair(
+            "Native",
+            PowerEndpoint(lambda: self.states["display"], display_power),
+            PowerEndpoint(
+                lambda: self.states["player"],
+                player_power,
+                wait_for_feedback=True,
+            ),
+            timeout=0.3,
+        )
+        self.pair.start()
+        await self.settle()
+
+    async def asyncTearDown(self) -> None:
+        await self.pair.close()
+
+    async def settle(self) -> None:
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    async def push(self, *, value: bool) -> None:
+        self.states["player"] = value
+        self.pair.observe()
+        await self.settle()
+
+    async def _check_triplet(self, *, initial: bool) -> None:
+        self.states.update(display=initial, player=initial)
+        self.physical_player = initial
+        self.pair.start()
+        first = self.pair._request(target=not initial)
+        await self.settle()
+        middle = self.pair._request(target=initial)
+        await self.settle()
+        latest = self.pair._request(target=not initial)
+        revision = self.pair.intent_revision
+        await self.settle()
+        self.assertEqual(self.frames, [not initial])
+        self.assertFalse(latest.done())
+        await self.push(value=not initial)
+        await latest
+        await asyncio.gather(first, middle, return_exceptions=True)
+        self.assertEqual(self.states, dict.fromkeys(self.states, not initial))
+        self.assertEqual(self.pair.intent_revision, revision)
+        self.assertIs(self.pair.last_intent, expr2=not initial)
+
+    async def test_on_off_on_before_native_push_sends_one_power_frame(self) -> None:
+        await self._check_triplet(initial=False)
+
+    async def test_off_on_off_before_native_push_sends_one_power_frame(self) -> None:
+        await self._check_triplet(initial=True)
+
+    async def test_off_preempts_display_but_waits_for_native_on_push(self) -> None:
+        old = self.pair._request(target=True)
+        await self.settle()
+        latest = self.pair._request(target=False)
+        revision = self.pair.intent_revision
+        await self.settle()
+        self.assertIn(("display", False), self.calls)
+        self.assertEqual(self.frames, [True])
+        self.assertFalse(self.states["display"])
+        self.assertFalse(latest.done())
+        await self.push(value=True)
+        self.assertEqual(self.frames, [True, False])
+        self.assertFalse(latest.done())
+        await self.push(value=False)
+        await latest
+        await asyncio.gather(old, return_exceptions=True)
+        self.assertEqual(self.pair.intent_revision, revision)
+        self.assertEqual(self.states, {"display": False, "player": False})
+
+    async def test_native_ack_while_old_service_waits_releases_next_command(
+        self,
+    ) -> None:
+        self.player_hold = asyncio.Event()
+        old = self.pair._request(target=True)
+        await self.settle()
+        await self.push(value=True)
+        latest = self.pair._request(target=False)
+        await self.settle()
+        self.assertEqual(self.frames, [True, False])
+        await self.push(value=False)
+        self.player_hold.set()
+        await latest
+        await asyncio.gather(old, return_exceptions=True)
+        self.assertEqual(self.states, {"display": False, "player": False})
+
+    async def test_read_ahead_native_ack_is_consumed_before_next_command(self) -> None:
+        old = self.pair._request(target=True)
+        await self.settle()
+        self.states["player"] = True
+        latest = self.pair._request(target=False)
+        revision = self.pair.intent_revision
+        await self.settle()
+        self.assertEqual(self.frames, [True, False])
+        self.pair.observe()
+        await self.settle()
+        await self.push(value=False)
+        await latest
+        await asyncio.gather(old, return_exceptions=True)
+        self.assertEqual(self.pair.intent_revision, revision)
+        self.assertFalse(self.pair.last_intent)
+
+    async def test_cancelled_caller_does_not_remove_unconfirmed_native_command(
+        self,
+    ) -> None:
+        caller = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        caller.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        latest = self.pair._request(target=False)
+        await self.settle()
+        self.assertEqual(self.frames, [True])
+        self.assertFalse(latest.done())
+        await self.push(value=True)
+        self.assertEqual(self.frames, [True, False])
+        await self.push(value=False)
+        await latest
+
+    async def test_missing_native_push_times_out_without_retransmit_then_can_retry(
+        self,
+    ) -> None:
+        self.pair.timeout = 0.02
+        old = self.pair._request(target=True)
+        await self.settle()
+        latest = self.pair._request(target=False)
+        with self.assertRaises(HomeAssistantError):
+            await latest
+        await asyncio.gather(old, return_exceptions=True)
+        self.assertEqual(self.frames, [True])
+        self.assertIsNone(self.pair.target)
+        self.assertFalse(self.states["display"])
+        retry = self.pair._request(target=True)
+        await self.settle()
+        self.assertEqual(self.frames, [True, False])
+        # A later explicit attempt is permitted; this fixture has no feedback
+        # for the timed-out frame, so complete from a fresh native observation.
+        self.physical_player = True
+        await self.push(value=True)
+        await retry
+
+    async def test_close_discards_native_wait_without_another_power_frame(self) -> None:
+        self.player_hold = asyncio.Event()
+        old = self.pair._request(target=True)
+        await self.settle()
+        latest = self.pair._request(target=False)
+        await self.settle()
+        await self.pair.close()
+        self.player_hold.set()
+        await self.push(value=True)
+        self.assertEqual(self.frames, [True])
+        self.assertTrue(latest.cancelled())
+        await asyncio.gather(old, return_exceptions=True)
+
+    async def test_cancel_before_dispatch_leaves_no_phantom_feedback(self) -> None:
+        old = self.pair._request(target=True)
+        # The driver creates its command tasks on this turn; they have not run.
+        await asyncio.sleep(0)
+        latest = self.pair._request(target=False)
+        await latest
+        await asyncio.gather(old, return_exceptions=True)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.pair._pending_commands, {})
+        self.assertEqual(self.pair._expected, {})
+        # A real native ON remains a new intent, not an undelivered command echo.
+        await self.push(value=True)
+        self.assertTrue(self.pair.last_intent)
+        self.assertTrue(self.states["display"])
+
+    async def test_cancel_before_inverse_keeps_genuine_unconfirmed_command(
+        self,
+    ) -> None:
+        old = self.pair._request(target=True)
+        await self.settle()
+        genuine = dict(self.pair._expected)
+        pending = dict(self.pair._pending_commands)
+        latest = self.pair._request(target=False)
+        worker = self.pair._worker
+        assert worker is not None
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        self.assertEqual(self.frames, [True])
+        self.assertEqual(self.pair._expected, genuine)
+        self.assertEqual(self.pair._pending_commands, pending)
+        await self.pair.close()
+        self.assertTrue(latest.cancelled())
+        await asyncio.gather(old, return_exceptions=True)
+
+    async def test_cancel_after_native_send_keeps_fence_until_pushed_feedback(
+        self,
+    ) -> None:
+        self.player_hold = asyncio.Event()
+        old = self.pair._request(target=True)
+        await self.settle()
+        latest = self.pair._request(target=False)
+        await self.settle()
+        self.assertIn(("display", False), self.calls)
+        self.assertEqual(self.frames, [True])
+        self.assertFalse(latest.done())
+        await self.push(value=True)
+        self.assertEqual(self.frames, [True, False])
+        await self.push(value=False)
+        self.player_hold.set()
+        await latest
+        await asyncio.gather(old, return_exceptions=True)
+        self.assertFalse(self.pair.last_intent)
+
+    async def test_native_becomes_unknown_before_dispatch_then_recovers(self) -> None:
+        latest = self.pair._request(target=True)
+        revision = self.pair.intent_revision
+        await asyncio.sleep(0)
+        self.states["player"] = None
+        await self.settle()
+        self.assertEqual(self.frames, [])
+        self.assertEqual(self.pair._pending_commands, {})
+        self.assertNotIn(("player", True), self.pair._expected)
+        await self.push(value=False)
+        self.assertEqual(self.frames, [True])
+        await self.push(value=True)
+        await latest
+        self.assertEqual(self.pair.intent_revision, revision)
+
+
 if __name__ == "__main__":
     unittest.main()

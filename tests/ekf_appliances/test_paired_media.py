@@ -146,6 +146,10 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_real_ha_services_start_and_stop_both_pairs(self) -> None:
+        self.assertTrue(self.runtime.tv_power_pair.endpoints["player"].wait_for_feedback)
+        self.assertFalse(self.runtime.tv_power_pair.endpoints["display"].wait_for_feedback)
+        for endpoint in self.runtime.projector_power_pair.endpoints.values():
+            self.assertFalse(endpoint.wait_for_feedback)
         await self.runtime.projector_power_pair.request(target=True)
         self.assertIn(("rest_command", "host_kodi_start", {}), self.calls)
         self.assertIn(("projector", True), self.calls)

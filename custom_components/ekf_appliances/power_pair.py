@@ -26,11 +26,12 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PowerEndpoint:
-    """Read actual power and issue an idempotent request for one endpoint."""
+    """Read actual power and declare whether a request needs native feedback."""
 
     read: Callable[[], bool | None]
     command: Callable[[bool], Awaitable[None]]
     allow_unknown_command: bool = False
+    wait_for_feedback: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,9 @@ class PowerPair:
         # has finished. The existing confirmation timeout bounds that window.
         self._expected: dict[tuple[str, bool], tuple[int, float]] = {}
         self._retry_sides: set[str] = set()
+        # State-gated POWER services must see their prior pushed state before
+        # another command; cancelling the service cannot recall its frame.
+        self._pending_commands: dict[str, tuple[bool, float]] = {}
         self._started = False
         self._baseline_ready = False
         self._generation = 0
@@ -135,8 +139,12 @@ class PowerPair:
         previous = self._last[side]
         if value is None:
             return False
+        pending = self._pending_commands.get(side)
+        confirmed = pending is not None and value is pending[0]
+        if confirmed:
+            del self._pending_commands[side]
         self._last[side] = value
-        if previous is None or value == previous:
+        if (previous is None or value == previous) and not confirmed:
             return False
         expected = self._expected.pop((side, value), None)
         # An older requested ON can arrive after a newer OFF was requested.
@@ -179,8 +187,11 @@ class PowerPair:
             )
         self._generation += 1
         # An opposite frame may already be in flight while feedback still looks
-        # correct. Send the new absolute intent before accepting that snapshot.
+        # correct. Discrete endpoints can accept the inverse immediately;
+        # state-gated endpoints wait for their prior command at dispatch.
         now = asyncio.get_running_loop().time()
+        if self.target is None:
+            self._discard_expired_commands(now)
         self._retry_sides = {
             side
             for (side, expected), (_, deadline) in self._expected.items()
@@ -234,12 +245,23 @@ class PowerPair:
                 values = {
                     side: endpoint.read() for side, endpoint in self.endpoints.items()
                 }
-                if not self._retry_sides and all(
-                    value is target for value in values.values()
+                # A native read can precede its state_changed callback. Consume
+                # that acknowledgement before issuing a state-dependent inverse.
+                for side, (pending, _) in tuple(self._pending_commands.items()):
+                    if values[side] is pending:
+                        self._new_transition(side, value=pending)
+                if (
+                    not self._pending_commands
+                    and not self._retry_sides
+                    and all(value is target for value in values.values())
                 ):
                     self._finish(generation)
                     continue
-                remaining = self._deadline - asyncio.get_running_loop().time()
+                deadline = min(
+                    [self._deadline]
+                    + [deadline for _, deadline in self._pending_commands.values()]
+                )
+                remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     self._finish(
                         generation,
@@ -271,24 +293,54 @@ class PowerPair:
                 and not self.endpoints["display"].allow_unknown_command
             ):
                 break
+            if side in self._pending_commands:
+                continue
             if values[side] is target and side not in self._retry_sides:
                 continue
             if (generation, side) in attempted and side not in self._retry_sides:
                 continue
             if values[side] is None and not endpoint.allow_unknown_command:
                 continue
-            attempted.add((generation, side))
-            self._retry_sides.discard(side)
-            if values[side] is not target or self._last[side] is not target:
-                self._expected[side, target] = (
-                    generation,
-                    asyncio.get_running_loop().time() + self.timeout,
+            commands.append(
+                self._async_command(
+                    side, generation, target=target, attempted=attempted
                 )
-            # A forced inverse still sends, but an already-observed matching
-            # state has no future edge to acknowledge. Keep any older genuine
-            # expectation without creating a marker that could mask native power.
-            commands.append(endpoint.command(target))
+            )
         return commands
+
+    async def _async_command(
+        self,
+        side: str,
+        generation: int,
+        *,
+        target: bool,
+        attempted: set[tuple[int, str]],
+    ) -> None:
+        if generation != self._generation or not self._started:
+            return
+        endpoint = self.endpoints[side]
+        value = endpoint.read()
+        if value is None and not endpoint.allow_unknown_command:
+            return
+        attempted.add((generation, side))
+        self._retry_sides.discard(side)
+        deadline = asyncio.get_running_loop().time() + self.timeout
+        if value is not target or self._last[side] is not target:
+            self._expected[side, target] = (generation, deadline)
+        # Register only when this coroutine actually starts. Cancellation before
+        # dispatch creates no phantom expectation or native feedback fence.
+        if endpoint.wait_for_feedback and value is not target:
+            self._pending_commands[side] = (target, deadline)
+        # A forced discrete inverse may still send from a matching observation;
+        # retain older genuine expectations without inventing a new state edge.
+        await endpoint.command(target)
+
+    def _discard_expired_commands(self, now: float) -> None:
+        self._pending_commands = {
+            side: pending
+            for side, pending in self._pending_commands.items()
+            if pending[1] > now
+        }
 
     async def _async_run_commands(
         self, commands: list[Awaitable[None]], generation: int, remaining: float
@@ -330,6 +382,7 @@ class PowerPair:
         if generation != self._generation:
             return
         self.target = None
+        self._discard_expired_commands(asyncio.get_running_loop().time())
         self.last_error = error
         self._retry_sides.clear()
         if self._future is not None and not self._future.done():
@@ -351,3 +404,4 @@ class PowerPair:
         self.target = None
         self._expected.clear()
         self._retry_sides.clear()
+        self._pending_commands.clear()
