@@ -109,6 +109,88 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.manager.public_status["rejection_drop_reason"])
         self.assertNotIn("private provider response", str(self.manager.public_status))
 
+    async def test_delivery_and_restore_failure_reports_recovery_unconfirmed(
+        self,
+    ) -> None:
+        await self.manager.announce("tv")
+        before = self.spoken_status()
+        original_media = self.fixture.media
+
+        async def reject_native(_call) -> dict[str, str]:
+            return {"status": "ERROR"}
+
+        async def fail_restore(call) -> None:
+            if call.data["volume_level"] == 0.2:
+                message = "restore acknowledgement failed"
+                raise RuntimeError(message)
+            await original_media(call)
+
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            reject_native,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+        self.hass.services.async_register("media_player", "volume_set", fail_restore)
+        with patch.object(rejection, "CUE_SETTLE_SECONDS", 0.001):
+            await self.reject()
+        attrs = self.manager.public_status
+        self.assertEqual(attrs["rejection_status"], "recovery_unconfirmed")
+        self.assertEqual(
+            attrs["rejection_drop_reason"], "yandex_native_response_rejected"
+        )
+        self.assertEqual(attrs["rejection_recovery_reason"], "RuntimeError")
+        self.assertEqual(attrs["rejection_sent"], 0)
+        self.assertEqual(attrs["rejection_dropped"], 1)
+        self.assertEqual(self.spoken_status(), before)
+
+    async def test_failed_delivery_with_pending_service_reports_recovery_unconfirmed(
+        self,
+    ) -> None:
+        release = asyncio.Event()
+
+        async def pending_native(_call) -> dict[str, str]:
+            while not release.is_set():
+                with suppress(asyncio.CancelledError):
+                    await release.wait()
+            return {"status": "SUCCESS"}
+
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            pending_native,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+        try:
+            with (
+                patch.object(rejection, "CUE_BUDGET", 0.6),
+                patch.object(rejection, "CUE_SETTLE_SECONDS", 0.1),
+                patch.object(integration, "RECOVERY_RESERVE", 0.2),
+            ):
+                await self.reject()
+            attrs = self.manager.public_status
+            self.assertEqual(attrs["rejection_status"], "recovery_unconfirmed")
+            self.assertEqual(attrs["rejection_drop_reason"], "ServiceTimeoutError")
+            self.assertIsNone(attrs["rejection_recovery_reason"])
+            self.assertEqual(attrs["rejection_pending_service_count"], 1)
+            self.assertEqual(attrs["rejection_sent"], 0)
+            self.assertEqual(attrs["rejection_dropped"], 1)
+            self.assertTrue(self.manager.services.pending)
+        finally:
+            release.set()
+            await asyncio.wait_for(
+                asyncio.gather(*self.manager.services.pending, return_exceptions=True),
+                0.5,
+            )
+
+    async def test_fresh_cue_rejected_by_shutdown_reports_closed(self) -> None:
+        self.manager.closing = True
+        await self.reject()
+        self.assertEqual(self.manager.public_status["rejection_drop_reason"], "closed")
+        self.assertEqual(self.manager.public_status["rejection_sent"], 0)
+        self.assertEqual(self.manager.public_status["rejection_dropped"], 1)
+        self.assertEqual(self.fixture.calls, [])
+
     async def test_unconfirmed_aisis_cue_restore_keeps_guard_and_speech_status(
         self,
     ) -> None:

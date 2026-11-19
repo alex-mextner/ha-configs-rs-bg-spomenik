@@ -172,7 +172,12 @@ class RejectionQueue:
                 )
                 self.publish("not_delivered", reason=item.reason, drop_reason=reason)
             else:
-                count = "dropped" if result.status == "not_delivered" else "sent"
+                count = (
+                    "dropped"
+                    if result.status == "not_delivered"
+                    or result.details.get("drop_reason")
+                    else "sent"
+                )
                 self.counts[count] += 1
                 self.publish(result.status, reason=item.reason, **result.details)
 
@@ -384,7 +389,9 @@ async def play_rejection(
         raise CueNotReadyError(reason) from error
     details: dict[str, Any] = {}
     try:
-        if manager.closing or time.monotonic() - item.received_at > MAX_AGE:
+        if manager.closing:
+            return CueResult("not_delivered", {"drop_reason": "closed"})
+        if time.monotonic() - item.received_at > MAX_AGE:
             return CueResult("not_delivered", {"drop_reason": "expired"})
         backend, playback = _playback(manager, playback_type)
         unsubscribe = async_track_state_change_event(
@@ -432,6 +439,11 @@ async def play_rejection(
             if isinstance(error, CueNotReadyError)
             else manager.failure_reason(error)
         )
-        return CueResult("not_delivered", {**details, "drop_reason": reason})
+        return CueResult(
+            "recovery_unconfirmed"
+            if details.get("recovery_reason") or manager.services.pending
+            else "not_delivered",
+            {**details, "drop_reason": reason},
+        )
     finally:
         manager.playback_lock.release()

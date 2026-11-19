@@ -18,6 +18,7 @@ package.__path__ = [
     str(Path(__file__).resolve().parents[2] / "custom_components/ekf_appliances")
 ]
 runtime = ModuleType(PREFIX + ".runtime")
+runtime.PROJECTOR_SHUTDOWN_TIMEOUT = 75.0
 runtime.UNIVERSAL_PROJECTOR_COMMAND = ContextVar(
     "test_universal_projector", default=False
 )
@@ -112,6 +113,7 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             entry=SimpleNamespace(data={"tv_kodi_entity_id": "media_player.home"}),
             projector_power_state=True,
             projector_shutting_down=False,
+            shutdown=SimpleNamespace(requested_at=0.0),
             tv_power_pair=None,
             projector_power_pair=None,
             projector_power_entity_id="binary_sensor.projector_hdmi_connected",
@@ -120,6 +122,8 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         def off_requested() -> None:
             if self.runtime.projector_power_state is True:
+                if not self.runtime.projector_shutting_down:
+                    self.runtime.shutdown.requested_at = self.controller.mode.clock()
                 self.runtime.projector_shutting_down = True
                 self.controller.refresh()
 
@@ -473,6 +477,187 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(self.device_calls(), [])
+
+    async def test_downstream_rejections_keep_physical_identity_between_contexts(
+        self,
+    ) -> None:
+        stamp = self.controller.mode.clock()
+        for index, identity in enumerate(("Odroid:held", "Odroid:held", "Odroid:tap")):
+            received = stamp + index / 10
+            self.controller.physical_press("channel_up", received, press_id=identity)
+            token = controller_module._SERVICE_CONTEXT.set(
+                SimpleNamespace(id=f"automation-{index}", user_id=None)
+            )
+            try:
+                route = await self.controller.async_prepare(
+                    {"button": "channel_up", "received_ms": received * 1000}
+                )
+                self.assertNotIn("blocked", route)
+                await self.controller.async_reject("ac_setpoint_limit")
+            finally:
+                controller_module._SERVICE_CONTEXT.reset(token)
+        self.assertEqual(
+            [call[2]["press_id"] for call in self.rejection_calls()],
+            ["Odroid:held", "Odroid:held", "Odroid:tap"],
+        )
+
+    async def test_service_failure_keeps_physical_identity_and_original_error(
+        self,
+    ) -> None:
+        self.hass.states.set(controller_module.TV, "on")
+        self.controller.mode.select("tv")
+        original = self.hass.services.async_call
+
+        async def failed(domain, service, data, **kwargs: Any) -> Any:
+            if domain == "remote":
+                message = "native volume unavailable"
+                raise errors.HomeAssistantError(message)
+            return await original(domain, service, data, **kwargs)
+
+        self.hass.services.async_call = failed
+        stamp = self.controller.mode.clock()
+        for index in range(2):
+            received = stamp + index / 5
+            self.controller.physical_press(
+                "volume_up", received, press_id="Odroid:held-volume"
+            )
+            token = controller_module._SERVICE_CONTEXT.set(
+                SimpleNamespace(id=f"volume-{index}", user_id=None)
+            )
+            try:
+                await self.controller.async_prepare(
+                    {"button": "volume_up", "received_ms": received * 1000}
+                )
+                with self.assertRaisesRegex(
+                    errors.HomeAssistantError, "native volume unavailable"
+                ):
+                    await self.controller.async_dispatch(
+                        {
+                            "pair": "tv",
+                            "domain": "remote",
+                            "service": "send_command",
+                            "service_data": {
+                                "entity_id": "remote.televizor",
+                                "command": "KEYCODE_VOLUME_UP",
+                            },
+                        }
+                    )
+            finally:
+                controller_module._SERVICE_CONTEXT.reset(token)
+        self.assertEqual(
+            [call[2] for call in self.rejection_calls()],
+            [
+                {"reason": "command_failed", "press_id": "Odroid:held-volume"},
+                {"reason": "command_failed", "press_id": "Odroid:held-volume"},
+            ],
+        )
+
+    async def test_disney_capture_rejects_projector_startup_before_fallback(
+        self,
+    ) -> None:
+        self.runtime.projector_power_state = False
+        self.hass.states.set(
+            controller_module.PROJECTOR, "off", {"power_sync_target": True}
+        )
+        self.controller.mode.select("tv")
+        stamp = self.controller.mode.clock()
+        for index, button in enumerate(("disney", "disney_hold")):
+            received = stamp + index / 5
+            self.controller.physical_press(
+                button, received, press_id="Odroid:held-disney"
+            )
+            route = await self.controller.async_prepare(
+                {"button": button, "received_ms": received * 1000}
+            )
+            self.assertEqual(route["blocked"], "projector_power_transition")
+        self.assertEqual(self.device_calls(), [])
+        self.assertEqual(
+            [call[2]["press_id"] for call in self.rejection_calls()],
+            ["Odroid:held-disney", "Odroid:held-disney"],
+        )
+
+    async def test_native_shutdown_window_blocks_fallback_then_expires(
+        self,
+    ) -> None:
+        stamp = self.controller.mode.clock()
+        self.controller.mode.clock = lambda: stamp
+        self.runtime.note_projector_off_requested()
+        self.assertEqual(self.controller.resolve({})["pair"], "tv")
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}),
+            {"sent": False, "blocked": "projector_shutting_down"},
+        )
+        self.assertEqual(self.device_calls(), [])
+        self.controller.physical_press("power", stamp + 0.01)
+        self.controller.mode.clock = lambda: (
+            stamp + runtime.PROJECTOR_SHUTDOWN_TIMEOUT + 0.1
+        )
+        captured = await self.controller.async_prepare(
+            {"button": "power", "received_ms": (stamp + 0.01) * 1000}
+        )
+        self.assertEqual(captured["blocked"], "projector_shutting_down")
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}), {"sent": True}
+        )
+        self.assertTrue(self.runtime.projector_shutting_down)
+        self.assertFalse(
+            (await self.controller.async_power({"pair": "projector"}))["sent"]
+        )
+
+    async def test_tokenless_prepare_neither_reserves_nor_adopts_physical_power(
+        self,
+    ) -> None:
+        self.runtime.projector_power_state = False
+        route = await self.controller.async_prepare({"button": "power"})
+        self.assertNotIn("power_request_id", route)
+        self.assertIsNone(self.controller._pending_power)
+        self.assertEqual(await self.controller.async_power(route), {"sent": True})
+        stamp = self.controller.mode.clock()
+        self.controller.physical_press("power", stamp)
+        pending = self.controller._pending_power
+        blocked = await self.controller.async_prepare({"button": "power"})
+        self.assertEqual(blocked["blocked"], "tv_power_transition")
+        self.assertFalse((await self.controller.async_power({"pair": "tv"}))["sent"])
+        self.assertEqual(self.controller._pending_power, pending)
+        captured = await self.controller.async_prepare(
+            {"button": "power", "received_ms": stamp * 1000}
+        )
+        self.assertEqual(await self.controller.async_power(captured), {"sent": True})
+
+    async def test_context_bridge_is_bounded_and_keeps_explicit_identity(self) -> None:
+        stamp = self.controller.mode.clock()
+        with patch.object(controller_module, "_CAPTURED_ROUTE_LIMIT", 2):
+            for index in range(3):
+                received = stamp + index / 10
+                self.controller.physical_press(
+                    "channel_up", received, press_id=f"Odroid:{index}"
+                )
+                token = controller_module._SERVICE_CONTEXT.set(
+                    SimpleNamespace(id=f"context-{index}", user_id=None)
+                )
+                try:
+                    await self.controller.async_prepare(
+                        {"button": "channel_up", "received_ms": received * 1000}
+                    )
+                finally:
+                    controller_module._SERVICE_CONTEXT.reset(token)
+        self.assertEqual(len(self.controller._context_press_ids), 2)
+        for context_id, explicit in (("context-0", None), ("context-2", "explicit")):
+            token = controller_module._SERVICE_CONTEXT.set(
+                SimpleNamespace(id=context_id, user_id=None)
+            )
+            try:
+                await self.controller.async_reject(
+                    "ac_setpoint_limit", press_id=explicit
+                )
+            finally:
+                controller_module._SERVICE_CONTEXT.reset(token)
+        self.assertEqual(
+            [call[2]["press_id"] for call in self.rejection_calls()],
+            ["context-0", "explicit"],
+        )
+        await self.controller.async_close()
+        self.assertEqual(self.controller._context_press_ids, {})
 
     async def test_single_input_timeout_reports_one_rejection(self) -> None:
         original = self.hass.services.async_call

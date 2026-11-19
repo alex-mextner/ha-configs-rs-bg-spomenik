@@ -1280,16 +1280,20 @@ automation:
     action:
       - variables:
           ev: "{{ trigger.to_state.attributes.event_type }}"
+      - action: script.remote_modes_prepare
+        data:
+          button: "{{ ev }}"
+          received_ms: >-
+            {{ trigger.to_state.attributes.last_received | float * 1000 }}
+        response_variable: route
+      - if: "{{ route.blocked | default('') != '' }}"
+        then:
+          - stop: Projector command was rejected when received
       - choose:
           - conditions: "{{ ev == 'disney_hold' }}"
             sequence:
               - action: script.source_to_pc
                 response_variable: source_result
-              - if: "{{ source_result.sent | default(false) is not sameas true }}"
-                then:
-                  - stop: Projector source request was rejected
-              - delay: "00:00:02"
-              - action: script.kodi_play_next_episode
           - conditions: "{{ ev == 'disney' }}"
             sequence:
               # Wait 300ms for a possible disney_hold. If it arrives we abort.
@@ -1304,6 +1308,19 @@ automation:
                 then:
                   - stop: "hold detected, disney short suppressed"
               - action: script.source_to_pc
+                response_variable: source_result
+      - if: "{{ source_result.sent | default(false) is not sameas true }}"
+        then:
+          - if: "{{ source_result.blocked | default('') == '' }}"
+            then:
+              - action: ekf_appliances.remote_reject
+                data:
+                  reason: projector_source_rejected
+          - stop: Projector source request was rejected
+      - if: "{{ ev == 'disney_hold' }}"
+        then:
+          - delay: "00:00:02"
+          - action: script.kodi_play_next_episode
 
   # ===== Yandex voice search → TV =====
   # Triggered by "Алиса, спроси Умный дом найди в телеке <фраза>".

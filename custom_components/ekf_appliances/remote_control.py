@@ -27,7 +27,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import DOMAIN
 from .remote_mode import PowerObservations, RemoteMode
-from .runtime import UNIVERSAL_PROJECTOR_COMMAND
+from .runtime import PROJECTOR_SHUTDOWN_TIMEOUT, UNIVERSAL_PROJECTOR_COMMAND
 
 _LOGGER = logging.getLogger(__name__)
 TV = "media_player.ue48j5500_ue48j5500"
@@ -98,6 +98,8 @@ class RemoteController:
         self._projector_dispatches = set()
         self._captured_routes = {}
         self._captured_press_ids: dict[tuple[str, float], str] = {}
+        self._context_press_ids: dict[str, str] = {}
+        self._settled_projector_shutdown_at: float | None = None
         self._pending_power: tuple[str, str, float] | None = None
         self._power_operations: dict[str, object] = {}
         self._mirror_lock = asyncio.Lock()
@@ -376,13 +378,21 @@ class RemoteController:
                     PROJECTOR if captured["pair"] == "projector" else TV
                 )
                 self.refresh()
-            route = self._prepare_press(data["button"], route=captured)
+            route = self._prepare_press(
+                data["button"], route=captured, reserve_power=False
+            )
         else:
             # A replay, an evicted event or a caller-supplied timestamp must
             # never become another physical press or backdate a lease.
-            route = self._captured_routes.get(
-                self._capture_key(data["button"], received)
-            )
+            key = self._capture_key(data["button"], received)
+            route = self._captured_routes.get(key)
+            context_id = getattr(_SERVICE_CONTEXT.get(), "id", None)
+            identity = self._captured_press_ids.get(key)
+            if route is not None and context_id is not None and identity is not None:
+                # HA keeps this automation Context through nested named scripts.
+                self._context_press_ids[context_id] = identity
+                if len(self._context_press_ids) > _CAPTURED_ROUTE_LIMIT:
+                    del self._context_press_ids[next(iter(self._context_press_ids))]
             if route is None:
                 route = self.resolve({})
                 if data["button"] == "power":
@@ -418,7 +428,23 @@ class RemoteController:
         return None
 
     def _power_transition(self) -> str | None:
-        return self._active_transition("projector") or self._active_transition("tv")
+        if reason := self._active_transition("projector") or self._active_transition(
+            "tv"
+        ):
+            return reason
+        requested_at = getattr(
+            getattr(self.runtime, "shutdown", None), "requested_at", None
+        )
+        if (
+            self.runtime.projector_shutting_down
+            and requested_at is not None
+            and requested_at != self._settled_projector_shutdown_at
+            and 0 <= self.mode.clock() - requested_at < PROJECTOR_SHUTDOWN_TIMEOUT
+        ):
+            # OEM/script-only OFF has no paired target. Its recent window is
+            # transient; an old persistent safety latch still guards only projector.
+            return "projector_shutting_down"
+        return None
 
     def _ordinary_command_blocked(self, pair: str) -> str | None:
         if reason := self._pair_transition(pair):
@@ -433,13 +459,18 @@ class RemoteController:
         return f"{pair}_off" if observed is False else None
 
     def _prepare_press(
-        self, button: str, at: float | None = None, *, route: RemoteRoute | None = None
+        self,
+        button: str,
+        at: float | None = None,
+        *,
+        route: RemoteRoute | None = None,
+        reserve_power: bool = True,
     ) -> RemoteRoute:
         route = self.mode.press(button, at) if route is None else route
         reason = None
         if button == "power":
             reason = self._power_transition() or self._pair_transition(route["pair"])
-            if reason is None:
+            if reason is None and reserve_power:
                 request_id = uuid4().hex
                 self._pending_power = (
                     request_id,
@@ -451,6 +482,8 @@ class RemoteController:
             reason = self._ordinary_command_blocked(route["pair"])
         elif button in {"netflix", "youtube", "apple_tv"} and not self.mode.audio:
             reason = self._pair_transition("tv")
+        elif button in {"disney", "disney_hold"}:
+            reason = self._pair_transition("projector")
         return {**route, "blocked": reason} if reason else route
 
     async def async_reject(
@@ -458,7 +491,8 @@ class RemoteController:
     ) -> dict[str, Any]:
         """Signal one rejected logical command without forwarding its device action."""
         context = _SERVICE_CONTEXT.get()
-        identity = press_id or getattr(context, "id", None)
+        context_id = getattr(context, "id", None)
+        identity = press_id or self._context_press_ids.get(context_id) or context_id
         if self.hass.services.has_service("remote_announcements", "reject"):
             try:
                 await self.hass.services.async_call(
@@ -473,12 +507,26 @@ class RemoteController:
         return {"sent": False, "blocked": reason}
 
     async def _async_owned_power(
-        self, pair: str, action: Coroutine[Any, Any, Any]
+        self,
+        pair: str,
+        action: Coroutine[Any, Any, Any],
+        *,
+        owns_shutdown: bool = False,
     ) -> Any:
         """Reserve synchronously, then retain admission through caller cancellation."""
         owner = object()
         self._power_operations[pair] = owner
         started = False
+
+        def release() -> None:
+            if self._power_operations.get(pair) is owner:
+                del self._power_operations[pair]
+                if owns_shutdown:
+                    # A finished/failed owned OFF must not become a new native
+                    # busy window merely because its persistent latch remains.
+                    self._settled_projector_shutdown_at = getattr(
+                        getattr(self.runtime, "shutdown", None), "requested_at", None
+                    )
 
         async def run() -> Any:
             nonlocal started
@@ -491,16 +539,14 @@ class RemoteController:
                 message = "Remote power confirmation timed out"
                 raise PowerConfirmationTimeoutError(message) from err
             finally:
-                if self._power_operations.get(pair) is owner:
-                    del self._power_operations[pair]
+                release()
 
         def finished(done: asyncio.Task[Any]) -> None:
             self._tasks.discard(done)
             # A shutdown can cancel the task before run() reaches its finally.
             if not started:
                 action.close()
-                if self._power_operations.get(pair) is owner:
-                    del self._power_operations[pair]
+                release()
             if not done.cancelled():
                 done.exception()
 
@@ -580,6 +626,7 @@ class RemoteController:
                 projector_action=pair == "projector" and service != "turn_off",
                 power_lifecycle=True,
             ),
+            owns_shutdown=pair == "projector" and service == "turn_off",
         )
 
     async def async_dispatch(self, data: Mapping[str, Any]) -> dict[str, Any]:
@@ -633,7 +680,11 @@ class RemoteController:
             power_lifecycle=power_action,
         )
         if power_action:
-            return await self._async_owned_power(pair, operation)
+            return await self._async_owned_power(
+                pair,
+                operation,
+                owns_shutdown=pair == "projector" and service == "turn_off",
+            )
         return await operation
 
     async def _async_service(
@@ -681,6 +732,7 @@ class RemoteController:
         self._closed = True
         self._captured_routes.clear()
         self._captured_press_ids.clear()
+        self._context_press_ids.clear()
         self._pending_power = None
         self.mode.close()
         if self._unsubscribe is not None:

@@ -220,8 +220,11 @@ operation's later confirmation failure is a new result, not an old queued cue.
 fields, so a later successful cue does not retain an earlier failure. Cue timing
 uses `rejection_controller_elapsed_ms`, `rejection_controller_budget_seconds`,
 `rejection_controller_deadline_missed`, and `rejection_pending_service_count`.
-Failed cue recovery remains `recovery_unconfirmed` with its safe recovery reason;
-it does not replace the spoken-label readiness or controller diagnostics. Shared
+Failed cue recovery remains `recovery_unconfirmed` with its safe recovery reason,
+including after a delivery failure. That delivery failure retains its
+`rejection_drop_reason` and increments the dropped counter, not the sent counter.
+Shutdown uses the explicit drop reason `closed`. Cue reporting does not replace
+the spoken-label readiness or controller diagnostics. Shared
 recovery ownership and guards still prevent another unsafe attempt.
 
 A queued service response does not prove playback. `completed` means a native

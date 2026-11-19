@@ -114,6 +114,41 @@ class RejectionQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(closed), 1)
         self.assertIsNone(closed[0]["reason"])
 
+    async def test_failed_delivery_with_failed_recovery_counts_only_as_dropped(
+        self,
+    ) -> None:
+        async def failed_delivery(_item) -> Any:
+            return self.feedback.CueResult(
+                "recovery_unconfirmed",
+                {
+                    "drop_reason": "yandex_native_response_rejected",
+                    "recovery_reason": "RuntimeError",
+                },
+            )
+
+        self.queue.play = failed_delivery
+        self.queue.submit("off", "failed-delivery")
+        await self.queue.drain()
+        status, values = self.reports[-1]
+        self.assertEqual(status, "recovery_unconfirmed")
+        self.assertEqual(values["sent"], 0)
+        self.assertEqual(values["dropped"], 1)
+        self.assertEqual(values["drop_reason"], "yandex_native_response_rejected")
+        self.assertEqual(values["recovery_reason"], "RuntimeError")
+
+    async def test_delivered_cue_with_failed_recovery_counts_only_as_sent(self) -> None:
+        async def delivered(_item) -> Any:
+            return self.feedback.CueResult(
+                "recovery_unconfirmed", {"recovery_reason": "RuntimeError"}
+            )
+
+        self.queue.play = delivered
+        self.queue.submit("off", "delivered")
+        await self.queue.drain()
+        self.assertEqual(self.reports[-1][1]["sent"], 1)
+        self.assertEqual(self.reports[-1][1]["dropped"], 0)
+        self.assertIsNone(self.reports[-1][1]["drop_reason"])
+
     async def test_queue_overflow_reports_the_dropped_new_press(self) -> None:
         self.queue.submit("busy", "active")
         await self.started.wait()

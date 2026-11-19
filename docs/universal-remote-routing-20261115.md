@@ -23,7 +23,8 @@ after five seconds if YAML never claims it. Once dispatched, caller cancellation
 does not release the guard; actual paired/native confirmation or its bounded
 failure ends the operation. The service boundary also bounds an unfinished call
 at 150 seconds. Native feedback reconciliation and its late-acknowledgement fences
-remain independent of remote admission.
+remain independent of remote admission. Tokenless compatibility preparation checks
+the route without reserving or adopting a physical Power request.
 
 Ordinary navigation, text, volume and transport keys are rejected for a busy,
 confirmed-off, or unknown display. A rejection captured during a transition stays
@@ -36,9 +37,13 @@ through remote_announcements.reject. Unsupported keys/text operations, unavailab
 mute or climate data, and failed native text responses use the same cue.
 Receiver-provided logical press identities give OK/OK-hold and held navigation or
 volume repeats one cue for the original press. Separate full-frame taps keep their
-own identities, including rapid taps. Receiver echoes and internal timer events
+own identities, including rapid taps. A bounded automation-context bridge carries
+that identity through nested AC and T9 scripts and failed native dispatches.
+Receiver echoes and internal timer events
 remain silent. Voice search uses the same per-pair guard before each key/text
 step and stops at its first rejection; it does not implicitly wake a display.
+Disney checks its captured projector admission before calling the source script.
+A declined or empty source result gets one cue, and dependent episode work stops.
 
 The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded
@@ -58,7 +63,11 @@ handoff, after the IR queue and receiver preparation, and in Kodi keyboard mutat
 queues. Accepted internal shutdown confirmation IR remains permitted. This safety
 latch is distinct from transient global Power admission: a failed projector
 transition releases the TV once its active lifecycle ends, while commands aimed
-at the projector still require fresh HDMI OFF to clear the latch.
+at the projector still require fresh HDMI OFF to clear the latch. An OEM or direct
+script OFF without a pair worker also blocks global Power for the existing
+75-second shutdown window, measured from the recorded request time. An aged
+persistent latch cannot retain that global block. Settling an owned OFF does not
+start another window from its remaining latch.
 
 ## Evidence and validation scope
 
@@ -88,13 +97,17 @@ No test should toggle physical appliances or inject a live remote event.
 ## Deployment and rollback
 
 Review the scoped source diff and exact tested commit. Preserve unrelated staged
-and unstaged production changes. Deploy only the reviewed package and EKF files;
-use the established HA validation/reload workflow with the release coordinator.
+and unstaged production changes. Deploy the reviewed routing package, affected
+EKF files and the four affected remote_announcements integration files, preserving
+the existing announcement core. Use the established HA validation/reload workflow
+with the release coordinator. Load the changed Python and YAML-configured
+announcement service through one validated Home Assistant restart.
 Read back the target sensor, projector shutdown attribute and integration errors.
 Observe a fractional lease expiration without sending a key. Physical INPUT and
 shutdown acceptance require separately coordinated user operation.
 
 Rollback restores only the preceding reviewed versions of the changed routing
-package and EKF files, followed by the established validated reload. Never edit
+package, EKF and remote_announcements files, followed by the established validated
+restart. Never edit
 the persisted shutdown Store or runtime databases to make rollback appear
 successful. Keep the reviewed commit and validation report as the audit record.
