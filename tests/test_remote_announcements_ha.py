@@ -216,7 +216,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.announce("tv")
         self.assertEqual(
             self.calls[0],
-            ("volume_set", {"entity_id": self.entity, "volume_level": 0.5}),
+            (
+                "volume_set",
+                {
+                    "entity_id": self.entity,
+                    "volume_level": self.manager.config["volume_floor"],
+                },
+            ),
         )
         self.assertEqual(self.calls[-1][0], "volume_mute")
         state = self.hass.states.get(self.entity)
@@ -229,7 +235,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.entity, state.state, {**state.attributes, "volume_level": 0.0}
         )
         await self.manager.announce("tv")
-        self.assertEqual(self.calls[0][1]["volume_level"], 0.5)
+        self.assertEqual(
+            self.calls[0][1]["volume_level"], self.manager.config["volume_floor"]
+        )
         self.assertEqual(self.calls[-1][1]["volume_level"], 0.0)
 
     async def test_manual_volume_change_wins(self) -> None:
