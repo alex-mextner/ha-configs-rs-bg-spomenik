@@ -754,7 +754,95 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.manager.config["volume_floor"],
         )
         self.assertEqual(self.manager.status, "recovery_unconfirmed")
+        self.assertEqual(
+            self.manager.public_status["reason"], "aisis_volume_recovery_unconfirmed"
+        )
+        self.assertEqual(self.manager.public_status["pending_service_count"], 0)
         self.assertLess(self.manager.public_status["controller_elapsed_ms"], 800)
+        calls_after_restore = self.calls.copy()
+        for attributes in ({}, {"media_position": 17}):
+            with self.subTest(attributes=attributes):
+                state = self.hass.states.get(entity)
+                self.hass.states.async_set(
+                    entity, state.state, {**state.attributes, **attributes}
+                )
+                with self.assertRaisesRegex(
+                    ProviderNotReadyError, "^aisis_volume_recovery_pending$"
+                ):
+                    await self.manager.announce("tv")
+                self.assertEqual(self.calls, calls_after_restore)
+                self.assertEqual(self.aisis_native_levels, [4, 0])
+
+        state = self.hass.states.get(entity)
+        self.hass.states.async_set(
+            entity, state.state, {**state.attributes, "volume_level": 0.0}
+        )
+        self.aisis_restore_ack_only = False
+        await self.manager.announce("tv")
+        self.assertEqual(self.aisis_native_levels, [4, 0, 4, 0])
+        self.assertEqual(
+            [name for name, _ in self.calls],
+            ["volume_set", "speak", "volume_set"] * 2,
+        )
+        self.assertEqual(self.hass.states.get(entity).attributes["volume_level"], 0.0)
+
+    async def test_aisis_human_volume_after_unconfirmed_restore_is_preserved(
+        self,
+    ) -> None:
+        entity = self.prepare_aisis_native_volume(0.0)
+        self.aisis_restore_ack_only = True
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.4),
+            patch.object(integration, "RECOVERY_RESERVE", 0.2),
+        ):
+            await asyncio.wait_for(self.manager.announce("tv"), 0.8)
+        state = self.hass.states.get(entity)
+        self.hass.states.async_set(
+            entity, state.state, {**state.attributes, "volume_level": 0.8}
+        )
+        await self.manager.announce("tv")
+        self.assertEqual(self.aisis_native_levels, [4, 0])
+        self.assertEqual(
+            [name for name, _ in self.calls],
+            ["volume_set", "speak", "volume_set", "speak"],
+        )
+        self.assertEqual(self.hass.states.get(entity).attributes["volume_level"], 0.8)
+
+    async def test_aisis_human_mute_after_unconfirmed_restore_is_preserved(
+        self,
+    ) -> None:
+        entity = self.prepare_aisis_native_volume(0.0)
+        self.aisis_restore_ack_only = True
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.4),
+            patch.object(integration, "RECOVERY_RESERVE", 0.2),
+        ):
+            await asyncio.wait_for(self.manager.announce("tv"), 0.8)
+        state = self.hass.states.get(entity)
+        self.hass.states.async_set(
+            entity, state.state, {**state.attributes, "is_volume_muted": True}
+        )
+        calls_after_restore = self.calls.copy()
+        with self.assertRaisesRegex(
+            ProviderNotReadyError, "^aisis_cannot_restore_muted_or_invalid_volume$"
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(self.calls, calls_after_restore)
+        self.assertEqual(self.aisis_native_levels, [4, 0])
+        self.assertIs(
+            self.hass.states.get(entity).attributes["is_volume_muted"], expr2=True
+        )
+
+        state = self.hass.states.get(entity)
+        self.hass.states.async_set(
+            entity, state.state, {**state.attributes, "is_volume_muted": False}
+        )
+        await self.manager.announce("tv")
+        self.assertEqual(self.aisis_native_levels, [4, 0])
+        self.assertEqual(
+            [name for name, _ in self.calls],
+            ["volume_set", "speak", "volume_set", "speak"],
+        )
 
     async def test_aisis_restore_waits_for_delayed_native_readback(self) -> None:
         entity = self.prepare_aisis_native_volume(0.0)
