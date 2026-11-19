@@ -6,7 +6,7 @@ import asyncio
 import math
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -70,6 +70,14 @@ def native_command() -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class CueResult:
+    """Keep cue delivery and recovery diagnostics in one completed result."""
+
+    status: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class RejectedPress:
     """Retain logical identity and freshness independently of native playback."""
 
@@ -83,7 +91,7 @@ class RejectionQueue:
 
     def __init__(
         self,
-        play: Callable[[RejectedPress], Awaitable[str]],
+        play: Callable[[RejectedPress], Awaitable[CueResult]],
         *,
         report: Callable[[str, dict[str, Any]], None],
         clock: Callable[[], float] = time.monotonic,
@@ -99,7 +107,20 @@ class RejectionQueue:
 
     def publish(self, status: str, **values: Any) -> None:
         """Expose outcomes without treating a service acknowledgement as hearing."""
-        self.report(status, {**self.counts, **values})
+        self.report(
+            status,
+            {
+                "reason": None,
+                "drop_reason": None,
+                "recovery_reason": None,
+                "controller_elapsed_ms": None,
+                "controller_budget_seconds": None,
+                "controller_deadline_missed": None,
+                "pending_service_count": None,
+                **self.counts,
+                **values,
+            },
+        )
 
     def submit(self, reason: str, press_id: str | None = None) -> dict[str, str]:
         """Accept once per logical press without canceling an active cue."""
@@ -141,7 +162,7 @@ class RejectionQueue:
                 self.publish("dropped", reason=item.reason, drop_reason="expired")
                 continue
             try:
-                status = await self.play(item)
+                result = await self.play(item)
             except Exception as error:  # noqa: BLE001 - Keep following presses after native failures.
                 self.counts["dropped"] += 1
                 reason = (
@@ -151,8 +172,9 @@ class RejectionQueue:
                 )
                 self.publish("not_delivered", reason=item.reason, drop_reason=reason)
             else:
-                self.counts["sent"] += 1
-                self.publish(status, reason=item.reason)
+                count = "dropped" if result.status == "not_delivered" else "sent"
+                self.counts[count] += 1
+                self.publish(result.status, reason=item.reason, **result.details)
 
     async def drain(self) -> None:
         """Join the owned worker after pending work or shutdown has settled."""
@@ -345,7 +367,7 @@ async def _send_native(manager: Manager, backend: str, playback: SpeechPlayback)
 
 async def play_rejection(
     manager: Manager, item: RejectedPress, playback_type: type[SpeechPlayback]
-) -> str:
+) -> CueResult:
     """Use native speaker feedback with bounded lower/readback/guarded restore."""
     from homeassistant.helpers.event import (  # noqa: PLC0415
         async_track_state_change_event,
@@ -360,10 +382,10 @@ async def play_rejection(
     except TimeoutError as error:
         reason = "expired"
         raise CueNotReadyError(reason) from error
+    details: dict[str, Any] = {}
     try:
         if manager.closing or time.monotonic() - item.received_at > MAX_AGE:
-            reason = "expired"
-            raise CueNotReadyError(reason)
+            return CueResult("not_delivered", {"drop_reason": "expired"})
         backend, playback = _playback(manager, playback_type)
         unsubscribe = async_track_state_change_event(
             manager.hass, [playback.entity], playback.observe
@@ -387,7 +409,29 @@ async def play_rejection(
             status = await _send_native(manager, backend, playback)
         finally:
             unsubscribe()
-            await manager.restore_playback(playback)
-        return "recovery_unconfirmed" if playback.recovery_failed else status
+            details = await manager.restore_playback(playback, report_status=False)
+        return CueResult(
+            "recovery_unconfirmed"
+            if playback.recovery_failed or manager.services.pending
+            else status,
+            details,
+        )
+    except asyncio.CancelledError:
+        # Cancellation still owns recovery; expose its outcome before propagating.
+        manager.rejections.publish(
+            "recovery_unconfirmed"
+            if details.get("recovery_reason") or details.get("pending_service_count")
+            else "cancelled",
+            reason=item.reason,
+            **details,
+        )
+        raise
+    except Exception as error:  # noqa: BLE001 - Preserve cue recovery details with delivery failure.
+        reason = (
+            str(error)
+            if isinstance(error, CueNotReadyError)
+            else manager.failure_reason(error)
+        )
+        return CueResult("not_delivered", {**details, "drop_reason": reason})
     finally:
         manager.playback_lock.release()

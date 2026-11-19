@@ -67,6 +67,10 @@ _MEDIA_BUTTONS = {
 _WAKE_SERVICES = {"turn_on", "turn_off", "toggle", "select_source", "play_media"}
 
 
+class PowerConfirmationTimeoutError(HomeAssistantError):
+    """A bounded owned operation timed out and already emitted its rejection."""
+
+
 def _with_service_context(
     handler: Callable[[ServiceCall], Awaitable[ServiceResponse]],
 ) -> Callable[[ServiceCall], Awaitable[ServiceResponse]]:
@@ -93,6 +97,7 @@ class RemoteController:
         self._tasks = set()
         self._projector_dispatches = set()
         self._captured_routes = {}
+        self._captured_press_ids: dict[tuple[str, float], str] = {}
         self._pending_power: tuple[str, str, float] | None = None
         self._power_operations: dict[str, object] = {}
         self._mirror_lock = asyncio.Lock()
@@ -321,7 +326,8 @@ class RemoteController:
                     ),
                 )
             except HomeAssistantError as err:
-                await self.async_reject("wake_rejected")
+                if not isinstance(err, PowerConfirmationTimeoutError):
+                    await self.async_reject("wake_rejected")
                 _LOGGER.warning("Remote single INPUT wake was not accepted: %s", err)
             finally:
                 self.refresh()
@@ -332,7 +338,9 @@ class RemoteController:
     def _capture_key(button: str, received_ms: float) -> tuple[str, float]:
         return button, round(received_ms, 3)
 
-    def physical_press(self, name: str, received_at: float) -> None:
+    def physical_press(
+        self, name: str, received_at: float, *, press_id: str | None = None
+    ) -> None:
         """Commit trusted receiver timing before asynchronous YAML dispatch."""
         # A service may drain an already-ready receiver frame. That physical
         # action belongs to the receiver, not to the unrelated service caller.
@@ -348,8 +356,11 @@ class RemoteController:
                 return
             self.refresh(physical_at=received_at)
             self._captured_routes[key] = self._prepare_press(button, received_at)
+            self._captured_press_ids[key] = press_id or f"{key[0]}:{key[1]:.3f}"
             if len(self._captured_routes) > _CAPTURED_ROUTE_LIMIT:
-                del self._captured_routes[next(iter(self._captured_routes))]
+                expired = next(iter(self._captured_routes))
+                del self._captured_routes[expired]
+                self._captured_press_ids.pop(expired, None)
         finally:
             _SERVICE_CONTEXT.reset(token)
 
@@ -377,9 +388,10 @@ class RemoteController:
                 if data["button"] == "power":
                     route = {**route, "blocked": "expired_power_press"}
         if reason := route.get("blocked"):
-            press_id = (
-                f"{data['button']}:{received:.3f}" if received is not None else None
-            )
+            press_id = None
+            if received is not None:
+                key = self._capture_key(data["button"], received)
+                press_id = self._captured_press_ids.get(key, f"{key[0]}:{key[1]:.3f}")
             await self.async_reject(reason, press_id=press_id)
         await self.async_mirror()
         return route
@@ -477,7 +489,7 @@ class RemoteController:
             except TimeoutError as err:
                 await self.async_reject("power_confirmation_timeout")
                 message = "Remote power confirmation timed out"
-                raise HomeAssistantError(message) from err
+                raise PowerConfirmationTimeoutError(message) from err
             finally:
                 if self._power_operations.get(pair) is owner:
                     del self._power_operations[pair]
@@ -651,6 +663,9 @@ class RemoteController:
             )
         except asyncio.CancelledError:
             if cancellable_dispatch and self.runtime.projector_shutting_down:
+                # The hardware action has been discarded. A later refresh must
+                # not cancel its single rejection or the structured response.
+                self._projector_dispatches.discard(task)
                 return await self.async_reject("projector_shutting_down")
             raise
         except HomeAssistantError:
@@ -665,6 +680,7 @@ class RemoteController:
         """Cancel controller observers, deadlines and queued dispatch tasks."""
         self._closed = True
         self._captured_routes.clear()
+        self._captured_press_ids.clear()
         self._pending_power = None
         self.mode.close()
         if self._unsubscribe is not None:

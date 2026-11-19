@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from homeassistant.core import SupportsResponse
 
+from custom_components import remote_announcements as integration
 from custom_components.remote_announcements import rejection
 
 
@@ -41,6 +42,121 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def reject(self, press_id="press:1") -> None:
         self.manager.rejections.submit("device_off", press_id)
         await self.manager.rejections.drain()
+
+    def spoken_status(self) -> tuple[str, dict[str, Any]]:
+        """Snapshot speech diagnostics independently of rejection feedback."""
+        return self.manager.status, {
+            key: value
+            for key, value in self.manager.public_status.items()
+            if not key.startswith("rejection_")
+        }
+
+    async def test_cue_preserves_spoken_status_and_controller_diagnostics(self) -> None:
+        await self.manager.announce("tv")
+        before = self.spoken_status()
+        await self.reject()
+        self.assertEqual(self.spoken_status(), before)
+        self.assertEqual(
+            self.manager.public_status["rejection_controller_budget_seconds"], 3.0
+        )
+        self.assertGreaterEqual(
+            self.manager.public_status["rejection_controller_elapsed_ms"], 0
+        )
+        self.assertIsNone(self.manager.public_status["rejection_drop_reason"])
+        self.assertIsNone(self.manager.public_status["rejection_recovery_reason"])
+
+    async def test_provider_guards_preserve_fixed_rejection_reasons(self) -> None:
+        self.hass.states.async_set(self.entity, "unavailable")
+        await self.reject("missing-speaker")
+        self.assertEqual(
+            self.manager.public_status["rejection_drop_reason"],
+            "selected_yandex_speaker_unavailable",
+        )
+        entity = self.config["aisis_entity"]
+        self.hass.states.async_set(self.config["backend_entity"], "AISIS")
+        self.hass.states.async_set(self.config["aisis_connected_entity"], "on")
+        self.hass.states.async_set(entity, "idle", {"volume_level": 0.1})
+        self.manager.aisis_volume_recovery[entity] = (0.4, 0.1)
+        await self.reject("pending-recovery")
+        self.assertEqual(
+            self.manager.public_status["rejection_drop_reason"],
+            "aisis_volume_recovery_pending",
+        )
+        self.assertEqual(self.fixture.calls, [])
+
+    async def test_failed_cue_restore_reports_its_own_safe_reason(self) -> None:
+        await self.manager.announce("tv")
+        before = self.spoken_status()
+        original_media = self.fixture.media
+
+        async def fail_restore(call) -> None:
+            if call.data["volume_level"] == 0.2:
+                message = "private provider response must not enter public status"
+                raise RuntimeError(message)
+            await original_media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", fail_restore)
+        await self.reject()
+        self.assertEqual(self.spoken_status(), before)
+        self.assertEqual(
+            self.manager.public_status["rejection_status"], "recovery_unconfirmed"
+        )
+        self.assertEqual(
+            self.manager.public_status["rejection_recovery_reason"], "RuntimeError"
+        )
+        self.assertEqual(self.manager.public_status["rejection_sent"], 1)
+        self.assertEqual(self.manager.public_status["rejection_dropped"], 0)
+        self.assertIsNone(self.manager.public_status["rejection_drop_reason"])
+        self.assertNotIn("private provider response", str(self.manager.public_status))
+
+    async def test_unconfirmed_aisis_cue_restore_keeps_guard_and_speech_status(
+        self,
+    ) -> None:
+        await self.manager.announce("tv")
+        before = self.spoken_status()
+        entity = self.config["aisis_entity"]
+        self.hass.states.async_set(self.config["backend_entity"], "AISIS")
+        self.hass.states.async_set(self.config["aisis_connected_entity"], "on")
+        self.hass.states.async_set(entity, "idle", {"volume_level": 0.4})
+        original_media = self.fixture.media
+
+        async def ignore_restore_readback(call) -> None:
+            if call.data["volume_level"] == 0.4:
+                return
+            await original_media(call)
+
+        async def native_sound(_call) -> None:
+            return
+
+        self.hass.services.async_register(
+            "media_player", "volume_set", ignore_restore_readback
+        )
+        self.hass.services.async_register(
+            "aisis_speaker", "send_directive", native_sound
+        )
+        with (
+            patch.object(rejection, "CUE_BUDGET", 0.4),
+            patch.object(rejection, "CUE_SETTLE_SECONDS", 0.001),
+            patch.object(integration, "RECOVERY_RESERVE", 0.2),
+        ):
+            await self.reject("unconfirmed-restore")
+        self.assertEqual(self.spoken_status(), before)
+        self.assertEqual(self.manager.aisis_volume_recovery[entity], (0.4, 0.1))
+        self.assertEqual(
+            self.manager.public_status["rejection_status"], "recovery_unconfirmed"
+        )
+        self.assertEqual(
+            self.manager.public_status["rejection_recovery_reason"],
+            "aisis_volume_recovery_unconfirmed",
+        )
+        await self.reject("still-pending")
+        self.assertEqual(
+            self.manager.public_status["rejection_drop_reason"],
+            "aisis_volume_recovery_pending",
+        )
+        self.assertIsNone(self.manager.public_status["rejection_recovery_reason"])
+        self.assertIsNone(self.manager.public_status["rejection_controller_elapsed_ms"])
+        self.assertEqual(self.spoken_status(), before)
 
     async def test_native_cue_is_quiet_and_preserves_playing_music_and_volume(
         self,
@@ -158,6 +274,10 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.manager.public_status["rejection_dropped"], 1)
         self.assertEqual(
+            self.manager.public_status["rejection_drop_reason"],
+            "yandex_native_response_rejected",
+        )
+        self.assertEqual(
             [name for name, _ in self.fixture.calls],
             ["volume_set", "send_command", "volume_set"],
         )
@@ -240,6 +360,48 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.hass.states.get(self.entity).attributes["media_content_id"],
             "original-track",
+        )
+
+    async def test_stop_reports_failed_recovery_without_changing_speech_status(
+        self,
+    ) -> None:
+        await self.manager.announce("tv")
+        before = self.spoken_status()
+        started = asyncio.Event()
+        original_media = self.fixture.media
+
+        async def waiting_native(_call) -> dict[str, str]:
+            started.set()
+            await asyncio.Event().wait()
+            return {"status": "SUCCESS"}
+
+        async def fail_restore(call) -> None:
+            if call.data["volume_level"] == 0.2:
+                message = "restore failed during stop"
+                raise RuntimeError(message)
+            await original_media(call)
+
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            waiting_native,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+        self.hass.services.async_register("media_player", "volume_set", fail_restore)
+        with patch.object(rejection, "CUE_SETTLE_SECONDS", 0.001):
+            self.manager.rejections.submit("device_off", "stop-restore-failure")
+            await asyncio.wait_for(started.wait(), 0.5)
+            task = self.manager.rejections.task
+            await self.manager.rejections.stop(0.01)
+            with suppress(asyncio.CancelledError):
+                await task
+        self.assertTrue(task.cancelled())
+        self.assertEqual(self.spoken_status(), before)
+        self.assertEqual(
+            self.manager.public_status["rejection_status"], "recovery_unconfirmed"
+        )
+        self.assertEqual(
+            self.manager.public_status["rejection_recovery_reason"], "RuntimeError"
         )
 
     async def test_stop_retains_active_task_until_its_volume_recovery_finishes(

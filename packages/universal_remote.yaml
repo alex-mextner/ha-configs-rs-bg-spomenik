@@ -641,8 +641,8 @@ script:
       - action: script.t9_send_char
         data:
           mode: commit
-          pair: "{{ route.pair }}"
-          native: "{{ route.native }}"
+          pair: "{{ pair | default(route.pair) }}"
+          native: "{{ native | default(route.native) }}"
 
   # Enter the native FIFO immediately so queued keys capture its current app
   # generation. Kodi HTTP operations use their own shared queue below.
@@ -672,7 +672,7 @@ script:
           - stop: Unsupported T9 text operation
             error: true
       - choose:
-          - conditions: "{{ route.native }}"
+          - conditions: "{{ native | default(route.native) }}"
             sequence:
               - if: "{{ mode in ['backspace', 'commit'] }}"
                 then:
@@ -786,26 +786,50 @@ script:
           {{ request }}
         response_variable: route
       - variables:
-          source: "{{ 'projector' if route.pair == 'projector' else 'chromecast' }}"
+          source: "{{ 'projector' if pair | default(route.pair) == 'projector' else 'chromecast' }}"
       - choose:
           - conditions: "{{ source == 'chromecast' }}"
             sequence:
-              # KEYCODE_SEARCH opens search in YouTube/Netflix/Google TV.
-              # text: uses IME commitText on the focused search field.
-              # ENTER submits.
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: KEYCODE_SEARCH, delay_secs: 0 }
-              - delay: "00:00:00.8"
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
+              # Search edits the active app; it never implicitly wakes a display.
+              - action: ekf_appliances.remote_dispatch
                 data:
-                  command: "text:{{ query }}"
-                  delay_secs: 0
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: remote.televizor
+                    command: KEYCODE_SEARCH
+                    delay_secs: 0
+                response_variable: search_result
+              - if: "{{ search_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Search was rejected before opening the field
+                    response_variable: search_result
+              - delay: "00:00:00.8"
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: remote.televizor
+                    command: "text:{{ query }}"
+                    delay_secs: 0
+                response_variable: search_result
+              - if: "{{ search_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Search text was rejected
+                    response_variable: search_result
               - delay: "00:00:00.3"
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: KEYCODE_ENTER, delay_secs: 0 }
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: remote.televizor
+                    command: KEYCODE_ENTER
+                    delay_secs: 0
           - conditions: "{{ source in ['pc', 'projector'] }}"
             sequence:
               # Kodi: open the Search window, type the query, submit.
@@ -818,6 +842,11 @@ script:
                     entity_id: media_player.home
                     method: GUI.ActivateWindow
                     window: search
+                response_variable: search_result
+              - if: "{{ search_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Search was rejected before opening the field
+                    response_variable: search_result
               - delay: "00:00:00.5"
               - action: ekf_appliances.remote_dispatch
                 data:
@@ -845,8 +874,8 @@ script:
       - action: script.t9_send_char
         data:
           mode: backspace
-          pair: "{{ route.pair }}"
-          native: "{{ route.native }}"
+          pair: "{{ pair | default(route.pair) }}"
+          native: "{{ native | default(route.native) }}"
 
   # ========== Audio mode (selected music backend) ==========
   # Explicit legacy beeps remain available to existing callers. Mode changes

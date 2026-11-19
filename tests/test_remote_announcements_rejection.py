@@ -36,11 +36,11 @@ class RejectionQueueTests(unittest.IsolatedAsyncioTestCase):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-        async def play(item) -> str:
+        async def play(item) -> Any:
             self.started.set()
             await self.release.wait()
             self.played.append(item.press_id)
-            return "sent_unconfirmed"
+            return self.feedback.CueResult("sent_unconfirmed")
 
         self.queue = self.feedback.RejectionQueue(
             play,
@@ -88,6 +88,31 @@ class RejectionQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(values.get("drop_reason") == "expired" for _, values in self.reports)
         )
+
+    async def test_new_outcome_clears_an_earlier_drop_reason(self) -> None:
+        self.queue.publish("not_delivered", reason="busy", drop_reason="unavailable")
+        self.queue.submit("off", "next")
+        self.assertIsNone(self.reports[-1][1]["drop_reason"])
+        self.assertEqual(self.reports[-1][1]["reason"], "off")
+        self.release.set()
+        await self.queue.drain()
+        self.assertIsNone(self.reports[-1][1]["drop_reason"])
+
+    async def test_shutdown_report_does_not_retain_a_previous_press_reason(
+        self,
+    ) -> None:
+        self.queue.submit("busy", "active")
+        await self.started.wait()
+        self.queue.submit("off", "pending")
+        self.release.set()
+        await self.queue.stop(0.1)
+        closed = [
+            values
+            for _, values in self.reports
+            if values.get("drop_reason") == "closed"
+        ]
+        self.assertEqual(len(closed), 1)
+        self.assertIsNone(closed[0]["reason"])
 
     async def test_queue_overflow_reports_the_dropped_new_press(self) -> None:
         self.queue.submit("busy", "active")

@@ -34,8 +34,11 @@ settle. Independent AC, lighting and speaker controls remain available.
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable
 mute or climate data, and failed native text responses use the same cue.
-Physical capture identities prevent replayed rejection feedback; receiver echoes,
-internal timer events and the short press replaced by a hold remain silent.
+Receiver-provided logical press identities give OK/OK-hold and held navigation or
+volume repeats one cue for the original press. Separate full-frame taps keep their
+own identities, including rapid taps. Receiver echoes and internal timer events
+remain silent. Voice search uses the same per-pair guard before each key/text
+step and stops at its first rejection; it does not implicitly wake a display.
 
 The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded

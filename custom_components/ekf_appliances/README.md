@@ -147,9 +147,11 @@ Ordinary navigation, text, volume and transport are rejected while their pair is
 busy, OFF or unknown. A rejection captured while busy cannot be replayed after
 completion. Explicit source/app selection and INPUT can address an idle named
 pair, while lighting, AC and speaker controls remain independent. Recognized
-rejections produce a short quiet error cue; duplicate receiver frames and
-hold-suppressed short presses do not. The remote boundary does not change the
-native adapter's explicit power reconciliation described above.
+rejections produce a short quiet error cue. Receiver identities give a held OK
+or repeating navigation/volume key one cue for its original press, while separate
+rapid taps stay distinct. Voice search rechecks the same guard before each step.
+The remote boundary does not change the native adapter's explicit power
+reconciliation described above.
 
 A single INPUT changes the display group. It retains the existing wake rule:
 when only the other group is ON, selecting an explicitly OFF display requests

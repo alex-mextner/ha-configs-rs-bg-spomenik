@@ -39,6 +39,8 @@ from homeassistant.helpers.template import Template
 from homeassistant.util import dt as dt_util
 
 from custom_components import remote_announcements
+from custom_components.ekf_appliances.ir_decode import RemoteMapper
+from custom_components.remote_announcements.rejection import CueResult, RejectionQueue
 
 PACKAGE = Path(__file__).resolve().parents[2] / "packages/universal_remote.yaml"
 MODES = list(product(("tv", "projector"), ("off", "on"), ("off", "on")))
@@ -285,6 +287,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.controller._clear_audio = False
         self.controller._captured_routes.clear()
+        self.controller._captured_press_ids.clear()
         self.controller._pending_power = None
         self.runtime.projector_shutting_down = False
         self.kodi_responses = {}
@@ -1387,6 +1390,142 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.appliance_calls(), [])
 
+    async def test_logical_press_rejections_cue_once_and_preserve_fast_taps(
+        self,
+    ) -> None:
+        self.reset()
+        played = []
+
+        async def play(item) -> CueResult:
+            played.append(item.press_id)
+            return CueResult("completed")
+
+        queue = RejectionQueue(play, report=lambda *_: None)
+
+        async def reject(call) -> None:
+            queue.submit(call.data["reason"], call.data.get("press_id"))
+
+        self.hass.services.async_register("remote_announcements", "reject", reject)
+        mapper = RemoteMapper()
+        now = time.time()
+        try:
+            for command, offset, repeat in [
+                (0xEA15, 0.0, False),
+                (0xEA15, 0.108, True),
+                (0xEA15, 0.216, True),
+                (0xE916, 1.0, False),
+                (0xE916, 1.220, True),
+                (0xE916, 1.300, False),
+            ]:
+                mapper.feed(
+                    [
+                        {
+                            "address": 0xBF00,
+                            "command": command,
+                            "repeat": repeat,
+                            "offset": 0,
+                        }
+                    ],
+                    now + offset,
+                )
+                for (button, captured_at), identity in zip(
+                    mapper.event_times, mapper.event_press_ids, strict=True
+                ):
+                    self.controller.physical_press(
+                        button, captured_at, press_id=f"Odroid:{identity}"
+                    )
+                    route = await self.controller.async_prepare(
+                        {"button": button, "received_ms": captured_at * 1000}
+                    )
+                    self.assertEqual(route["blocked"], "tv_off")
+            await queue.drain()
+            self.assertEqual(len(played), 3)
+            self.assertEqual(queue.counts["duplicates"], 2)
+            self.assertEqual(self.appliance_calls(), [])
+        finally:
+            await queue.stop(0.1)
+
+    async def test_voice_search_rejects_off_unknown_and_transitioning_pairs_once(
+        self,
+    ) -> None:
+        for pair, state, target in product(
+            ("tv", "projector"),
+            ("off", "unknown", "on"),
+            (None, True, False),
+        ):
+            if state == "on" and target is None:
+                continue
+            with self.subTest(pair=pair, state=state, target=target):
+                self.reset((pair, "off", "off"))
+                self.hass.states.async_set(
+                    TV if pair == "tv" else PROJECTOR,
+                    state,
+                    {"power_sync_target": target},
+                )
+                result = await self.scripts["tv_search"].async_run(
+                    {"pair": pair, "query": "Interstellar"}, context=Context()
+                )
+                self.assertIn("blocked", result.service_response)
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(
+                    len(
+                        [
+                            call
+                            for call in self.calls
+                            if call[0] == "remote_announcements.reject"
+                        ]
+                    ),
+                    1,
+                )
+
+    async def test_voice_search_stops_if_power_changes_after_opening_search(
+        self,
+    ) -> None:
+        self.reset()
+        self.set_power_pair("on", "off")
+
+        async def turn_off_after_search(call) -> None:
+            await self.capture(call)
+            self.hass.states.async_set(TV, "on", {"power_sync_target": False})
+
+        self.hass.services.async_register(
+            "remote", "send_command", turn_off_after_search
+        )
+        result = await self.scripts["tv_search"].async_run(
+            {"query": "Interstellar"}, context=Context()
+        )
+        self.assertEqual(result.service_response["blocked"], "tv_power_transition")
+        self.assertEqual(
+            [data["command"] for _, data in self.appliance_calls()],
+            ["KEYCODE_SEARCH"],
+        )
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in self.calls
+                    if call[0] == "remote_announcements.reject"
+                ]
+            ),
+            1,
+        )
+
+    async def test_voice_search_preserves_the_three_native_keys_when_tv_is_ready(
+        self,
+    ) -> None:
+        self.reset()
+        self.set_power_pair("on", "off")
+        await self.scripts["tv_search"].async_run(
+            {"query": "Interstellar"}, context=Context()
+        )
+        self.assertEqual(
+            [data["command"] for _, data in self.appliance_calls()],
+            ["KEYCODE_SEARCH", "text:Interstellar", "KEYCODE_ENTER"],
+        )
+        self.assertFalse(
+            any(call[0] == "remote_announcements.reject" for call in self.calls)
+        )
+
     async def test_shutdown_blocks_disney_and_legacy_projector_entry_paths(
         self,
     ) -> None:
@@ -1417,6 +1556,44 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 await self.run_automation("universal_remote_dispatcher", button)
                 self.assertEqual(self.appliance_calls(), [])
                 self.assertEqual(self.controller.mode.target, "chromecast")
+
+    async def test_native_kodi_unsupported_response_keeps_error_and_one_cue(
+        self,
+    ) -> None:
+        self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
+        # Installed HA 2026.9.3 registers Kodi call_method with the default
+        # SupportsResponse.NONE. Its event result is not a service response.
+        self.hass.services.async_register("kodi", "call_method", self.capture)
+        with self.assertRaises(HomeAssistantError) as raised:
+            await self.scripts["kodi_play_next_episode"].async_run(
+                {}, context=Context()
+            )
+        self.assertIn("response", str(raised.exception).lower())
+        self.assertEqual(self.appliance_calls(), [])
+        cues = [call for call in self.calls if call[0] == "remote_announcements.reject"]
+        self.assertEqual(len(cues), 1, cues)
+        self.assertEqual(cues[0][1]["reason"], "command_failed")
+
+    async def test_captured_projector_text_edit_never_crosses_to_on_tv_fallback(
+        self,
+    ) -> None:
+        for name in ("t9_backspace", "t9_commit"):
+            with self.subTest(script=name):
+                self.reset(("projector", "off", "off"))
+                self.set_power_pair("on", "on")
+                self.runtime.note_projector_off_requested()
+                await self.scripts[name].async_run(
+                    {"pair": "projector", "native": False}, context=Context()
+                )
+                self.assertEqual(self.appliance_calls(), [])
+                cues = [
+                    call
+                    for call in self.calls
+                    if call[0] == "remote_announcements.reject"
+                ]
+                self.assertEqual(len(cues), 1, cues)
+                self.assertEqual(cues[0][1]["reason"], "projector_shutting_down")
 
     async def test_shutdown_between_resolve_and_dispatch_drops_the_actual_command(
         self,

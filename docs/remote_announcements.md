@@ -208,15 +208,25 @@ tracked by the existing service-call owner. Bounded shutdown retains the cue tas
 while its recovery settles.
 
 Distinct rejections enter a FIFO with at most eight waiting cues. Identities are
-deduplicated for 30 seconds with a bounded 256-entry history. Requests older than
-three seconds before playback, or beyond the queue limit, are dropped with an
-explicit reason; they are never replayed after the interaction is stale.
+deduplicated for 30 seconds with a bounded 256-entry history. Rejections waiting
+more than three seconds before playback, or beyond the queue limit, are dropped
+with an explicit reason. This age starts when the rejection is reported; an
+operation's later confirmation failure is a new result, not an old queued cue.
 
 `sensor.remote_announcements` exposes `rejection_status`, `rejection_reason`,
-`rejection_drop_reason` and cumulative `rejection_accepted`, `rejection_sent`,
-`rejection_dropped`, and `rejection_duplicates` counters. A queued service response
-does not prove playback. `completed` means a native Yandex completion event was
-observed; `sent_unconfirmed` means dispatch completed without that event. Neither
+`rejection_drop_reason`, `rejection_recovery_reason` and cumulative
+`rejection_accepted`, `rejection_sent`, `rejection_dropped`, and
+`rejection_duplicates` counters. Each update clears inapplicable reason and timing
+fields, so a later successful cue does not retain an earlier failure. Cue timing
+uses `rejection_controller_elapsed_ms`, `rejection_controller_budget_seconds`,
+`rejection_controller_deadline_missed`, and `rejection_pending_service_count`.
+Failed cue recovery remains `recovery_unconfirmed` with its safe recovery reason;
+it does not replace the spoken-label readiness or controller diagnostics. Shared
+recovery ownership and guards still prevent another unsafe attempt.
+
+A queued service response does not prove playback. `completed` means a native
+Yandex completion event was observed; `sent_unconfirmed` means dispatch completed
+without that event. Neither
 is acoustic proof of audibility. Physical cue level, duration and continuity of
 ongoing music require separate acceptance evidence.
 

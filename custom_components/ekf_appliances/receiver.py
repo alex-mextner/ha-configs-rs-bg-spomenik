@@ -111,7 +111,12 @@ class ReceiverRouter:
         )
         controller = getattr(self.runtime, "remote_controller", None)
         if dispatch and controller is not None:
-            controller.physical_press(name, self.last_received)
+            press_id = self.active.last_press_id
+            controller.physical_press(
+                name,
+                self.last_received,
+                press_id=f"{source}:{press_id}" if press_id else None,
+            )
         for listener in tuple(self.callbacks):
             listener(name if dispatch else None)
 

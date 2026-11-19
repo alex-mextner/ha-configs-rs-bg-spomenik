@@ -447,6 +447,95 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             await self.controller.async_power({"pair": "tv"}), {"sent": True}
         )
 
+    async def test_rejected_hold_and_repeats_keep_receiver_press_identity(self) -> None:
+        self.controller.mode.select("tv")
+        stamp = self.controller.mode.clock()
+        for button, offset, identity in [
+            ("ok", 0.0, "Odroid:ok:10.000000000"),
+            ("ok_hold", 0.22, "Odroid:ok:10.000000000"),
+            ("up", 1.0, "Odroid:up:11.000000000"),
+            ("up", 1.22, "Odroid:up:11.000000000"),
+            ("up", 1.30, "Odroid:up:11.300000000"),
+        ]:
+            self.controller.physical_press(button, stamp + offset, press_id=identity)
+            route = await self.controller.async_prepare(
+                {"button": button, "received_ms": (stamp + offset) * 1000}
+            )
+            self.assertEqual(route["blocked"], "tv_off")
+        self.assertEqual(
+            [call[2]["press_id"] for call in self.rejection_calls()],
+            [
+                "Odroid:ok:10.000000000",
+                "Odroid:ok:10.000000000",
+                "Odroid:up:11.000000000",
+                "Odroid:up:11.000000000",
+                "Odroid:up:11.300000000",
+            ],
+        )
+        self.assertEqual(self.device_calls(), [])
+
+    async def test_single_input_timeout_reports_one_rejection(self) -> None:
+        original = self.hass.services.async_call
+
+        async def waiting(domain, service, data, **kwargs: Any) -> Any:
+            if (domain, service) == ("ekf_appliances", "wake_if_current"):
+                await asyncio.Event().wait()
+            return await original(domain, service, data, **kwargs)
+
+        self.hass.services.async_call = waiting
+        with patch.object(controller_module, "_POWER_OPERATION_TIMEOUT", 0.01):
+            self.controller._wake("tv", "tv:0")
+            await asyncio.gather(*tuple(self.controller._tasks))
+        self.assertEqual(
+            [call[2]["reason"] for call in self.rejection_calls()],
+            ["power_confirmation_timeout"],
+        )
+        self.assertEqual(self.controller._power_operations, {})
+
+    async def test_shutdown_refresh_during_rejection_preserves_blocked_response(
+        self,
+    ) -> None:
+        entered, cue_entered, release_cue = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+        original = self.hass.services.async_call
+
+        async def waiting(domain, service, data, **kwargs: Any) -> Any:
+            if domain == "kodi":
+                entered.set()
+                await asyncio.Event().wait()
+            if domain == "remote_announcements":
+                cue_entered.set()
+                await release_cue.wait()
+            return await original(domain, service, data, **kwargs)
+
+        self.hass.services.async_call = waiting
+        task = asyncio.create_task(
+            self.controller.async_dispatch(
+                {
+                    "pair": "projector",
+                    "domain": "kodi",
+                    "service": "call_method",
+                    "service_data": {
+                        "entity_id": "media_player.home",
+                        "method": "Input.Left",
+                    },
+                }
+            )
+        )
+        await entered.wait()
+        self.runtime.note_projector_off_requested()
+        await cue_entered.wait()
+        self.controller.refresh()
+        release_cue.set()
+        self.assertEqual(
+            await task, {"sent": False, "blocked": "projector_shutting_down"}
+        )
+        self.assertEqual(len(self.rejection_calls()), 1)
+        self.assertEqual(self.device_calls(), [])
+
     async def test_physical_power_is_reserved_before_yaml_and_rejection_is_not_replayed(
         self,
     ) -> None:
@@ -881,6 +970,10 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         for index in range(300):
             self.controller.physical_press("up", stamp + index / 1000)
         self.assertLessEqual(len(self.controller._captured_routes), 256)
+        self.assertEqual(
+            self.controller._captured_press_ids.keys(),
+            self.controller._captured_routes.keys(),
+        )
 
 
 if __name__ == "__main__":

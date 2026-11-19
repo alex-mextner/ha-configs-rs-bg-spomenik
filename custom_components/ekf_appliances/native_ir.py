@@ -116,6 +116,7 @@ class NativeIrReceiver:
         self.enabled = False
         self.validated = False
         self.last_received = self.last_error = self.last_frame = None
+        self.last_press_id = None
         self.status = "stopped"
         self.capture_count = self.event_count = self.suppressed_echo_count = 0
         self.kernel_key_conflicts = self.stale_capture_count = 0
@@ -324,7 +325,10 @@ class NativeIrReceiver:
             frame, identity, flags, timestamp_ns, continued_mode=continued_mode
         )
         if semantic is not None:
-            return mapper.feed([semantic], timestamp_ns / 1e9)
+            names = mapper.feed([semantic], timestamp_ns / 1e9)
+            if names:
+                self.last_press_id = mapper.event_press_ids[-1]
+            return names
         # An orphan repeat cannot emit an event, but still proves that a known
         # physical burst has not ended. Do not erase a held key's silence gap.
         if (

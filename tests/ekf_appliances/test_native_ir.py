@@ -138,6 +138,33 @@ class NativeReception(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_hold_and_repeat_feedback_identity_preserves_separate_fast_taps(
+        self,
+    ) -> None:
+        self.reader.set_dispatch_enabled(enabled=True)
+        self.reader._accept_after_ns = 0
+        captures = []
+        self.reader.add_callback(
+            lambda name: (
+                captures.append((name, self.reader.last_press_id)) if name else None
+            )
+        )
+        for scan, sec, flags in (
+            (0xBF15, 10, 0),
+            (0xBF15, 10.108, 2),
+            (0xBF15, 10.216, 2),
+            (0xBF18, 11, 0),
+            (0xBF18, 11.08, 0),
+            (0xBF18, 11.30, 2),
+        ):
+            self.feed(scan, sec, flags=flags)
+        self.assertEqual(
+            [name for name, _ in captures], ["ok", "ok_hold", "right", "right", "right"]
+        )
+        self.assertEqual(captures[0][1], captures[1][1])
+        self.assertNotEqual(captures[2][1], captures[3][1])
+        self.assertEqual(captures[3][1], captures[4][1])
+
     async def test_unknown_frame_or_keyboard_mapping_cannot_repeat_previous_button(
         self,
     ) -> None:
@@ -219,7 +246,7 @@ class FakeBackend:
     def __init__(self, *, enabled=False) -> None:
         self.enabled = enabled
         self.validated = True
-        self.last_error = self.last_received = None
+        self.last_error = self.last_received = self.last_press_id = None
         self.connected = True
         self.remote_id = "remote.ekf"
         self.callbacks = []
@@ -351,16 +378,25 @@ class ReceiverSelection(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         observed = []
         self.runtime.remote_controller = SimpleNamespace(
-            physical_press=lambda name, at: observed.append(("capture", name, at))
+            physical_press=lambda name, at, **kwargs: observed.append(
+                ("capture", name, at, kwargs.get("press_id"))
+            )
         )
         self.router.add_callback(
             lambda name: observed.append(("event", name)) if name else None
         )
         await self.router.async_set_source("Odroid")
         self.native.last_received = 1001.0
+        self.native.last_press_id = "input:10.000000000"
         self.ekf.emit("input")
         self.native.emit("input")
-        self.assertEqual(observed, [("capture", "input", 1001.0), ("event", "input")])
+        self.assertEqual(
+            observed,
+            [
+                ("capture", "input", 1001.0, "Odroid:input:10.000000000"),
+                ("event", "input"),
+            ],
+        )
 
     async def test_switch_is_exclusive_resets_t9_and_is_reversible(self) -> None:
         self.ekf.mapper.feed(

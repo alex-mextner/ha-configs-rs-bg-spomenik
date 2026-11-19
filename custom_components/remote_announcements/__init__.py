@@ -172,6 +172,7 @@ class SpeechPlayback:
         self.recovery_deadline = self.started + self.budget
         self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
         self.recovery_failed = False
+        self.recovery_reason: str | None = None
         self.speaking, self.ended = asyncio.Event(), asyncio.Event()
         self.override_observed, self.user_changed_volume = False, False
 
@@ -258,14 +259,19 @@ class Manager:
             **{f"rejection_{key}": value for key, value in values.items()},
         )
 
-    @callback
-    def failed(self, error: Exception) -> None:
-        """Report fixed provider reasons or a sanitized exception type."""
-        reason = (
+    @staticmethod
+    def failure_reason(error: Exception) -> str:
+        """Expose only fixed provider reasons or a sanitized exception type."""
+        return (
             str(error)
             if isinstance(error, ProviderNotReadyError)
             else type(error).__name__
         )
+
+    @callback
+    def failed(self, error: Exception) -> None:
+        """Report fixed provider reasons or a sanitized exception type."""
+        reason = self.failure_reason(error)
         self.update(
             reason if isinstance(error, ProviderNotReadyError) else "error",
             reason=reason,
@@ -617,7 +623,9 @@ class Manager:
         finally:
             unsubscribe()
 
-    async def restore_volume(self, playback: SpeechPlayback) -> None:
+    async def restore_volume(
+        self, playback: SpeechPlayback, *, report_status: bool = True
+    ) -> None:
         """Restore volume and mute only while the original guards hold."""
         if not self.volume_unchanged(playback, playback.applied):
             return
@@ -665,7 +673,9 @@ class Manager:
                 "Announcement volume recovery failed", exc_info=exception_info(error)
             )
             playback.recovery_failed = True
-            self.failed(error)
+            playback.recovery_reason = self.failure_reason(error)
+            if report_status:
+                self.failed(error)
 
     def music_unchanged(self, playback: SpeechPlayback) -> bool:
         """Resume only our pause of the original selected content."""
@@ -680,7 +690,9 @@ class Manager:
             )
         )
 
-    async def resume_music(self, playback: SpeechPlayback) -> None:
+    async def resume_music(
+        self, playback: SpeechPlayback, *, report_status: bool = True
+    ) -> None:
         """Recover music without waiting for volume acknowledgement."""
         if self.music_unchanged(playback):
             try:
@@ -695,22 +707,34 @@ class Manager:
                     "Announcement music recovery failed", exc_info=exception_info(error)
                 )
                 playback.recovery_failed = True
-                self.failed(error)
+                playback.recovery_reason = self.failure_reason(error)
+                if report_status:
+                    self.failed(error)
 
-    async def restore_playback(self, playback: SpeechPlayback) -> None:
-        """Recover independent controls and report controller elapsed time."""
+    async def restore_playback(
+        self, playback: SpeechPlayback, *, report_status: bool = True
+    ) -> dict[str, Any]:
+        """Recover controls; optionally leave reporting to the cue's own result."""
         # A lost volume acknowledgement must not postpone the original music.
-        await asyncio.gather(self.restore_volume(playback), self.resume_music(playback))
-        elapsed = time.monotonic() - playback.started
-        self.update(
-            "recovery_unconfirmed"
-            if playback.recovery_failed or self.services.pending
-            else self.status,
-            controller_elapsed_ms=round(elapsed * 1000),
-            controller_budget_seconds=playback.budget,
-            controller_deadline_missed=elapsed > playback.budget,
-            pending_service_count=len(self.services.pending),
+        await asyncio.gather(
+            self.restore_volume(playback, report_status=report_status),
+            self.resume_music(playback, report_status=report_status),
         )
+        elapsed = time.monotonic() - playback.started
+        values = {
+            "controller_elapsed_ms": round(elapsed * 1000),
+            "controller_budget_seconds": playback.budget,
+            "controller_deadline_missed": elapsed > playback.budget,
+            "pending_service_count": len(self.services.pending),
+        }
+        if report_status:
+            self.update(
+                "recovery_unconfirmed"
+                if playback.recovery_failed or self.services.pending
+                else self.status,
+                **values,
+            )
+        return {**values, "recovery_reason": playback.recovery_reason}
 
     def is_current(self, target: str, generation: int) -> bool:
         """Reject closed or superseded announcement attempts."""

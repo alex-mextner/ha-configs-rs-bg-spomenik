@@ -75,6 +75,9 @@ class UniversalRemoteYamlContractTests(unittest.TestCase):
                     self.assertNotIn("projector", payload)
                     self.assertNotIn("media_player.home", payload)
                     self.assertNotIn("target_player", payload)
+                    self.assertNotIn("remote.televizor", payload)
+                    self.assertNotIn("media_player.televizor", payload)
+                    self.assertNotIn("ue48j5500", payload)
 
     def test_power_uses_the_atomic_latch_service(self) -> None:
         automation = next(
