@@ -66,8 +66,9 @@ and shutdown still has a bounded wait. A command already accepted by a physical
 speaker cannot be recalled. These deadlines therefore provide best-effort
 controller recovery, not a guarantee of physical interruption or audible latency.
 
-Speech volume is `max(current volume, 0.5)` (HA 0..1; speaker 0..10). Restore the
-old volume only while the current level still equals our temporary level and the
+Speech volume is `max(current volume, configured volume_floor)`, currently 0.4
+in this package (HA 0..1; speaker 0..10). Restore the old volume only while the
+current level still equals our temporary level and the
 speaker was not muted by the user during speech. Yandex volume-zero mute is lifted
 for speech and its remembered volume plus previous mute state are restored; user
 changes during speech win. AISIS can restore native zero volume once its Quasar

@@ -216,7 +216,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.announce("tv")
         self.assertEqual(
             self.calls[0],
-            ("volume_set", {"entity_id": self.entity, "volume_level": 0.5}),
+            (
+                "volume_set",
+                {
+                    "entity_id": self.entity,
+                    "volume_level": self.manager.config["volume_floor"],
+                },
+            ),
         )
         self.assertEqual(self.calls[-1][0], "volume_mute")
         state = self.hass.states.get(self.entity)
@@ -229,7 +235,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.entity, state.state, {**state.attributes, "volume_level": 0.0}
         )
         await self.manager.announce("tv")
-        self.assertEqual(self.calls[0][1]["volume_level"], 0.5)
+        self.assertEqual(
+            self.calls[0][1]["volume_level"], self.manager.config["volume_floor"]
+        )
         self.assertEqual(self.calls[-1][1]["volume_level"], 0.0)
 
     async def test_manual_volume_change_wins(self) -> None:
@@ -677,7 +685,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append((call.service, dict(call.data)))
             self.assertEqual(call.data["entity_id"], entity)
             # Literal supported native levels, not an acknowledgement-only fake.
-            level = {0.0: 0, 0.1: 1, 0.5: 5}[call.data["volume_level"]]
+            level = {0.0: 0, 0.1: 1, 0.4: 4}[call.data["volume_level"]]
             self.aisis_native_levels.append(level)
             if level == 0 and self.aisis_restore_ack_only:
                 self.aisis_restore_requested.set()
@@ -708,7 +716,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.clear()
                 entity = self.prepare_aisis_native_volume(original)
                 await self.manager.announce("tv")
-                self.assertEqual(self.aisis_native_levels, [5, native_level])
+                self.assertEqual(self.aisis_native_levels, [4, native_level])
                 self.assertEqual(
                     [name for name, _ in self.calls],
                     ["volume_set", "speak", "volume_set"],
@@ -740,8 +748,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(integration, "RECOVERY_RESERVE", 0.2),
         ):
             await asyncio.wait_for(self.manager.announce("tv"), 0.8)
-        self.assertEqual(self.aisis_native_levels, [5, 0])
-        self.assertEqual(self.hass.states.get(entity).attributes["volume_level"], 0.5)
+        self.assertEqual(self.aisis_native_levels, [4, 0])
+        self.assertEqual(
+            self.hass.states.get(entity).attributes["volume_level"],
+            self.manager.config["volume_floor"],
+        )
         self.assertEqual(self.manager.status, "recovery_unconfirmed")
         self.assertLess(self.manager.public_status["controller_elapsed_ms"], 800)
 
@@ -763,7 +774,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             volume_at_return = self.hass.states.get(entity).attributes["volume_level"]
             self.assertEqual(volume_at_return, 0.0)
             self.assertEqual(self.manager.status, "sent_unconfirmed")
-            self.assertEqual(self.aisis_native_levels, [5, 0])
+            self.assertEqual(self.aisis_native_levels, [4, 0])
         finally:
             readback.cancel()
             await asyncio.gather(readback, return_exceptions=True)
@@ -790,7 +801,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         entity = self.prepare_aisis_native_volume(0.0)
         self.manual_volume = 0.8
         await self.manager.announce("tv")
-        self.assertEqual(self.aisis_native_levels, [5])
+        self.assertEqual(self.aisis_native_levels, [4])
         self.assertEqual([name for name, _ in self.calls], ["volume_set", "speak"])
         state = self.hass.states.get(entity)
         self.assertEqual(state.attributes["volume_level"], 0.8)
