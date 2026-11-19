@@ -432,12 +432,10 @@ class RemoteController:
             "tv"
         ):
             return reason
-        requested_at = getattr(
-            getattr(self.runtime, "shutdown", None), "requested_at", None
-        )
+        # Runtime records this timestamp and RemoteMode measures age in wall time.
+        requested_at = self.runtime.shutdown.requested_at
         if (
             self.runtime.projector_shutting_down
-            and requested_at is not None
             and requested_at != self._settled_projector_shutdown_at
             and 0 <= self.mode.clock() - requested_at < PROJECTOR_SHUTDOWN_TIMEOUT
         ):
@@ -524,8 +522,8 @@ class RemoteController:
                 if owns_shutdown:
                     # A finished/failed owned OFF must not become a new native
                     # busy window merely because its persistent latch remains.
-                    self._settled_projector_shutdown_at = getattr(
-                        getattr(self.runtime, "shutdown", None), "requested_at", None
+                    self._settled_projector_shutdown_at = (
+                        self.runtime.shutdown.requested_at
                     )
 
         async def run() -> Any:

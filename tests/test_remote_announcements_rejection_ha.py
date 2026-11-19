@@ -176,6 +176,23 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(attrs["rejection_sent"], 0)
             self.assertEqual(attrs["rejection_dropped"], 1)
             self.assertTrue(self.manager.services.pending)
+
+            # The next press is refused before touching the speaker; it must
+            # not inherit the first cue's unfinished recovery outcome.
+            calls_before = list(self.fixture.calls)
+            pending_before = set(self.manager.services.pending)
+            await self.reject("next-press-while-pending")
+            self.assertEqual(attrs["rejection_status"], "not_delivered")
+            self.assertEqual(
+                attrs["rejection_drop_reason"], "speaker_service_recovery_pending"
+            )
+            self.assertIsNone(attrs["rejection_recovery_reason"])
+            self.assertIsNone(attrs["rejection_pending_service_count"])
+            self.assertIsNone(attrs["rejection_controller_elapsed_ms"])
+            self.assertEqual(attrs["rejection_sent"], 0)
+            self.assertEqual(attrs["rejection_dropped"], 2)
+            self.assertEqual(self.fixture.calls, calls_before)
+            self.assertEqual(self.manager.services.pending, pending_before)
         finally:
             release.set()
             await asyncio.wait_for(

@@ -97,17 +97,31 @@ No test should toggle physical appliances or inject a live remote event.
 ## Deployment and rollback
 
 Review the scoped source diff and exact tested commit. Preserve unrelated staged
-and unstaged production changes. Deploy the reviewed routing package, affected
-EKF files and the four affected remote_announcements integration files, preserving
-the existing announcement core. Use the established HA validation/reload workflow
-with the release coordinator. Load the changed Python and YAML-configured
-announcement service through one validated Home Assistant restart.
+and unstaged production changes. Deploy only these 13 reviewed runtime files:
+
+- `packages/universal_remote.yaml`
+- `custom_components/ekf_appliances/remote_control.py`
+- `custom_components/ekf_appliances/remote_mode.py`
+- `custom_components/ekf_appliances/services.yaml`
+- `custom_components/ekf_appliances/manifest.json`
+- `custom_components/ekf_appliances/ir_decode.py`
+- `custom_components/ekf_appliances/ir_receiver.py`
+- `custom_components/ekf_appliances/native_ir.py`
+- `custom_components/ekf_appliances/receiver.py`
+- `custom_components/remote_announcements/__init__.py`
+- `custom_components/remote_announcements/rejection.py`
+- `custom_components/remote_announcements/services.yaml`
+- `custom_components/remote_announcements/manifest.json`
+
+Preserve the existing announcement core. Use `scripts/ha_safe_reload.sh` with the
+release coordinator to validate the configuration and load the changed Python and
+YAML-configured announcement service through one validated Home Assistant restart.
 Read back the target sensor, projector shutdown attribute and integration errors.
 Observe a fractional lease expiration without sending a key. Physical INPUT and
 shutdown acceptance require separately coordinated user operation.
 
 Rollback restores only the preceding reviewed versions of the changed routing
 package, EKF and remote_announcements files, followed by the established validated
-restart. Never edit
-the persisted shutdown Store or runtime databases to make rollback appear
-successful. Keep the reviewed commit and validation report as the audit record.
+restart. Never edit the persisted shutdown Store or runtime databases to make
+rollback appear successful. Keep the reviewed commit and validation report as the
+audit record.

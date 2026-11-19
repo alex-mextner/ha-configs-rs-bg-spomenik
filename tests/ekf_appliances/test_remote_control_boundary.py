@@ -604,6 +604,42 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             (await self.controller.async_power({"pair": "projector"}))["sent"]
         )
 
+    async def test_rejected_raw_toggle_cannot_settle_later_native_shutdown(
+        self,
+    ) -> None:
+        original = self.hass.services.async_call
+
+        async def rejected_toggle(domain, service, data, **kwargs: Any) -> Any:
+            if (
+                domain == "media_player"
+                and data.get("entity_id") == controller_module.PROJECTOR
+            ):
+                # A real OEM OFF arrives after admission. The native service
+                # rejects this remote action before transmitting any frame.
+                self.runtime.note_projector_off_requested()
+                self.assertTrue(runtime.UNIVERSAL_PROJECTOR_COMMAND.get())
+                message = "native projector action rejected before dispatch"
+                raise errors.HomeAssistantError(message)
+            return await original(domain, service, data, **kwargs)
+
+        self.hass.services.async_call = rejected_toggle
+        with self.assertRaisesRegex(errors.HomeAssistantError, "before dispatch"):
+            await self.controller.async_dispatch(
+                {
+                    "pair": "projector",
+                    "domain": "media_player",
+                    "service": "toggle",
+                    "service_data": {"entity_id": controller_module.PROJECTOR},
+                }
+            )
+        self.assertEqual(self.device_calls(), [])
+        self.assertEqual(self.controller._power_operations, {})
+        self.assertTrue(self.runtime.projector_shutting_down)
+        self.assertEqual(
+            await self.controller.async_power({"pair": "tv"}),
+            {"sent": False, "blocked": "projector_shutting_down"},
+        )
+
     async def test_tokenless_prepare_neither_reserves_nor_adopts_physical_power(
         self,
     ) -> None:

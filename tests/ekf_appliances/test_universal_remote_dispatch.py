@@ -51,7 +51,7 @@ TV = "media_player.ue48j5500_ue48j5500"
 PROJECTOR = "media_player.projector"
 
 # Load the real controller and services without booting unrelated integrations.
-# Only the runtime's transport ContextVar is supplied by this test boundary.
+# The boundary models runtime observations and the native shutdown timebase.
 PREFIX = "universal_remote_dispatch_test"
 package = ModuleType(PREFIX)
 package.__path__ = [str(PACKAGE.parents[1] / "custom_components/ekf_appliances")]
@@ -75,6 +75,7 @@ class RuntimeBoundary:
     def __init__(self, hass) -> None:
         self.hass = hass
         self.entry = SimpleNamespace(data={"tv_kodi_entity_id": "media_player.home"})
+        self.shutdown = SimpleNamespace(requested_at=0.0)
 
     @property
     def projector_power_state(self) -> Any:
@@ -84,7 +85,8 @@ class RuntimeBoundary:
         return state.state != "off"
 
     def note_projector_off_requested(self) -> None:
-        if self.projector_power_state is True:
+        if self.projector_power_state is True and not self.projector_shutting_down:
+            self.shutdown.requested_at = time.time()
             self.projector_shutting_down = True
             self.controller.refresh()
 
@@ -293,6 +295,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.controller._settled_projector_shutdown_at = None
         self.controller._pending_power = None
         self.runtime.projector_shutting_down = False
+        self.runtime.shutdown.requested_at = 0.0
         self.kodi_responses = {}
         self.calls.clear()
         for entity, state in (
@@ -1748,6 +1751,31 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any(call[0] == "remote_announcements.reject" for call in self.calls)
         )
+
+    async def test_native_shutdown_window_blocks_physical_power_until_aged(
+        self,
+    ) -> None:
+        self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
+        self.runtime.note_projector_off_requested()
+        await self.run_automation("universal_remote_dispatcher", "power")
+        self.assertEqual(self.appliance_calls(), [])
+        cues = [call for call in self.calls if call[0] == "remote_announcements.reject"]
+        self.assertEqual(len(cues), 1, cues)
+        self.assertEqual(cues[0][1]["reason"], "projector_shutting_down")
+
+        # Only the recent native window expires. The persisted projector latch
+        # still guards its own target, while fallback TV is available again.
+        self.runtime.shutdown.requested_at = (
+            time.time() - runtime_module.PROJECTOR_SHUTDOWN_TIMEOUT - 1
+        )
+        self.calls.clear()
+        await self.run_automation("universal_remote_dispatcher", "power")
+        self.assertEqual(
+            self.appliance_calls(),
+            [("media_player.toggle", {"entity_id": TV})],
+        )
+        self.assertTrue(self.runtime.projector_shutting_down)
 
     async def test_shutdown_blocks_disney_and_legacy_projector_entry_paths(
         self,

@@ -419,7 +419,7 @@ async def play_rejection(
             details = await manager.restore_playback(playback, report_status=False)
         return CueResult(
             "recovery_unconfirmed"
-            if playback.recovery_failed or manager.services.pending
+            if details.get("recovery_reason") or details.get("pending_service_count")
             else status,
             details,
         )
@@ -441,7 +441,7 @@ async def play_rejection(
         )
         return CueResult(
             "recovery_unconfirmed"
-            if details.get("recovery_reason") or manager.services.pending
+            if details.get("recovery_reason") or details.get("pending_service_count")
             else "not_delivered",
             {**details, "drop_reason": reason},
         )

@@ -127,6 +127,7 @@ class T9ContractFixture:
             hass=self.hass,
             entry=SimpleNamespace(data={"tv_kodi_entity_id": "media_player.home"}),
             projector_shutting_down=False,
+            shutdown=SimpleNamespace(requested_at=0.0),
             projector_power_state=True,
             projector_power_entity_id="binary_sensor.projector_hdmi_connected",
             projector_power_pair=None,
