@@ -1,0 +1,55 @@
+name: HA maintained regressions
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  maintained-suites:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+      - name: Run maintained regressions and offline web bridge tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/ha-maintained-regressions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          task_finished() {
+            local rc=$?
+            printf '%s completed rc=%s elapsed=%ss log=%s\n' \
+              "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"
+            exit "$rc"
+          }
+          trap task_finished EXIT
+          printf '%s starting log=%s\n' "$(date -Is)" "$task_log"
+          git submodule update --init --recursive submodules/home-generative-agent
+          python3 -m pip install uv
+          make test-regressions PYTHON_BIN=python3.14
+          # Match the standalone bridge image without launching a browser.
+          uv run --isolated --no-project --python 3.12 \
+            --with pytest==8.4.2 --with aiohttp==3.14.3 \
+            --with playwright==1.63.0 \
+            python3 -m pytest -q docker/chatgpt-web/test_bridge.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ha-maintained-regressions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ha-maintained-regressions-*.log
+            .cache/test-results/*.log
+          retention-days: 14

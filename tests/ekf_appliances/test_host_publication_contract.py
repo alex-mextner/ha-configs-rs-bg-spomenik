@@ -216,13 +216,24 @@ class HostPublicationContracts(unittest.TestCase):
     def test_copied_bridge_bundle_loads_all_registered_remote_routes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             installed = Path(directory)
-            for name in ("ha-host-actions.py", "ha_host_media.py", "ha_host_audit.py"):
+            for name in (
+                "ha-host-actions.py",
+                "ha_host_media.py",
+                "ha_host_audit.py",
+                "ha_host_fireplace.py",
+                "ha_kodi_fireplace.py",
+                "ha_kodi_fireplace_rotation.py",
+                "ha_kodi_youtube_manifest.py",
+                "ha_kodi_youtube_resolve.py",
+                "kodi_fireplaces.json",
+            ):
                 shutil.copyfile(ROOT / "scripts/host" / name, installed / name)
             probe = (
                 "import json, runpy; "
                 "module = runpy.run_path('ha-host-actions.py', run_name='installed_contract'); "
-                "print(json.dumps(sorted(path for method, path in module['ROUTES'] "
-                "if path in {'/kodi/status', '/kodi/text-input', '/kodi/keyboard'})))"
+                "print(json.dumps(sorted({path for method, path in module['ROUTES'] "
+                "if path in {'/kodi/status', '/kodi/text-input', '/kodi/keyboard', "
+                "'/kodi/fireplace', '/kodi/youtube/manifest'}})))"
             )
             # Run the current Python executable with the fixed copied-bundle probe.
             result = subprocess.run(  # noqa: S603
@@ -236,8 +247,10 @@ class HostPublicationContracts(unittest.TestCase):
             self.assertEqual(
                 json.loads(result.stdout),
                 [
+                    "/kodi/fireplace",
                     "/kodi/keyboard",
                     "/kodi/status",
                     "/kodi/text-input",
+                    "/kodi/youtube/manifest",
                 ],
             )
