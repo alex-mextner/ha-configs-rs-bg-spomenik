@@ -16,6 +16,29 @@ from unittest.mock import AsyncMock, Mock, patch
 HA = importlib.util.find_spec("homeassistant") is not None
 
 
+def watering_raw_states(
+    start: float,
+    *,
+    physical_pin: int | None = None,
+    pin_overrides: dict[int, int] | None = None,
+) -> list[SimpleNamespace]:
+    """Build fresh observations for the shared ninety-minute raw rise."""
+    result = []
+    for index in range(19):
+        value = 300 if index < 12 else 340
+        observed_at = datetime.fromtimestamp(start + index * 300, UTC)
+        attributes = {"sampled_at": observed_at.isoformat(), "samples": [value] * 5}
+        pin = (pin_overrides or {}).get(index, physical_pin)
+        if pin is not None:
+            attributes["physical_pin"] = pin
+        result.append(
+            SimpleNamespace(
+                state=str(value), attributes=attributes, last_updated=observed_at
+            )
+        )
+    return result
+
+
 @unittest.skipUnless(
     HA, "HA adapter checks run inside installed Home Assistant container"
 )
@@ -173,19 +196,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         from custom_components.plant_care_alerts.analytics import analyze
 
         start = self.now - 5400
-        raw_states = [
-            SimpleNamespace(
-                state=str(300 if index < 12 else 340),
-                attributes={
-                    "sampled_at": datetime.fromtimestamp(
-                        start + index * 300, UTC
-                    ).isoformat(),
-                    "samples": [300 if index < 12 else 340] * 5,
-                },
-                last_updated=datetime.fromtimestamp(start + index * 300, UTC),
-            )
-            for index in range(19)
-        ]
+        raw_states = watering_raw_states(start)
         # Unavailability retained the preceding sample clock: the interruption
         # belongs to the actual state transition, not that stale physical clock.
         raw_states.insert(
@@ -234,20 +245,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         from custom_components.plant_care_alerts.analytics import analyze
 
         start = self.now - 5400
-        states = [
-            SimpleNamespace(
-                state=str(300 if index < 12 else 340),
-                attributes={
-                    "sampled_at": datetime.fromtimestamp(
-                        start + index * 300, UTC
-                    ).isoformat(),
-                    "samples": [300 if index < 12 else 340] * 5,
-                    "physical_pin": 22 if index < 12 else 23,
-                },
-                last_updated=datetime.fromtimestamp(start + index * 300, UTC),
-            )
-            for index in range(19)
-        ]
+        states = watering_raw_states(
+            start, physical_pin=22, pin_overrides=dict.fromkeys(range(12, 19), 23)
+        )
         current = {}
         self.manager._merge_adc_states(current, states, self.now)
         result = analyze(
@@ -262,20 +262,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         from custom_components.plant_care_alerts.analytics import analyze
 
         start = self.now - 5400
-        raw_states = [
-            SimpleNamespace(
-                state=str(300 if index < 12 else 340),
-                attributes={
-                    "sampled_at": datetime.fromtimestamp(
-                        start + index * 300, UTC
-                    ).isoformat(),
-                    "samples": [300 if index < 12 else 340] * 5,
-                    "physical_pin": 22,
-                },
-                last_updated=datetime.fromtimestamp(start + index * 300, UTC),
-            )
-            for index in range(19)
-        ]
+        raw_states = watering_raw_states(start, physical_pin=22)
         recorder = SimpleNamespace(
             async_add_executor_job=AsyncMock(
                 return_value={
@@ -330,6 +317,80 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     all(point[0] >= self.now + 1 for point in current["adc_samples"])
                 )
+
+    async def test_manual_calibration_boundary_survives_recorder_reload(self) -> None:
+        from custom_components.plant_care_alerts import CareManager
+        from custom_components.plant_care_alerts.analytics import analyze
+
+        start = self.now - 5400
+        boundary = start + 3900
+        for mode in ("absent", "unavailable"):
+            with self.subTest(calibration_store=mode):
+                raw_states = watering_raw_states(start, physical_pin=22)
+                points = [
+                    [state.last_updated.timestamp(), float(state.state)]
+                    for state in raw_states
+                ]
+                control = analyze({}, points, self.now, calibration=[67, 1298])
+                self.assertEqual(control["last_watering_source"], "auto")
+                options = deepcopy(self.manager.config)
+                options["automatic_calibration"] = {}
+                if mode == "unavailable":
+                    options["automatic_calibration"]["sensor.smooth"] = {
+                        "enabled": True,
+                        "source_revision": "probe-v1",
+                        "original_dry": 67,
+                        "original_wet": 221,
+                    }
+                self.manager.config = options
+                current = {}
+                self.manager._prepare_adc_context(current, "sensor.smooth", start)
+                self.manager._merge_adc_states(current, raw_states[:13], boundary)
+                current["adc_calibration"] = [67, 221]
+                current["raw_value_history"] = deepcopy(points[:13])
+                if mode == "unavailable":
+                    # A legacy record has retained ADC points but no factual buffer.
+                    current.pop("raw_value_history")
+                self.manager._collect_adc_samples(
+                    current, "sensor.raw", raw_states[13], [67, 1298], boundary
+                )
+                saved = json.loads(json.dumps(current, allow_nan=False))
+                self.assertEqual(saved, current)
+                self.assertEqual(saved["raw_value_history"], points[:14])
+                with patch("custom_components.plant_care_alerts.new_store"):
+                    restarted = CareManager(self.hass, options)
+                restarted._calibration_source_identity = Mock(return_value="registry-a")
+                restarted.records["a"] = saved
+                if mode == "unavailable":
+                    restarted.calibration.inhibit_writes("storage_unavailable")
+                recorder = SimpleNamespace(
+                    async_add_executor_job=AsyncMock(
+                        return_value={"sensor.raw": raw_states, "sensor.smooth": []}
+                    )
+                )
+                with (
+                    patch(
+                        "custom_components.plant_care_alerts.get_instance",
+                        return_value=recorder,
+                    ),
+                    patch(
+                        "custom_components.plant_care_alerts.dt_util.utcnow",
+                        return_value=datetime.fromtimestamp(self.now, UTC),
+                    ),
+                    self.assertNoLogs(
+                        "custom_components.plant_care_alerts", level="ERROR"
+                    ),
+                ):
+                    await restarted._load_history("a", self.plant, self.now)
+                restored = restarted.records["a"]
+                result = analyze(
+                    restored, restored["adc_samples"], self.now, calibration=[67, 1298]
+                )
+                self.assertNotEqual(result.get("last_watering_source"), "auto")
+                self.assertEqual(restored["adc_calibration_fence"], boundary)
+                self.assertEqual(restored["adc_calibration"], [67, 1298])
+                self.assertEqual(restored["raw_value_history"], points)
+                self.assertEqual(restored["adc_samples"], points[13:])
 
     async def test_user_refresh_does_not_inherit_background_write_authority(
         self,
@@ -488,6 +549,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 manager = CareManager(self.hass, options)
             manager.add_entities = Mock()
             manager._buttons = Mock(return_value={})
+            manager._calibration_source_identity = Mock(return_value=identity)
             manager._load_history = AsyncMock()
             manager.store.async_load = AsyncMock(return_value=deepcopy(prior))
             manager.store.async_save = AsyncMock()
@@ -505,7 +567,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 "custom_components.plant_care_alerts.calibration_runtime", level="ERROR"
             ):
                 await manager.load()
-            await manager.async_refresh()
+            with self.assertNoLogs(
+                "custom_components.plant_care_alerts", level="ERROR"
+            ):
+                await manager.async_refresh()
             self.assertEqual(manager.records["a"]["calibration_witnesses"], witness)
             manager.store.async_save.assert_not_awaited()
             self.assertIsNone(manager.calibration.witnesses())
@@ -738,6 +803,324 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reading["raw_source_identity"])
         self.assertIsNone(reading["raw_source_value"])
         self.assertEqual(reading["sample_at"], sampled.timestamp())
+
+    async def test_legacy_calibration_record_is_fenced_before_recorder_reload(
+        self,
+    ) -> None:
+        from custom_components.plant_care_alerts.analytics import analyze
+
+        start = self.now - 5400
+        raw_states = watering_raw_states(start, physical_pin=22)
+        points = [
+            [state.last_updated.timestamp(), float(state.state)] for state in raw_states
+        ]
+        control = analyze({}, points, self.now, calibration=[67, 1298])
+        self.assertEqual(control["last_watering_source"], "auto")
+        for initial_points in (points, []):
+            with self.subTest(retained_adc_history=bool(initial_points)):
+                self.manager.history_loaded.clear()
+                self.manager.history_attempts.clear()
+                self.manager.history_failures.clear()
+                current = {}
+                self.manager._prepare_adc_context(current, "sensor.smooth", start)
+                current.update(
+                    adc_identity="sensor.raw",
+                    adc_calibration=[67, 1298],
+                    adc_samples=deepcopy(initial_points),
+                )
+                self.assertNotIn("adc_source_fence", current)
+                self.assertNotIn("adc_calibration_fence", current)
+                current = json.loads(json.dumps(current, allow_nan=False))
+                self.manager.records["a"] = current
+                self.manager.calibration.inhibit_writes("storage_unavailable")
+                observed_cutoffs = []
+
+                async def snapshot_after_migration(
+                    *_args: object,
+                    record: dict = current,
+                    cutoffs: list[float | None] = observed_cutoffs,
+                ) -> dict:
+                    cutoffs.append(record.get("adc_calibration_fence"))
+                    return {"sensor.raw": raw_states, "sensor.smooth": []}
+
+                recorder = SimpleNamespace(
+                    async_add_executor_job=AsyncMock(
+                        side_effect=snapshot_after_migration
+                    )
+                )
+                with (
+                    patch(
+                        "custom_components.plant_care_alerts.get_instance",
+                        return_value=recorder,
+                    ),
+                    patch(
+                        "custom_components.plant_care_alerts.dt_util.utcnow",
+                        return_value=datetime.fromtimestamp(self.now, UTC),
+                    ),
+                    self.assertNoLogs(
+                        "custom_components.plant_care_alerts", level="ERROR"
+                    ),
+                ):
+                    await self.manager._load_history("a", self.plant, self.now)
+                recorder.async_add_executor_job.assert_awaited_once()
+                self.assertEqual(observed_cutoffs, [self.now])
+                self.assertEqual(current["adc_samples"], points[-1:])
+                self.assertEqual(current["raw_value_history"], points)
+                result = analyze(
+                    current, current["adc_samples"], self.now, calibration=[67, 1298]
+                )
+                self.assertNotEqual(result.get("last_watering_source"), "auto")
+                restored = json.loads(json.dumps(current, allow_nan=False))
+                self.manager._prepare_adc_context(
+                    restored, "sensor.smooth", self.now + 300
+                )
+                self.assertEqual(restored["adc_calibration_fence"], self.now)
+
+    async def test_legacy_raw_history_survives_incomplete_recorder_reload(self) -> None:
+        from custom_components.plant_care_alerts.state_machine import evaluate
+
+        old = self.now - 13 * 3600
+        retained = [[old, 300], [old + 300, 300]]
+        sampled = datetime.fromtimestamp(self.now, UTC)
+        raw = SimpleNamespace(
+            state="300",
+            attributes={"sampled_at": sampled.isoformat(), "samples": [300] * 5},
+            last_updated=sampled,
+            last_reported=sampled,
+        )
+        smooth = SimpleNamespace(
+            state="50", attributes={}, last_updated=sampled, last_reported=sampled
+        )
+        states = {"sensor.raw": raw, "sensor.smooth": smooth}
+        self.hass.states.get = states.get
+        for partial in (False, True):
+            with self.subTest(partial_recorder=partial):
+                self.manager.history_loaded.clear()
+                self.manager.history_attempts.clear()
+                self.manager.history_failures.clear()
+                current = {}
+                self.manager._prepare_adc_context(current, "sensor.smooth", old)
+                current.update(
+                    status="ok",
+                    source_identity="sensor.smooth",
+                    last_observed_value=50,
+                    last_value_change_at=self.now - 600,
+                    adc_identity="sensor.raw",
+                    adc_calibration=[67, 1298],
+                    adc_samples=deepcopy(retained),
+                )
+                self.assertNotIn("raw_value_history", current)
+                self.assertNotIn("last_source_change_at", current)
+                current = json.loads(json.dumps(current, allow_nan=False))
+                self.manager.records["a"] = current
+                self.manager.calibration.inhibit_writes("storage_unavailable")
+                recorder = SimpleNamespace(
+                    async_add_executor_job=AsyncMock(
+                        return_value={
+                            "sensor.raw": [raw] if partial else [],
+                            "sensor.smooth": [],
+                        }
+                    )
+                )
+                with (
+                    patch(
+                        "custom_components.plant_care_alerts.get_instance",
+                        return_value=recorder,
+                    ),
+                    patch(
+                        "custom_components.plant_care_alerts.dt_util.utcnow",
+                        return_value=sampled,
+                    ),
+                    self.assertNoLogs(
+                        "custom_components.plant_care_alerts", level="ERROR"
+                    ),
+                ):
+                    await self.manager._load_history("a", self.plant, self.now)
+                self.manager._collect_adc_samples(
+                    current, "sensor.raw", raw, [67, 1298], self.now
+                )
+                reading = self.manager._reading(self.plant, self.now)
+                result = evaluate(current, reading, self.now, self.manager.settings)
+                recorder.async_add_executor_job.assert_awaited_once()
+                self.assertEqual(result["last_source_change_at"], old)
+                self.assertEqual(result["last_source_value"], 300)
+                self.assertEqual(result["status"], "sensor_error")
+                self.assertEqual(result["reliability_incident_reason"], "raw_unchanged")
+                self.assertEqual(
+                    current["raw_value_history"], [*retained, [self.now, 300]]
+                )
+                self.assertEqual(current["adc_samples"], [[self.now, 300]])
+                self.assertEqual(current["adc_calibration_fence"], self.now)
+                self.assertEqual(
+                    json.loads(json.dumps(result, allow_nan=False)), result
+                )
+
+    async def test_failed_source_reload_discards_previous_raw_value_history(
+        self,
+    ) -> None:
+        current = {}
+        self.manager._prepare_adc_context(current, "sensor.smooth", self.now - 600)
+        current["adc_identity"] = "sensor.raw"
+        current["adc_samples"] = [[self.now - 600, 180]]
+        current["raw_value_history"] = [[self.now - 600, 180]]
+        self.manager.records["a"] = current
+        self.manager.config["freshness_sources"] = {"sensor.smooth": "sensor.new_raw"}
+
+        observed_during_read = []
+
+        async def fail_after_context_reset(*_args: object) -> None:
+            observed_during_read.append(
+                {
+                    "raw_history_present": "raw_value_history" in current,
+                    "adc_samples": deepcopy(current.get("adc_samples")),
+                }
+            )
+            message = "Recorder unavailable after source change"
+            raise OSError(message)
+
+        recorder = SimpleNamespace(
+            async_add_executor_job=AsyncMock(side_effect=fail_after_context_reset)
+        )
+        with (
+            patch(
+                "custom_components.plant_care_alerts.get_instance",
+                return_value=recorder,
+            ),
+            self.assertLogs(
+                "custom_components.plant_care_alerts", level="ERROR"
+            ) as logged,
+        ):
+            await self.manager._load_history("a", self.plant, self.now)
+        recorder.async_add_executor_job.assert_awaited_once()
+        self.assertEqual(
+            observed_during_read, [{"raw_history_present": False, "adc_samples": []}]
+        )
+        self.assertIs(logged.records[0].exc_info[0], OSError)
+        self.assertNotIn("raw_value_history", current)
+        self.assertEqual(current["adc_samples"], [])
+        self.assertEqual(current["adc_identity"], "sensor.new_raw")
+        self.assertEqual(current["adc_source_fence"], self.now)
+        self.assertEqual(current["adc_source_context"][1], "sensor.new_raw")
+        self.assertEqual(json.loads(json.dumps(current, allow_nan=False)), current)
+
+    async def test_live_raw_change_during_recorder_reload_keeps_physical_clock(
+        self,
+    ) -> None:
+        await self._assert_live_raw_clock(
+            (300, 340, 340), persisted=False, expected_change_at=self.now - 600
+        )
+
+    async def test_persisted_raw_clock_uses_the_coalesced_change_timestamp(
+        self,
+    ) -> None:
+        await self._assert_live_raw_clock(
+            (300, 340, 340), persisted=True, expected_change_at=self.now - 600
+        )
+
+    async def test_persisted_raw_clock_tracks_a_return_to_the_previous_value(
+        self,
+    ) -> None:
+        await self._assert_live_raw_clock(
+            (300, 340, 300), persisted=True, expected_change_at=self.now - 300
+        )
+
+    async def test_persisted_plateau_clock_precedes_retained_same_value_history(
+        self,
+    ) -> None:
+        old = self.now - 13 * 3600
+        await self._assert_live_raw_clock(
+            (300, 300, 300),
+            persisted=True,
+            expected_change_at=old,
+            persisted_change_at=old,
+        )
+
+    async def _assert_live_raw_clock(
+        self,
+        values: tuple[int, int, int],
+        *,
+        persisted: bool,
+        expected_change_at: float,
+        persisted_change_at: float | None = None,
+    ) -> None:
+        times = [
+            datetime.fromtimestamp(self.now - offset, UTC) for offset in (900, 600, 300)
+        ]
+        raw_states = [
+            SimpleNamespace(
+                state=str(value),
+                attributes={"sampled_at": at.isoformat(), "samples": [value] * 5},
+                last_updated=at,
+                last_reported=at,
+            )
+            for value, at in zip(values, times, strict=True)
+        ]
+        smooth = SimpleNamespace(
+            state="50", attributes={}, last_updated=times[0], last_reported=times[2]
+        )
+        states = {"sensor.raw": raw_states[0], "sensor.smooth": smooth}
+        self.hass.states.get = states.get
+        self.hass.data["adaptive_plant"] = {"a": self.plant}
+        boundary = (times[1].timestamp() + times[2].timestamp()) / 2
+        current = {
+            "status": "ok",
+            "source_identity": "sensor.smooth",
+            "last_observed_value": 50,
+            "last_value_change_at": times[0].timestamp(),
+            "adc_calibration_fence": boundary,
+        }
+        self.manager._prepare_adc_context(
+            current, "sensor.smooth", times[0].timestamp()
+        )
+        if persisted:
+            current.update(
+                raw_source_identity="sensor.raw",
+                last_source_value=values[0],
+                last_source_change_at=(
+                    times[0].timestamp()
+                    if persisted_change_at is None
+                    else persisted_change_at
+                ),
+                reliability_last_sample_at=times[0].timestamp(),
+            )
+        self.manager.records["a"] = json.loads(json.dumps(current, allow_nan=False))
+
+        async def record_during_read(*_args: object) -> dict:
+            for raw in raw_states[1:]:
+                states["sensor.raw"] = raw
+                event = SimpleNamespace(
+                    data={"entity_id": "sensor.raw", "new_state": raw},
+                    time_fired=raw.last_updated,
+                )
+                self.manager.note_source_event(event)
+                await self.manager.async_refresh()
+            return {"sensor.raw": raw_states[:1], "sensor.smooth": [smooth]}
+
+        recorder = SimpleNamespace(
+            async_add_executor_job=AsyncMock(side_effect=record_during_read)
+        )
+        with (
+            patch(
+                "custom_components.plant_care_alerts.get_instance",
+                return_value=recorder,
+            ),
+            patch(
+                "custom_components.plant_care_alerts.dt_util.utcnow",
+                return_value=datetime.fromtimestamp(self.now, UTC),
+            ),
+            self.assertNoLogs("custom_components.plant_care_alerts", level="ERROR"),
+        ):
+            await self.manager.async_refresh()
+        recorder.async_add_executor_job.assert_awaited_once()
+        current = self.manager.records["a"]
+        self.assertEqual(
+            current["raw_value_history"],
+            [[at.timestamp(), value] for at, value in zip(times, values, strict=True)],
+        )
+        self.assertEqual(current["last_source_change_at"], expected_change_at)
+        self.assertEqual(current["last_source_value"], values[-1])
+        self.assertEqual(current["adc_calibration_fence"], boundary)
+        self.assertEqual(current["adc_samples"], [[times[2].timestamp(), values[-1]]])
 
     async def test_changed_raw_mapping_loads_history_before_reliability(self) -> None:
         sampled = datetime.now(UTC)

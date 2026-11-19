@@ -53,7 +53,14 @@ def number(value: Any) -> float | None:
         return None
 
 
-def history_clock(points: list, now: float, *, maximum: float | None = None) -> tuple:
+def history_clock(
+    points: list,
+    now: float,
+    *,
+    maximum: float | None = None,
+    initial_value: float | None = None,
+    initial_changed_at: float | None = None,
+) -> tuple:
     """Ignore repeated/restored states and outages without inventing a new change."""
     valid = {}
     for point in points:
@@ -68,8 +75,12 @@ def history_clock(points: list, now: float, *, maximum: float | None = None) -> 
             and (maximum is None or 0 <= value <= maximum)
         ):
             valid.setdefault(stamp, value)
-    value = changed = None
+    value, changed = number(initial_value), number(initial_changed_at)
+    if value is None or changed is None:
+        value = changed = None
     for stamp, current in sorted(valid.items()):
+        if changed is not None and stamp <= changed:
+            continue
         if current != value:
             value, changed = current, stamp
     return value, changed
@@ -114,12 +125,13 @@ def _raw_clock(state: dict, previous: dict, reading: dict, now: float) -> None:
         state.update(last_source_value=None, last_source_change_at=None)
     if identity is None:
         return
-    if (
-        state.get("last_source_change_at") is None
-        and _same_source(previous, reading)
-        and previous.get("adc_identity") == identity
-    ):
-        raw, changed = history_clock(previous.get("adc_samples", []), now)
+    if _same_source(previous, reading) and previous.get("adc_identity") == identity:
+        raw, changed = history_clock(
+            previous.get("raw_value_history", previous.get("adc_samples", [])),
+            now,
+            initial_value=state.get("last_source_value"),
+            initial_changed_at=state.get("last_source_change_at"),
+        )
         if changed is not None:
             state.update(last_source_value=raw, last_source_change_at=changed)
 

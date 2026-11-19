@@ -888,6 +888,7 @@ class CareManager:
         )
         if changed:
             self._reset_adc_samples(current)
+            current.pop("raw_value_history", None)
             current["adc_source_fence"] = now
         current["adc_source_context"] = context
         return changed
@@ -930,6 +931,7 @@ class CareManager:
             "adc_identity" in record and record["adc_identity"] != raw_id
         ):
             self._reset_adc_samples(record)
+            record.pop("raw_value_history", None)
             self.history_loaded.discard(identity)
             self.history_attempts.pop(identity, None)
         record["adc_identity"] = raw_id
@@ -941,6 +943,9 @@ class CareManager:
             or now - self.history_attempts.get(identity, 0) < retry_delay
         ):
             return
+        # Legacy settings lack a trustworthy boundary for pre-change inference.
+        if "adc_calibration" in record:
+            record.setdefault("adc_calibration_fence", now)
         self.history_attempts[identity] = now
         self.history_failures[identity] = self.history_failures.get(identity, 0) + 1
         try:
@@ -1021,6 +1026,11 @@ class CareManager:
         return calibration
 
     @staticmethod
+    def _retained_raw_points(current: dict) -> list:
+        """Migrate a legacy buffer only when no factual buffer has been recorded."""
+        return list(current.get("raw_value_history", current.get("adc_samples", [])))
+
+    @staticmethod
     def _reset_adc_samples(current: dict) -> None:
         for key in (
             "adc_samples",
@@ -1048,6 +1058,13 @@ class CareManager:
             and previous_calibration is not None
             and previous_calibration != calibration
         )
+        if calibration_changed:
+            if not source_changed:
+                current["raw_value_history"] = CareManager._retained_raw_points(current)
+            # Recorder replay must retain this boundary without calibration storage.
+            current["adc_calibration_fence"] = max(
+                finite(current.get("adc_calibration_fence")) or 0, now
+            )
         if source_changed or calibration_changed:
             CareManager._reset_adc_samples(current)
         if calibration is not None:
@@ -1058,7 +1075,11 @@ class CareManager:
     @staticmethod
     def _merge_adc_states(current: dict, states: list, now: float) -> None:
         """Keep burst contradictions and actual state interruptions with raw history."""
-        fence = finite(current.get("adc_source_fence")) or 0
+        fence = max(
+            finite(current.get("adc_source_fence")) or 0,
+            finite(current.get("adc_calibration_fence")) or 0,
+        )
+        raw_points = CareManager._retained_raw_points(current)
         points = [
             point for point in current.get("adc_samples", []) if point[0] >= fence
         ]
@@ -1067,7 +1088,7 @@ class CareManager:
         provenance = dict(current.get("adc_provenance", []))
         interruptions = set(current.get("watering_interruptions", []))
         for state in states:
-            point = CareManager._adc_observation(state, interruptions)
+            point = CareManager._adc_observation(state, interruptions, raw_points)
             if point is None or point[0] < fence:
                 continue
             stamp = point[0]
@@ -1076,6 +1097,7 @@ class CareManager:
             fingerprint = canonical_digest(state.attributes.get("physical_pin"))
             if provenance.setdefault(stamp, fingerprint) != fingerprint:
                 conflicts.add(stamp)
+        current["raw_value_history"], _ = normalize_adc_points(raw_points, now)
         current["adc_samples"], current["watering_conflicts"] = normalize_adc_points(
             points, now, conflicts=conflicts
         )
@@ -1086,12 +1108,16 @@ class CareManager:
         CareManager._retain_source_fences(current, provenance, interruptions, now)
 
     @staticmethod
-    def _adc_observation(state: Any, interruptions: set) -> list | None:
-        """Use a physical timestamp for values and transition time for outages."""
+    def _adc_observation(
+        state: Any, interruptions: set, raw_points: list
+    ) -> list | None:
+        """Retain a physical point before inference cutoffs, or record an outage."""
         stamp = timestamp(state.attributes.get("sampled_at"))
         value = finite(state.state)
         if stamp is not None and value is not None:
-            return [stamp, value]
+            point = [stamp, value]
+            raw_points.append(point)
+            return point
         interrupted_at = timestamp(getattr(state, "last_updated", None))
         if interrupted_at is not None:
             interruptions.add(interrupted_at)
