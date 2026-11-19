@@ -90,6 +90,7 @@ class RepeatMutationBudgetCases(base.NativeStartupBudgetCases):
         outcomes = []
         times = []
         stopper = None
+        cancel_seen = False
 
         def stop() -> None:
             times.append(self.clock.now)
@@ -100,10 +101,10 @@ class RepeatMutationBudgetCases(base.NativeStartupBudgetCases):
             times.append(self.clock.now)
 
         def start_stop() -> None:
-            nonlocal stopper
+            nonlocal cancel_seen, stopper
             stopper = threading.Thread(target=stop)
             stopper.start()
-            self.assertTrue(controller._cancelled.wait(1))
+            cancel_seen = controller._cancelled.wait(1)
 
         self.on_repeat = start_stop
         try:
@@ -112,6 +113,7 @@ class RepeatMutationBudgetCases(base.NativeStartupBudgetCases):
         finally:
             if stopper is not None:
                 stopper.join(timeout=2)
+        self.assertTrue(cancel_seen)
         self.assertIsNotNone(stopper)
         self.assertFalse(stopper.is_alive())
         self.assertEqual(len(outcomes), 1)

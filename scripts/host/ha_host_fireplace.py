@@ -15,6 +15,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+_MUTATION_METHODS = frozenset({"Player.Open", "Player.Stop", "Player.SetRepeat"})
+_MUTATION_TIMEOUT_SECONDS = 8.0
+_READ_TIMEOUT_SECONDS = 1.0
+
+
 def _load_host_module(name: str) -> Any:
     spec = importlib.util.spec_from_file_location(
         name, Path(__file__).with_name(name + ".py")
@@ -61,7 +66,7 @@ class FireplaceEndpoints:
         if self._audit is None:
             return
         error_class = type(error).__name__ if error is not None else "-"
-        if method not in {"Player.Open", "Player.Stop", "Player.SetRepeat"}:
+        if method not in _MUTATION_METHODS:
             key = (method, outcome, error_class)
             failure_log_interval = 5.0
             if (
@@ -86,7 +91,9 @@ class FireplaceEndpoints:
             message = "deadline"
             raise _fireplace_module.RpcNotDispatchedError(message)
         call_timeout = (
-            8.0 if method in {"Player.Open", "Player.Stop", "Player.SetRepeat"} else 1.0
+            _MUTATION_TIMEOUT_SECONDS
+            if method in _MUTATION_METHODS
+            else _READ_TIMEOUT_SECONDS
         )
         try:
             response = self._rpc(method, params, timeout=min(call_timeout, remaining))
@@ -109,7 +116,7 @@ class FireplaceEndpoints:
             self._audit_rpc(method, "rejected", started)
             message = "rpc_unavailable"
             raise FireplaceError(message)
-        if method in {"Player.Open", "Player.Stop", "Player.SetRepeat"}:
+        if method in _MUTATION_METHODS:
             self._audit_rpc(method, "acknowledged", started)
         return body["result"]
 
