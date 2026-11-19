@@ -302,6 +302,7 @@ class PowerPair:
             if (
                 generation != self._generation
                 and self._started
+                and caller is not None
                 and not caller.cancelling()
             ):
                 # Keep the one driver alive; only this obsolete batch ended.

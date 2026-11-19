@@ -111,7 +111,7 @@ reload the EKF entry once the config-entry and YAML references are updated.
 
 Power synchronization watches two independent observations for each pair. Samsung uses the matching passive identity endpoint; Chromecast uses Android TV Remote's pushed on/off state. Google Cast's off/idle playback state is never used as hardware power. The projector uses its matching HDMI display and Kodi uses the authenticated host bridge GET /kodi/status, which reports the actual systemd unit/process state. A loaded inactive/failed unit with a valid zero MainPID is OFF only when an independent Kodi process probe also confirms absence. Supervisor failure/result/exit status remain separate diagnostics; a normal SIGTERM shutdown can leave the wrapper at exit 143. Transitional units, inconsistent process evidence, malformed/read failures, stale polls, and network outages remain unknown.
 
-Explicit canonical power requests drive both partners. An observed external transition (TV remote, Chromecast remote, projector remote, Kodi start or quit) drives its partner. Duplicates and echoes share one request. An opposite request takes precedence over delayed confirmation from the previous request, and each physical side is attempted only once per intent. A request finishes only after both states confirm it; failure is exposed through power_sync_error without optimistically changing either entity. Projector shutdown retains the existing fresh HDMI and 30-second stable-on guards before its two POWER frames.
+Explicit canonical power requests drive both partners. An observed external transition (TV remote, Chromecast remote, projector remote, Kodi start or quit) drives its partner. Duplicates and echoes share one request. An opposite request takes precedence over delayed confirmation from the previous request. Commands normally run once per side for an intent. Preemption can require an inverse despite an already-matching observation; bounded late-feedback correction can reassert the current intent without creating another intent revision. A request finishes only after both states confirm it; failure is exposed through power_sync_error without optimistically changing either entity. Projector shutdown retains the existing fresh HDMI and 30-second stable-on guards before its two POWER frames.
 
 On startup, the first complete pair of live observations is reconciled using the physical display; an explicit request during startup takes precedence. Unloading cancels monitoring and emits no power commands. Projector commands require known, fresh HDMI state; Samsung's discrete ON/OFF remains safe to request when its endpoint is unknown. The host Kodi launcher allows 90 seconds for HDMI so an externally started Kodi cannot prematurely select its headless windowing mode during projector boot.
 
@@ -132,6 +132,17 @@ update its attributes.
 | TV ON, projector OFF | Chromecast |
 | Both ON | Chromecast |
 | Unknown power | No OFF inference; Chromecast is the safe default |
+
+Power keeps the pair captured for that physical press. A projector-targeted
+Power command is blocked while its shutdown latch is active and cannot be
+retargeted through fallback to the TV. A fresh Power press uses its newly
+captured target.
+
+Ordinary TV navigation, volume and transport are dropped with `tv_off` while an
+OFF request is active, or when the display is confirmed OFF and no ON request
+is active. Keys remain available during an accepted startup while network
+feedback lags. Explicit Power, INPUT and app selection retain their wake paths;
+ordinary fallback keys cannot wake the off TV through Chromecast.
 
 A single INPUT changes the display group. It retains the existing wake rule:
 when only the other group is ON, selecting an explicitly OFF display requests

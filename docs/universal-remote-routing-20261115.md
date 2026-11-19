@@ -22,10 +22,11 @@ OFF request. A newer opposite request cancels the old confirmation wait and send
 the discrete inverse without waiting for startup. Late acknowledgements retain
 the latest intent only within the existing bounded confirmation window.
 
-Ordinary TV navigation, volume and transport keys are dropped when the display
-is confirmed OFF or an OFF request is still active. An automatic fallback must
-not wake Chromecast through HDMI-CEC. Explicit Power, INPUT and app selection
-remain the wake controls.
+Ordinary TV navigation, volume and transport keys are dropped while an OFF
+request is active, or when the display is confirmed OFF and no ON request is
+active. Keys remain available during an accepted startup while network feedback
+lags. An automatic fallback must not wake Chromecast through HDMI-CEC. Explicit
+Power, INPUT and app selection remain the wake controls.
 
 The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded

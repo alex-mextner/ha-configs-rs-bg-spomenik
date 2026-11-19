@@ -393,7 +393,8 @@ class SamsungTvMediaPlayer(
                 try:
                     await task
                 except asyncio.CancelledError:
-                    if asyncio.current_task().cancelling():
+                    caller = asyncio.current_task()
+                    if caller is None or caller.cancelling():
                         raise
             if task is None or task.done():
                 observed = self.coordinator.data
@@ -417,7 +418,11 @@ class SamsungTvMediaPlayer(
             await asyncio.shield(task)
         except asyncio.CancelledError:
             caller = asyncio.current_task()
-            if generation != self._power_generation and not caller.cancelling():
+            if (
+                generation != self._power_generation
+                and caller is not None
+                and not caller.cancelling()
+            ):
                 error_message = (
                     "Samsung power request was superseded by a newer request"
                 )

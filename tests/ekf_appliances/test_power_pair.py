@@ -99,6 +99,7 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         latest = self.pair._request(target=False)
         worker = self.pair._worker
+        assert worker is not None
         worker.cancel()
         try:
             await self.settle()
