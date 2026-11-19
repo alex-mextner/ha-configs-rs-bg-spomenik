@@ -18,6 +18,6 @@ remote_announcements:
   aisis_connected_entity: sensor.aisis_speaker_m00zrw3008rajg_connected
   area: gostinaia
   tts_entity: tts.bracho_bracho
-  volume_floor: 0.5
+  volume_floor: 0.4
   tempo: 1.25
   music_mode: native
