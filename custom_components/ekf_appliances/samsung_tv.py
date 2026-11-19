@@ -386,6 +386,11 @@ class SamsungTvMediaPlayer(
                 and turn_on != self._power_target
             )
             if superseding:
+                if not self.runtime.available:
+                    error_message = (
+                        f"IR transmitter {self.runtime.remote_entity_id} is unavailable"
+                    )
+                    raise HomeAssistantError(error_message)
                 # Discrete OFF must not wait through an earlier ON confirmation.
                 # The transport retains its frame deadline across cancellation.
                 self._power_generation += 1

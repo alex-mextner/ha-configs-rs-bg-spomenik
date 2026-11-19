@@ -344,7 +344,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             "TV guarded test",
             PowerEndpoint(lambda: self.coordinator.data, self.player._async_power),
             PowerEndpoint(lambda: player_state[0], player_power),
-            hooks=PowerPairHooks(changed=self.player.async_write_ha_state),
+            hooks=PowerPairHooks(
+                changed=self.player.async_write_ha_state, preempt_commands=True
+            ),
         )
         self.runtime.tv_power_pair = pair
         pair.start()
@@ -613,6 +615,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
                 allow_unknown_command=True,
             ),
             PowerEndpoint(lambda: player_state[0], player_power),
+            hooks=PowerPairHooks(preempt_commands=True),
         )
         self.runtime.tv_power_pair = pair
         unsubscribe = self.coordinator.async_add_listener(pair.observe)
@@ -648,6 +651,71 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             await self.player.async_cancel_power()
             await asyncio.gather(old, latest, return_exceptions=True)
 
+    async def test_unavailable_inverse_keeps_guard_for_recovered_power_off(
+        self,
+    ) -> None:
+        player_state = [False]
+
+        async def player_power(target) -> None:
+            player_state[0] = target
+            pair.observe()
+
+        pair = PowerPair(
+            "TV unavailable inverse test",
+            PowerEndpoint(
+                lambda: self.coordinator.data,
+                self.player._async_power,
+                allow_unknown_command=True,
+            ),
+            PowerEndpoint(
+                lambda: player_state[0], player_power, wait_for_feedback=True
+            ),
+            hooks=PowerPairHooks(preempt_commands=True),
+        )
+        self.runtime.tv_power_pair = pair
+        unsubscribe = self.coordinator.async_add_listener(pair.observe)
+        pair.start()
+        tasks = []
+        try:
+            # A matching-state no-op does not need the transmitter.
+            self.hass.states.async_set("remote.ekf_connect_ir", "unavailable")
+            await self.player._async_power(turn_on=False)
+            self.assertEqual(self.commands, [])
+            self.hass.states.async_set("remote.ekf_connect_ir", "on")
+            tasks.append(asyncio.create_task(self.player.async_turn_on()))
+            await self.sent.wait()
+            await self.real_sleep(0)
+            old_guard = self.player._power_task
+            assert old_guard is not None
+            self.hass.states.async_set("remote.ekf_connect_ir", "unavailable")
+            duplicate = asyncio.create_task(self.player._async_power(turn_on=True))
+            tasks.append(duplicate)
+            await self.real_sleep(0)
+            self.assertFalse(duplicate.done())
+            with self.assertRaisesRegex(HomeAssistantError, "unavailable"):
+                await self.player.async_turn_off()
+            guard_retained = not old_guard.done()
+            self.assertFalse(player_state[0])
+            self.assertIsNone(pair.target)
+
+            self.hass.states.async_set("remote.ekf_connect_ir", "on")
+            next_power = asyncio.create_task(self.player.async_toggle())
+            tasks.append(next_power)
+            await self.real_sleep(0.01)
+            self.assertEqual(
+                [wire_code(call["command"]) for call in self.commands],
+                [0xE0E09966, 0xE0E019E6],
+            )
+            await asyncio.wait_for(next_power, 0.1)
+            self.assertTrue(guard_retained)
+            self.assertIs(pair.last_intent, expr2=False)
+            self.assertFalse(player_state[0])
+        finally:
+            unsubscribe()
+            await pair.close()
+            await self.player.async_cancel_power()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def test_paired_toggle_turns_off_a_player_when_the_display_is_off(
         self,
     ) -> None:
@@ -668,6 +736,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
             PowerEndpoint(lambda: player_state[0], player_power),
             timeout=0.03,
+            hooks=PowerPairHooks(preempt_commands=True),
         )
         self.runtime.tv_power_pair = pair
         pair.start()

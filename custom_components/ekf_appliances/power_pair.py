@@ -36,10 +36,11 @@ class PowerEndpoint:
 
 @dataclass(frozen=True)
 class PowerPairHooks:
-    """Bind HA state publication, accepted intent and task creation together."""
+    """Bind lifecycle callbacks and opt-in command cancellation policy."""
 
     changed: Callable[[], None] | None = None
     requested: Callable[[bool], None] | None = None
+    preempt_commands: bool = False
     create_task: (
         Callable[[Coroutine[Any, Any, None], str], asyncio.Task[None]] | None
     ) = None
@@ -62,6 +63,7 @@ class PowerPair:
         self.endpoints = {"display": display, "player": player}
         self.timeout = timeout
         bindings = hooks or PowerPairHooks()
+        self.preempt_commands = bindings.preempt_commands
         self.changed = bindings.changed or (lambda: None)
         self.requested = bindings.requested or (lambda _target: None)
         self._create_task = bindings.create_task or (
@@ -198,7 +200,13 @@ class PowerPair:
             if expected is not target and deadline >= now
         }
         self.target = target
-        if self._command_batch is not None and not self._command_batch.done():
+        # Only bindings with cancellation-safe endpoints may interrupt a batch.
+        # Projector OFF must finish its persistent latch and physical sequence.
+        if (
+            self.preempt_commands
+            and self._command_batch is not None
+            and not self._command_batch.done()
+        ):
             self._command_batch.cancel()
         self.last_error = None
         self._deadline = asyncio.get_running_loop().time() + self.timeout
@@ -316,7 +324,9 @@ class PowerPair:
         target: bool,
         attempted: set[tuple[int, str]],
     ) -> None:
-        if generation != self._generation or not self._started:
+        if not self._started or (
+            self.preempt_commands and generation != self._generation
+        ):
             return
         endpoint = self.endpoints[side]
         value = endpoint.read()

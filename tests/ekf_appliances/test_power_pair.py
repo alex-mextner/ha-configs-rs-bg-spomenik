@@ -7,7 +7,11 @@ import unittest
 
 from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.ekf_appliances.power_pair import PowerEndpoint, PowerPair
+from custom_components.ekf_appliances.power_pair import (
+    PowerEndpoint,
+    PowerPair,
+    PowerPairHooks,
+)
 
 
 class PowerPairTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +37,11 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
             return PowerEndpoint(lambda: self.states[name], command)
 
         self.pair = PowerPair(
-            "Test", endpoint("display"), endpoint("player"), timeout=0.3
+            "Test",
+            endpoint("display"),
+            endpoint("player"),
+            timeout=0.3,
+            hooks=PowerPairHooks(preempt_commands=True),
         )
         self.pair.start()
         await asyncio.sleep(0)
@@ -628,6 +636,7 @@ class StateGatedPowerPairTests(unittest.IsolatedAsyncioTestCase):
                 wait_for_feedback=True,
             ),
             timeout=0.3,
+            hooks=PowerPairHooks(preempt_commands=True),
         )
         self.pair.start()
         await self.settle()

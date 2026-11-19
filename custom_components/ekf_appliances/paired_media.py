@@ -216,6 +216,7 @@ def install_power_pairs(
         hooks=PowerPairHooks(
             changed=notify(television),
             create_task=hass.async_create_task,
+            preempt_commands=True,
         ),
     )
     runtime.tv_power_pair = television_pair
