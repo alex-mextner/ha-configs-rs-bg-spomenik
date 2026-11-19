@@ -37,6 +37,9 @@ STAGING=$STATE/staging
 REASON=$STATE/.reason
 # the tag of the nightly snapshots: `run` sets it, retention and the drill only look at those
 NIGHTLY=nightly
+# the tag `run` gives a snapshot when none of the paths exist (only the dumps): kept apart so it never takes a nightly
+# retention slot from an older full snapshot, nor becomes the drill's snapshot; the next full run forgets them
+DUMPS_ONLY=dumps-only
 RESTIC=$(cfg '.restic_program // "restic"')
 RCLONE=$(cfg '.rclone_program // "rclone"')
 export RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_CACHE_DIR
@@ -252,7 +255,10 @@ list_excludes() {
 }
 
 do_run() {
-	local dump_failed="" files excludes code
+	local dump_failed="" no_paths="" incomplete="" cleanup_failed="" tag=$NIGHTLY files excludes code ids superseded
+	# without paths the run would back up only the dumps and still report ok (debian/run checks this at install too;
+	# this also covers NixOS)
+	jq -e '.paths | type == "array" and length > 0' "$CONFIG" >/dev/null || die "config: paths must be a non-empty list"
 	need_secrets
 	open_repository
 	attempt do_dump
@@ -265,17 +271,42 @@ do_run() {
 	excludes=$(mktemp "$STATE/.exclude.XXXXXX")
 	list_paths >"$files"
 	list_excludes >"$excludes"
+	# list_paths prints the staging dir and then each path that exists: one line = none of the paths exist. Still
+	# back up the dumps, then fail
+	if (($(wc -l <"$files") == 1)); then
+		no_paths="none of the configured paths exist on this host: $(cfg '.paths | join(" ")')"
+		tag=$DUMPS_ONLY
+	fi
 	code=0
-	restic backup --host "$HOST" --tag "$NIGHTLY" --files-from-verbatim "$files" --exclude-file "$excludes" \
+	restic backup --host "$HOST" --tag "$tag" --files-from-verbatim "$files" --exclude-file "$excludes" \
 		--exclude-caches || code=$?
 	rm -f "$files" "$excludes"
 	# 3 = snapshot written but some files could not be read: keep going (retention), report it as a failure
-	((code == 0 || code == 3)) || die "restic backup failed (exit $code)${dump_failed:+; $dump_failed}"
+	((code == 0 || code == 3)) || die "restic backup failed (exit $code)${no_paths:+; $no_paths}${dump_failed:+; $dump_failed}"
+	((code == 0)) || incomplete="snapshot is incomplete: some files could not be read (see the journal)"
+	if [[ -n $no_paths ]]; then
+		# bounded while the condition lasts: the last 7 dumps-only snapshots, the data of older ones pruned
+		restic forget --host "$HOST" --tag "$DUMPS_ONLY" --group-by host --keep-last 7 --prune ||
+			log "forget of the older $DUMPS_ONLY snapshots failed"
+		die "$no_paths (snapshot tagged $DUMPS_ONLY, nightly retention skipped)${incomplete:+; $incomplete}${dump_failed:+; $dump_failed}"
+	fi
+	# a full snapshot supersedes the dumps-only ones. Forget with its own --prune: the nightly forget below prunes only
+	# when it removes a snapshot itself. A failure here fails the run but keeps the nightly retention; the next full run
+	# retries
+	if ids=$(restic snapshots --host "$HOST" --tag "$DUMPS_ONLY" --json | jq -r '.[].id'); then
+		if [[ -n $ids ]]; then
+			mapfile -t superseded <<<"$ids"
+			restic forget --prune "${superseded[@]}" || cleanup_failed="forget of the superseded $DUMPS_ONLY snapshots failed"
+		fi
+	else
+		cleanup_failed="listing the $DUMPS_ONLY snapshots failed"
+	fi
 	restic forget --host "$HOST" --tag "$NIGHTLY" --group-by host --prune \
 		--keep-daily "$(cfg .policy.retention.keep_daily)" \
 		--keep-weekly "$(cfg .policy.retention.keep_weekly)" \
 		--keep-monthly "$(cfg .policy.retention.keep_monthly)"
-	((code == 0)) || die "snapshot is incomplete: some files could not be read (see the journal)${dump_failed:+; $dump_failed}"
+	[[ -z $incomplete ]] || die "$incomplete${cleanup_failed:+; $cleanup_failed}${dump_failed:+; $dump_failed}"
+	[[ -z $cleanup_failed ]] || die "$cleanup_failed (the next full run retries)${dump_failed:+; $dump_failed}"
 	[[ -z $dump_failed ]] || die "$dump_failed (the snapshot holds the previous dumps of those)"
 }
 

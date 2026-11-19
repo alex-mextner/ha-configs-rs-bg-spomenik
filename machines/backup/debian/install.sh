@@ -4,16 +4,17 @@
 #   ./install.sh HOST            preview (plan): every change as a diff; changes nothing; exit 3 while drifting
 #   ./install.sh HOST --commit   apply; a second run is silent and exits 0
 #   ./install.sh HOST check      read-only, exit 0 converged / 3 drift
-# HOST is a file name in ../hosts/ without .toml. scope = "system" hosts need sudo; scope = "user" hosts run as the user.
+# HOST is a file name in ../hosts/ without .toml. scope = "system" hosts need sudo (without it: exit 6); scope = "user"
+# hosts run as the user.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-[[ $# -ge 1 ]] || { sed -n '2,7p' "$0" >&2; exit 2; }
+[[ $# -ge 1 ]] || { sed -n '2,8p' "$0" >&2; exit 2; }
 host=$1
 case ${2:-} in
 "") mode=plan ;;
 --commit) mode=install ;;
 check) mode=check ;;
-*) sed -n '2,7p' "$0" >&2; exit 2 ;;
+*) sed -n '2,8p' "$0" >&2; exit 2 ;;
 esac
 for tool in python3 jq curl; do
 	command -v "$tool" >/dev/null || { echo "install.sh: $tool is missing: apt-get install -y $tool" >&2; exit 2; }

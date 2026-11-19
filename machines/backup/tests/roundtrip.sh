@@ -222,6 +222,38 @@ jq -e '.message | test("password file")' "$tmp/state/status-run.json" >/dev/null
 mv "$tmp/password.away" "$tmp/password"
 pass "missing password file reported"
 
+# paths missing, empty or not a list: the run fails before anything is dumped or backed up
+snapshots_before=$(restic snapshots --json | jq length)
+for filter in 'del(.paths)' '.paths = []' '.paths = "/srv"'; do
+	rm -f "$tmp/state/status-run.json"
+	jq "$filter" "$config" >"$tmp/bad-paths.json"
+	if hb "$tmp/bad-paths.json" run; then fail "run with $filter succeeded"; fi
+	jq -e '.ok == false and (.message | test("paths must be a non-empty list"))' "$tmp/state/status-run.json" \
+		>/dev/null || fail "$filter not reported: $(cat "$tmp/state/status-run.json" 2>/dev/null)"
+done
+(($(restic snapshots --json | jq length) == snapshots_before)) || fail "a run with malformed paths wrote a snapshot"
+# none of the paths on this host: the dumps are still backed up, tagged apart from the nightly ones (so nightly
+# retention never counts them), and the run fails
+nightly_before=$(restic snapshots --tag nightly --json | jq length)
+rm -f "$tmp/state/status-run.json"
+jq --arg tmp "$tmp" '.paths = ["\($tmp)/does-not-exist"]' "$config" >"$tmp/bad-paths.json"
+if hb "$tmp/bad-paths.json" run; then fail "run with no existing path succeeded"; fi
+jq -e '.ok == false and (.message | test("none of the configured paths exist"))' "$tmp/state/status-run.json" \
+	>/dev/null || fail "absent paths not reported: $(cat "$tmp/state/status-run.json" 2>/dev/null)"
+(($(restic snapshots --tag dumps-only --json | jq length) == 1)) || fail "absent paths: no dumps-only snapshot written"
+(($(restic snapshots --tag nightly --json | jq length) == nightly_before)) ||
+	fail "absent paths: the dumps-only snapshot is tagged nightly"
+# while it lasts only the last 7 dumps-only snapshots are kept; the drill still takes the latest nightly one (a
+# dumps-only snapshot has no drill_file); the next full run forgets the dumps-only ones
+for _ in 1 2 3 4 5 6 7; do
+	if hb "$tmp/bad-paths.json" run; then fail "run with no existing path succeeded"; fi
+done
+(($(restic snapshots --tag dumps-only --json | jq length) == 7)) || fail "absent paths: more than 7 dumps-only snapshots kept"
+hb "$config" drill || fail "drill after dumps-only snapshots"
+hb "$config" run || fail "full run after dumps-only snapshots"
+(($(restic snapshots --tag dumps-only --json | jq length) == 0)) || fail "a full run left the dumps-only snapshots"
+pass "paths missing, empty or not a list: run refused, no snapshot; all absent: dumps backed up as dumps-only (last 7), run fails; drill and the next full run unaffected"
+
 # 8. Tasks off-site copy: new runs copied, remote-only runs past the puller's retention purged, local ones kept
 tasks_remote=$(folder test-host)/tasks
 if [[ -d $tasks_lib/tasks_backup ]]; then

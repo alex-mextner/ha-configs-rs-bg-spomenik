@@ -60,7 +60,7 @@ All times Europe/Belgrade, from `policy.toml`; `Persistent=true` catches up afte
 
 | When | What |
 |---|---|
-| daily 04:00 + up to 10 min | dumps, `restic backup --tag nightly`, `restic forget --tag nightly --prune --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 12` (snapshots made by hand are never pruned) |
+| daily 04:00 + up to 10 min | dumps, `restic backup --tag nightly`, `restic forget --tag nightly --prune --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 12` (snapshots made by hand are never pruned). When none of `paths` exists, the dumps go into a `dumps-only` snapshot (`--keep-last 7 --prune`), nightly retention is skipped and the run fails; the next full run forgets the `dumps-only` snapshots |
 | Sundays 05:30 | `restic check --read-data-subset=5%` |
 | 1st of the month 06:30 | restore drill: restore the dump dir and `drill_file` from the latest nightly snapshot into a temp dir with `--verify`, `sha256sum -c` of the dumps, `PRAGMA integrity_check` of every SQLite dump, `PGDMP` header of every pg dump, `cmp` of `drill_file` with the live file (when it has not changed since) |
 | hourly :35 (ubuntu-pc) | Tasks off-site copy; remote retention = the puller's (12 newest + one per day for 30 days) |
@@ -97,7 +97,8 @@ sudo machines/backup/debian/install.sh odroidn2 --commit # scope = "system"
 
 The module installs restic v0.19.1 and rclone v1.76.0 (static builds pinned in `policy.toml`, sha256 checked; not
 the distribution's restic, which can be older than the 0.17 the script needs) to `/usr/local/bin` or
-`~/.local/bin`, `homelab-backup` + `config.json`, and enables `homelab-backup.timer`, `homelab-backup-check.timer`,
+`~/.local/bin`, `homelab-backup` (linked into the same directory, so it is on PATH) + `config.json`, and enables
+`homelab-backup.timer`, `homelab-backup-check.timer`,
 `homelab-backup-drill.timer` (and `homelab-backup-tasks.timer` where `[tasks_offsite]` is set,
 `homelab-backup-watch.timer` where `watch` lists hosts). A second `--commit` changes nothing (`tests/module.sh`).
 
@@ -153,7 +154,7 @@ no `check`, which locks): `drive.file` access is per file, so anything ubuntu-pc
    ```sh
    sudo sh -c 'umask 077; head -c 32 /dev/urandom | base64 > /etc/homelab-backup/restic-password'
    sudo cat /etc/homelab-backup/restic-password                               # → password manager + paper
-   sudo homelab-backup init        # NixOS: in PATH; Debian: /usr/local/lib/homelab-backup/homelab-backup init
+   sudo homelab-backup init
    ```
 
    **Reinstalling a host that already has a repository** (odroidn2: Armbian → NixOS): do not generate a new
@@ -223,7 +224,9 @@ The round trip covers: `run` refusing a missing repository and `init` creating i
 (a row that is only in the WAL is in the dump), the snapshot, excludes, a full restore with an empty `diff -r` and
 identical SQL content, the drill (past a snapshot made by hand), a second run that adds no data, retention on
 backdated snapshots, `check`, a failing dump and a too-full state disk (status + notify, the previous dump kept, no
-work dir left), one run or dump at a time, a missing password file, the status copies in the Drive folder, the watch
+work dir left), one run or dump at a time, a missing password file, `paths` missing, empty or not a list (refused, no
+snapshot) or all absent (`dumps-only` snapshots, the last 7 kept, the run fails, the next full run forgets them), the
+status copies in the Drive folder, the watch
 of a healthy, a stale, a failing and a missing host, the Tasks copy with the puller's retention against a local rclone remote,
 and, with docker, Postgres and Redis dumps from live containers restored into fresh ones. As root (`in-docker.sh`)
 the databases belong to another user, and must stay writable for it after the dump.

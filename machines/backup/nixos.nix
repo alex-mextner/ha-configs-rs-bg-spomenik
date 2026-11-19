@@ -122,6 +122,10 @@ in
         message = "machines/backup/hosts/${cfg.host}.toml: `watch` and [tasks_offsite] are implemented by debian/run only.";
       }
       {
+        assertion = builtins.isList (spec.paths or null) && spec.paths != [ ];
+        message = "machines/backup/hosts/${cfg.host}.toml: paths must be a non-empty list.";
+      }
+      {
         assertion = lib.versionAtLeast pkgs.restic.version "0.17";
         message = "machines/backup needs restic 0.17 or newer (exit code 10), nixpkgs has ${pkgs.restic.version}.";
       }

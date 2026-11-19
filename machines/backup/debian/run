@@ -19,6 +19,10 @@ toml() { python3 -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(op
 host_json=$(toml "$host_file")
 policy_json=$(toml "$backup_dir/policy.toml")
 scope=$(jq -r '.scope // "system"' <<<"$host_json")
+# without paths the nightly run would back up only the dumps and still report ok; an early copy of the shape check at
+# the top of lib/homelab-backup's do_run, which also fails a run when none of the paths exist
+jq -e '.paths | type == "array" and length > 0' <<<"$host_json" >/dev/null ||
+	{ echo "  $host_file: paths must be a non-empty list" >&2; exit 2; }
 
 if [[ $scope == user ]]; then
 	((EUID != 0)) || { echo "  $host has scope = \"user\": run install.sh as that user, not root" >&2; exit 2; }
@@ -32,6 +36,8 @@ if [[ $scope == user ]]; then
 	ctl=(systemctl --user)
 	path=$bindir:/usr/local/bin:/usr/bin:/bin
 else
+	# without root /etc/homelab-backup (0700) reads as missing: false drift in check, a half install in --commit
+	((EUID == 0)) || { echo "  $host has scope = \"system\": run install.sh with sudo" >&2; exit 6; }
 	owner=root:root
 	bindir=/usr/local/bin
 	libdir=/usr/local/lib/homelab-backup
@@ -42,6 +48,11 @@ else
 	ctl=(systemctl)
 	path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 fi
+# homelab-backup is linked into $bindir below; refused here, before anything is written, so neither --commit nor plan
+# stops halfway. ln would replace a file without the backup ensure_file makes, or link inside a directory and never
+# converge
+link=$bindir/homelab-backup
+[[ -L $link || ! -e $link ]] || { echo "  $link exists and is not a symlink: move it away" >&2; exit 1; }
 rclone_config=$(jq -r --arg d "$confdir/rclone.conf" '.rclone_config // $d' <<<"$host_json")
 password_file=$confdir/restic-password
 pol() { jq -r "$1" <<<"$policy_json"; }
@@ -107,6 +118,13 @@ fi
 # ensure_file reads stdin and counts drift in this shell: feed it with `< <(...)`, never through a pipe (subshell)
 ensure_file "$libdir/homelab-backup" 755 "$owner" < <(with_marker "$backup_dir/lib/homelab-backup") || true
 ensure_file "$libdir/tasks_offsite.py" 644 "$owner" < <(with_marker "$backup_dir/lib/tasks_offsite.py") || true
+# on PATH, as the README's commands expect; do_tasks finds tasks_offsite.py through readlink -f "$0"
+if [[ $(readlink "$link" 2>/dev/null) != "$libdir/homelab-backup" ]]; then
+	if drift "link $link -> $libdir/homelab-backup"; then
+		mkdir -p "$bindir"
+		ln -sfn "$libdir/homelab-backup" "$link"
+	fi
+fi
 
 render_config() {
 	jq -n --arg marker "$MARKER Source: machines/backup/hosts/$host.toml + policy.toml." \
