@@ -6,6 +6,7 @@ import importlib.util
 import re
 import threading
 import time
+import urllib.error
 import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,22 +38,65 @@ class FireplaceEndpoints:
         rpc: Callable[..., dict[str, Any]],
         config_dir: Path,
         invalid_input: type[Exception],
+        *,
+        audit: Callable[..., None] | None = None,
     ) -> None:
         """Capture configured host dependencies without starting playback."""
         self._rpc = rpc
         self.config_dir = config_dir
         self.invalid_input = invalid_input
+        self._audit = audit
+        self._failure_logged_at: dict[tuple[str, str, str], float] = {}
         self._controller = None
         self._lock = threading.Lock()
 
+    def _audit_rpc(
+        self,
+        method: str,
+        outcome: str,
+        started: float,
+        error: BaseException | None = None,
+    ) -> None:
+        """Emit bounded, redacted transport diagnostics through the host audit."""
+        if self._audit is None:
+            return
+        error_class = type(error).__name__ if error is not None else "-"
+        if method not in {"Player.Open", "Player.Stop"}:
+            key = (method, outcome, error_class)
+            failure_log_interval = 5.0
+            if (
+                started - self._failure_logged_at.get(key, float("-inf"))
+                < failure_log_interval
+            ):
+                return
+            self._failure_logged_at[key] = started
+        self._audit(
+            "fireplace_rpc",
+            method=method,
+            outcome=outcome,
+            elapsed=round(time.monotonic() - started, 3),
+            error_class=error_class,
+        )
+
     def rpc(self, method: str, params: dict[str, Any], deadline: float) -> Any:
-        """Retain the existing bounded native RPC contract."""
-        remaining = deadline - time.monotonic()
+        """Retain bounded transport and classify uncertain acknowledgements."""
+        started = time.monotonic()
+        remaining = deadline - started
         if remaining <= 0:
             message = "deadline"
             raise _fireplace_module.RpcNotDispatchedError(message)
         call_timeout = 8.0 if method in {"Player.Open", "Player.Stop"} else 1.0
-        response = self._rpc(method, params, timeout=min(call_timeout, remaining))
+        try:
+            response = self._rpc(method, params, timeout=min(call_timeout, remaining))
+        except urllib.error.HTTPError as exc:
+            self._audit_rpc(method, "rejected", started, exc)
+            exc.close()
+            message = "rpc_rejected"
+            raise FireplaceError(message) from exc
+        except OSError as exc:
+            self._audit_rpc(method, "transport_unconfirmed", started, exc)
+            message = "rpc_transport_unconfirmed"
+            raise _fireplace_module.RpcTransportError(message) from exc
         body = response.get("body")
         if (
             not response.get("ok")
@@ -60,8 +104,11 @@ class FireplaceEndpoints:
             or "error" in body
             or "result" not in body
         ):
+            self._audit_rpc(method, "rejected", started)
             message = "rpc_unavailable"
             raise FireplaceError(message)
+        if method in {"Player.Open", "Player.Stop"}:
+            self._audit_rpc(method, "acknowledged", started)
         return body["result"]
 
     def controller(self) -> Any:

@@ -14,6 +14,7 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -35,6 +36,10 @@ class FireplaceError(Exception):
 
 class RpcNotDispatchedError(FireplaceError):
     """The local deadline/closing guard rejected a call before dispatch."""
+
+
+class RpcTransportError(FireplaceError):
+    """A dispatched RPC has no reliable transport acknowledgement."""
 
 
 def atomic_json(path: Path, value: object) -> None:
@@ -71,6 +76,7 @@ class OwnedPlayback:
         expected_sha256: str = MEDIA_SHA256,
         auto_monitor: bool = True,
         operation_timeout: float = 8.0,
+        startup_timeout: float | None = None,
         poll_interval: float = 0.05,
         asset_check: Callable[[], None] | None = None,
     ) -> None:
@@ -82,6 +88,9 @@ class OwnedPlayback:
         self._asset_check = asset_check or self._verify_asset
         self._auto_monitor = auto_monitor
         self._operation_timeout = operation_timeout
+        self._startup_timeout = (
+            operation_timeout if startup_timeout is None else startup_timeout
+        )
         self._poll_interval = poll_interval
         self._lock = threading.RLock()
         self._closing = threading.Event()
@@ -195,6 +204,8 @@ class OwnedPlayback:
                 {"playerid": 1, "properties": properties},
                 deadline,
             )
+        except (RpcNotDispatchedError, RpcTransportError):
+            raise
         except Exception as exc:
             error_message = "video_properties_unavailable"
             raise FireplaceError(error_message) from exc
@@ -388,13 +399,18 @@ class OwnedPlayback:
 
     def _open_confirmed(self, deadline: float) -> dict[str, Any]:
         # Exactly one mutation. Missing/ambiguous ACK never triggers another Open.
-        self._rpc("Player.Open", {"item": {"file": str(self._media)}}, deadline)
+        # A transport failure may leave the request queued; reconcile only reads.
+        with suppress(RpcTransportError):
+            self._rpc("Player.Open", {"item": {"file": str(self._media)}}, deadline)
         while True:
             try:
                 current = self._read(deadline)
                 if current["file_matches"] and current["speed"] > 0:
                     self._confirm_playback(current)
                     return current
+            except RpcTransportError:
+                # A transient observation failure cannot justify another Open.
+                pass
             except FireplaceError as exc:
                 # The old preferred playlist can persist briefly after Open.
                 # Retry only this read; all transport and operation budgets hold.
@@ -534,7 +550,10 @@ class OwnedPlayback:
             if self._load_error:
                 error_message = "owner_unreadable"
                 raise FireplaceError(error_message)
-            deadline = self._bounded_deadline(deadline)
+            startup_end = time.monotonic() + self._startup_timeout
+            deadline = (
+                min(startup_end, deadline) if deadline is not None else startup_end
+            )
             self._stop_requested = False
             self._idle_since = None
             try:

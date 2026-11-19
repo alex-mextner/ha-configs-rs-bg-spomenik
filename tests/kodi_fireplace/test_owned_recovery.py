@@ -105,13 +105,13 @@ class OwnerRecoveryCases(unittest.TestCase):
         def callback(method, params, deadline) -> Any:
             if method == "Player.SetRepeat":
                 now[0] = deadline
-            return bridge._fireplace_rpc(method, params, deadline)
+            return bridge._fireplace_endpoints.rpc(method, params, deadline)
 
         self.controller._rpc_callback = callback
         with (
             patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]),
-            patch.object(bridge, "_fireplace_module", self.module),
-            patch.object(bridge, "kodi_jsonrpc", side_effect=transport),
+            patch.object(bridge._fireplace_http, "_fireplace_module", self.module),
+            patch.object(bridge._fireplace_endpoints, "_rpc", side_effect=transport),
             self.assertRaises(self.module.FireplaceError),
         ):
             self.controller.start()

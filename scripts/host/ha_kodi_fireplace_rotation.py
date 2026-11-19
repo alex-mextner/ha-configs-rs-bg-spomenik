@@ -30,6 +30,7 @@ MINIMUM_CATALOG_SOURCES = 2
 OBSERVATION_MAX_AGE_SECONDS = 5.0
 PROGRESS_MAX_AGE_SECONDS = 5.0
 SOURCE_PREPARATION_TIMEOUT = 45.0
+NATIVE_STARTUP_TIMEOUT = 45.0
 LAUNCH_TIMEOUT = 100.0
 
 
@@ -290,6 +291,7 @@ class RotatingFireplaceController:
             expected_sha256="",
             auto_monitor=False,
             operation_timeout=min(8.0, operation_timeout),
+            startup_timeout=min(NATIVE_STARTUP_TIMEOUT, operation_timeout),
             poll_interval=poll_interval,
             asset_check=self._asset_check,
             **owner_options,
@@ -557,6 +559,9 @@ class RotatingFireplaceController:
     def _rpc_adapter(self, method: str, params: dict[str, Any], deadline: float) -> Any:
         if self._closing.is_set():
             error_message = "stopped"
+            raise self.NotDispatched(error_message)
+        if self._launching and self._cancelled.is_set():
+            error_message = "cancelled"
             raise self.NotDispatched(error_message)
         params = dict(params)
         if method == "Player.Open":

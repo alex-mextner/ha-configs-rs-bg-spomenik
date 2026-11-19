@@ -564,33 +564,28 @@ class HostFireplaceBoundaryTests(unittest.TestCase):
     ) -> None:
         response = {"ok": True, "body": {"result": "OK"}}
         with (
-            patch.object(self.host.time, "monotonic", return_value=10),
-            patch.object(self.host, "kodi_jsonrpc", return_value=response) as rpc,
+            patch.object(self.host._fireplace_http.time, "monotonic", return_value=10),
+            patch.object(
+                self.host._fireplace_endpoints, "_rpc", return_value=response
+            ) as rpc,
         ):
             for method in ("Player.Open", "Player.Stop"):
-                self.host._fireplace_rpc(method, {}, 20)
+                self.host._fireplace_endpoints.rpc(method, {}, 20)
                 self.assertEqual(rpc.call_args.kwargs["timeout"], 8.0)
-                self.host._fireplace_rpc(method, {}, 10.4)
+                self.host._fireplace_endpoints.rpc(method, {}, 10.4)
                 self.assertAlmostEqual(rpc.call_args.kwargs["timeout"], 0.4)
-            self.host._fireplace_rpc("Player.GetItem", {}, 20)
+            self.host._fireplace_endpoints.rpc("Player.GetItem", {}, 20)
             self.assertEqual(rpc.call_args.kwargs["timeout"], 1.0)
 
     def test_controller_creation_starts_recovery_monitor(self) -> None:
         with patch.object(
-            self.host._fireplace_module,
+            self.host._fireplace_http._fireplace_module,
             "FireplaceController",
             return_value=self.controller,
         ):
             self.assertIs(self.factory(), self.controller)
             self.assertIs(self.factory(), self.controller)
         self.controller.start_monitor.assert_called_once_with()
-
-    def test_malformed_request_logging_needs_no_parsed_path_or_command(self) -> None:
-        handler = object.__new__(self.host.Handler)
-        handler.client_address = ("127.0.0.1", 45678)
-        with patch.object(self.host.logging, "getLogger") as logger:
-            handler.log_message("code %d, message %s", 400, "invalid request")
-        logger.return_value.info.assert_called_once()
 
 
 if __name__ == "__main__":

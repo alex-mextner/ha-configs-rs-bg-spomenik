@@ -2185,7 +2185,7 @@ def network_summary(_query: dict[str, Any]) -> dict[str, Any]:
 
 
 _fireplace_endpoints = _fireplace_http.FireplaceEndpoints(
-    kodi_jsonrpc, CONFIG_DIR, InvalidInput
+    kodi_jsonrpc, CONFIG_DIR, InvalidInput, audit=_audit
 )
 kodi_fireplace = _fireplace_endpoints.command
 kodi_fireplace_status = _fireplace_endpoints.status

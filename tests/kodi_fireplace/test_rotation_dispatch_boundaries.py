@@ -167,15 +167,17 @@ class DispatchBoundaryCases(fixtures.FixtureBase):
             if method == "Player.Open":
                 expired.append(method)
                 now[0] = deadline
-            return bridge._fireplace_rpc(method, params, deadline)
+            return bridge._fireplace_endpoints.rpc(method, params, deadline)
 
         controller._rpc = callback
         with (
             patch.object(
                 fixtures.fireplace.time, "monotonic", side_effect=lambda: now[0]
             ),
-            patch.object(bridge, "_fireplace_module", fixtures.fireplace),
-            patch.object(bridge, "kodi_jsonrpc", side_effect=transport),
+            patch.object(
+                bridge._fireplace_http, "_fireplace_module", fixtures.fireplace
+            ),
+            patch.object(bridge._fireplace_endpoints, "_rpc", side_effect=transport),
             self.assertRaisesRegex(
                 fixtures.fireplace.FireplaceError, "sources_unavailable"
             ),
