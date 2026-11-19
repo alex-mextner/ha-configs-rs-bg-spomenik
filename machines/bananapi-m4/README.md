@@ -40,8 +40,8 @@ independent modules still converge. Everything except `list` needs root (`sudo`)
 | 10 | `system` | hostname (+ `127.0.1.1` in `/etc/hosts`), timezone |
 | 20 | `apt-sources` | deb822 repositories; the signing key is written only if its fingerprint equals the declared one (Docker CE) |
 | 30 | `packages` | `install` (missing ones, `--no-install-recommends`) and `purge` lists |
-| 40 | `users` | users, groups, sudo rule (validated by `visudo`), exclusive `authorized_keys`, lingering for `systemd --user` |
-| 45 | `ssh-server` | sshd drop-in: no passwords, no root login; refuses while no user with a key can sudo (`nopasswd`, or `password` with a password set); `sshd -t` before reload |
+| 40 | `users` | users, groups, sudo rule (validated by `visudo`), exclusive `authorized_keys`, lingering for `systemd --user`; a new user whose declared login shell is not usable yet gets `nologin` (useradd's default with `sudo = "nopasswd"`) |
+| 45 | `ssh-server` | sshd drop-in: no passwords, no root login; refuses while no user with a key and a login shell (installed, in `/etc/shells`) can sudo (`nopasswd`, or `password` with a password set); `sshd -t` before reload |
 | 50 | `zram` | zram swap: Armbian's `/etc/default/armbian-zram-config` (applied at next boot), else zram-tools |
 | 55 | `sysctl` | `/etc/sysctl.d/90-debian-tweaks.conf`; live values are checked and set too |
 | 60 | `docker` | the whole `/etc/docker/daemon.json` (validated by `dockerd --validate`), docker + containerd enabled and running |

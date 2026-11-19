@@ -38,8 +38,9 @@ minutes (NixOS: the whole unit; Debian: the installer, which Ctrl-C or SIGTERM t
   ssh -t ultra@odroidn2 'cd debian-tweaks && sudo ./install.sh --only dotfiles,login-shell --commit'
   ```
 
-Tests: `make test-machines` runs [`../tests/run.sh`](../tests/run.sh) (`checkout`, the host guard, Ctrl-C and
-SIGTERM reaching the installer) in a `debian:trixie` container; `make test` and the `Machines` workflow run it.
+Tests: `make test-machines` runs [`../tests/run.sh`](../tests/run.sh) (`checkout`, the host guard, the modules' login
+shell rules, Ctrl-C and SIGTERM reaching the installer) in a `debian:trixie` container; the `Machines` workflow runs it
+(`make test` does not: it needs the network).
 
 ## The pin: which .files commit the hosts run
 

@@ -51,8 +51,9 @@ format: devdeps
 fix: devdeps
 	$(RUFF) check --fix custom_components tests
 
-# The full local suite is split by the Home Assistant version it requires.
-test: test-standalone test-entity-note test-home-generative-agent test-copied-home-generative-agent test-machines
+# The full local suite is split by the Home Assistant version it requires. Not test-machines: it pulls debian:trixie
+# and its packages from the network; the machines workflow runs it on every change under machines/.
+test: test-standalone test-entity-note test-home-generative-agent test-copied-home-generative-agent
 
 # Unlike the strict diagnostic above, allow only identical failures in unchanged
 # copied HGA snapshots, freshly verified against the actual Git base.
@@ -62,11 +63,12 @@ test-regressions: test-standalone test-entity-note test-home-generative-agent
 test-standalone: test-entity-note-deps
 	PYTHONPATH=$(CURDIR):$(CURDIR)/scripts $(ENTITY_NOTE_PYTEST) $(PYTEST_ARGS) $(wildcard tests/test_*.py)
 
-# Shell tests of machines/ (the dotfiles checkout, install.sh's host guard, signals reaching the dotfiles installer) in
-# the Debian release the hosts run, machines/ mounted read-only; the packages are install.sh's and the dotfiles
-# module's. Without docker they run here instead, minus the root-only signal test.
+# Shell tests of machines/ (the dotfiles checkout, install.sh's host guard, the login shell rules of the modules,
+# signals reaching the dotfiles installer) in the Debian release the hosts run, machines/ mounted read-only; the
+# packages are install.sh's, the dotfiles module's, procps (pgrep) and sudo (visudo). Without docker they run here
+# instead, minus the root-only parts.
 MACHINES_TEST_IMAGE ?= debian:trixie
-MACHINES_TEST_PACKAGES := git python3 jq gpg curl ca-certificates zsh vim python3-yaml gh openssh-client
+MACHINES_TEST_PACKAGES := git python3 jq gpg curl ca-certificates zsh vim python3-yaml gh openssh-client procps sudo
 test-machines:
 	if command -v docker >/dev/null; then \
 		docker run --rm -v "$(CURDIR)/machines:/machines:ro" $(MACHINES_TEST_IMAGE) bash -c \

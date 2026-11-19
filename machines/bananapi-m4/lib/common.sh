@@ -82,13 +82,42 @@ absent() {
 	return 0
 }
 
+# refuses_login SHELL: SHELL is a non-login shell (nologin, false).
+refuses_login() { case ${1##*/} in nologin | false) return 0 ;; *) return 1 ;; esac; }
+
 # shell_usable PATH: PATH may become a user's shell: an executable listed in /etc/shells, or a non-login shell
 # (nologin, false: never listed there). sshd refuses a user whose shell is missing, so setting one before its package
 # is installed locks the user out of this headless box.
 shell_usable() {
 	[[ -f $1 && -x $1 ]] || return 1
-	case ${1##*/} in nologin | false) return 0 ;; esac
-	grep -qxF -- "$1" /etc/shells 2>/dev/null
+	refuses_login "$1" || grep -qxF -- "$1" /etc/shells 2>/dev/null
+}
+
+# can_log_in SHELL: SHELL gives a login: usable, and not nologin/false.
+can_log_in() { shell_usable "$1" && ! refuses_login "$1"; }
+
+# declared_shell NAME: the login shell [modules.login-shell.shells] declares for NAME; empty when none is (or the
+# module is off, or the value is not a string).
+declared_shell() {
+	jq -r --arg name "$1" 'if .modules["login-shell"].enabled == false then empty
+		else .modules["login-shell"].shells | objects | .[$name] | strings end' <<<"${DT_CONFIG:-{\}}"
+}
+
+# new_user_shell NAME SUDO: the shell the users module creates NAME with: the declared one once it is usable; while it
+# is not, nologin (the declared shell may be a restricted one, the only barrier for whoever holds the key), except for
+# sudo = "nopasswd": that key gives root anyway, and the user must be an admin from the first run on, so that
+# ssh-server turns off password and root login on a run whose apt failed. useradd's default when none is declared.
+# An existing user's shell is login-shell's alone.
+new_user_shell() {
+	local shell
+	shell=$(declared_shell "$1")
+	if [[ -n $shell ]] && shell_usable "$shell"; then
+		echo "$shell"
+	elif [[ -n $shell && $2 != nopasswd ]]; then
+		echo /usr/sbin/nologin
+	else
+		useradd -D | sed -n 's/^SHELL=//p'
+	fi
 }
 
 finish() {

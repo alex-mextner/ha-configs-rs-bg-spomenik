@@ -49,24 +49,26 @@ if ! entry=$(getent passwd "$user"); then
 	echo "  dotfiles: user $user does not exist (declare it in the users module or create it first)" >&2
 	exit 1
 fi
-home=$(cut -d: -f6 <<<"$entry")
-shell=$(cut -d: -f7 <<<"$entry")
+IFS=: read -r _ _ uid gid _ home shell <<<"$entry"
+# The installer sees the login shell the login-shell module (which runs after this one) is about to set, once usable.
+declared=$(declared_shell "$user")
+if [[ -n $declared ]] && shell_usable "$declared"; then shell=$declared; fi
 files=$home/.files
-# git and the installer run as the user (runuser); the engine runs every module as root
+# git and the installer run as the user (runuser, setpriv); the engine runs every module as root
 if ((EUID != 0)); then
 	echo "  dotfiles: run as root" >&2
 	exit 1
 fi
 
-# as_user CMD...: run as the user in a clean environment from their home. No terminal prompts: an unreachable
-# private repository must fail fast (the installer reports it as a manual step), never wait for a password or
-# an ssh host key confirmation. as_user_cmd is that prefix, for a background job whose $! must be runuser itself.
-as_user_cmd=(
-	runuser -u "$user" -- env -i -C "$home" HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" LANG=C.UTF-8
+# user_env CMD...: run in a clean environment from the user's home. No terminal prompts: an unreachable private
+# repository must fail fast (the installer reports it as a manual step), never wait for a password or an ssh host key
+# confirmation. as_user CMD...: that, as the user.
+user_env=(
+	env -i -C "$home" HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" LANG=C.UTF-8
 	PATH="$home/.local/bin:$home/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 	GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes"
 )
-as_user() { "${as_user_cmd[@]}" "$@"; }
+as_user() { runuser -u "$user" -- "${user_env[@]}" "$@"; }
 
 # ~/.files at the pin (checkout validates rev: exit 2)
 if [[ $MODE == install ]]; then
@@ -83,24 +85,37 @@ fi
 quote_output() { sed 's/^/  | /' >&2; }
 if [[ -x $files/install-ubuntu.sh ]]; then
 	if [[ $MODE == install ]]; then
-		# setsid: no controlling terminal under `ssh -t` (timeout's own process group would be stopped by any terminal
-		# access); stdin from /dev/null, so nothing can wait for input. In its own session the installer gets no Ctrl-C
-		# from the terminal, so the traps pass SIGINT and SIGTERM on as SIGTERM to runuser, which forwards it to
-		# timeout, which forwards it to the installer's process group. A plain command, not the as_user function, so
-		# $! is runuser and not a subshell that would die alone.
+		# setpriv, env and setsid each exec the next, so $! is timeout itself: SIGTERM to it reaches the installer's
+		# process group, and --kill-after SIGKILLs that group 30 s later if the installer ignores it (runuser would
+		# SIGKILL timeout 2 s after forwarding TERM, cancelling that). setsid: no controlling terminal under `ssh -t`
+		# (timeout's own process group would be stopped by any terminal access), so the installer gets no Ctrl-C from
+		# the terminal either: the traps pass SIGINT and SIGTERM on as SIGTERM. They are set before the installer
+		# starts; one that arrives before $! is known is passed on right after. stdin from /dev/null, so nothing can
+		# wait for input.
 		log=$(mktemp)
-		"${as_user_cmd[@]}" setsid -w timeout --kill-after=30s 15m "$files/install-ubuntu.sh" </dev/null >"$log" 2>&1 &
+		installer='' signal=''
+		forward() {
+			signal=${signal:-$1}
+			[[ -z $installer ]] || kill -TERM "$installer" 2>/dev/null || true
+		}
+		trap 'forward INT' INT
+		trap 'forward TERM' TERM
+		# by full path: env resolves them from the user's PATH, whose ~/.local/bin the installer writes to
+		setpriv --reuid "$uid" --regid "$gid" --init-groups \
+			"${user_env[@]}" /usr/bin/setsid /usr/bin/timeout --kill-after=30s 15m "$files/install-ubuntu.sh" \
+			</dev/null >"$log" 2>&1 &
 		installer=$!
-		signal=
-		trap 'signal=INT; kill -TERM "$installer" 2>/dev/null || true' INT
-		trap 'signal=TERM; kill -TERM "$installer" 2>/dev/null || true' TERM
+		[[ -z $signal ]] || forward "$signal"
 		rc=0
 		wait "$installer" || rc=$?
-		# a trapped signal ends `wait` early: wait until the installer has stopped too
+		# a trapped signal ends `wait` early: wait until timeout (and so the installer's group) has stopped too
 		while [[ -n $signal ]] && kill -0 "$installer" 2>/dev/null; do
 			rc=0
 			wait "$installer" || rc=$?
 		done
+		# timeout returns once the installer itself has exited: on a stop or the 15 minute timeout, whatever is left
+		# in its process group (a child that ignores TERM) goes too
+		if [[ -n $signal ]] || ((rc == 124)); then kill -KILL -- "-$installer" 2>/dev/null || true; fi
 		stop_on_signals
 		out=$(<"$log")
 		rm -f "$log"

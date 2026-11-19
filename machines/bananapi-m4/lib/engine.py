@@ -313,11 +313,14 @@ def main() -> int:
     STOPS.catch()
     try:
         results = run_selected(modules, config, only, args)
+        preview = args.command == "apply" and not args.commit
+        code = summarize(results, preview=preview)
+        # a signal after the last module (or during the summary) still stops the run
+        STOPS.check()
     except StopSignalError as stop:
         print(f"debian-tweak: stopped on {stop}", file=sys.stderr)
         return 128 + stop.signum
-    preview = args.command == "apply" and not args.commit
-    return summarize(results, preview=preview)
+    return code
 
 
 if __name__ == "__main__":
