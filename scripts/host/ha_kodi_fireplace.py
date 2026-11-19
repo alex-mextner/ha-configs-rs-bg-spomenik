@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +29,28 @@ MEDIA_SHA256 = "248cc597abdf1e53e3d55ab998e1aadfff3c96f7c48ca2ce30362b74d5959267
 MODES = {"off", "one", "all"}
 ABSENCE_GRACE_SECONDS = 2.0
 OBSERVATION_MAX_AGE_SECONDS = 5.0
+STARTUP_ERROR_CODES = frozenset(
+    {
+        "asset_unverified",
+        "cancelled",
+        "content_changed",
+        "deadline",
+        "invalid_item_state",
+        "invalid_player_state",
+        "invalid_repeat_state",
+        "invalid_speed_state",
+        "loop_unconfirmed",
+        "owner_unreadable",
+        "previous_owner_pending",
+        "rpc_rejected",
+        "rpc_transport_unconfirmed",
+        "rpc_unavailable",
+        "start_unconfirmed",
+        "stop_unconfirmed",
+        "stopped",
+        "video_properties_unavailable",
+    }
+)
 
 
 class FireplaceError(Exception):
@@ -92,6 +115,10 @@ class OwnedPlayback:
             operation_timeout if startup_timeout is None else startup_timeout
         )
         self._poll_interval = poll_interval
+        self._starting = False
+        self._startup_phase = None
+        self._startup_started = None
+        self._last_rpc_method = None
         self._lock = threading.RLock()
         self._closing = threading.Event()
         self._thread = None
@@ -136,6 +163,7 @@ class OwnedPlayback:
         }
 
     def _rpc(self, method: str, params: dict[str, Any], deadline: float) -> Any:
+        self._last_rpc_method = method
         if self._closing.is_set():
             error_message = "stopped"
             raise RpcNotDispatchedError(error_message)
@@ -177,6 +205,20 @@ class OwnedPlayback:
         return item
 
     def _read(self, deadline: float) -> dict[str, Any]:
+        while True:
+            try:
+                return self._read_once(deadline)
+            except RpcTransportError:
+                if not self._starting:
+                    raise
+                # Restart active/item/properties together. A delayed properties
+                # reply must never be joined to an earlier native file identity.
+                pause = min(self._poll_interval, max(0.0, deadline - time.monotonic()))
+                if self._closing.wait(pause):
+                    error_message = "stopped"
+                    raise RpcNotDispatchedError(error_message) from None
+
+    def _read_once(self, deadline: float) -> dict[str, Any]:
         active = self._rpc("Player.GetActivePlayers", {}, deadline)
         if not isinstance(active, list):
             error_message = "invalid_player_state"
@@ -400,8 +442,10 @@ class OwnedPlayback:
     def _open_confirmed(self, deadline: float) -> dict[str, Any]:
         # Exactly one mutation. Missing/ambiguous ACK never triggers another Open.
         # A transport failure may leave the request queued; reconcile only reads.
+        self._startup_phase = "open_dispatch"
         with suppress(RpcTransportError):
             self._rpc("Player.Open", {"item": {"file": str(self._media)}}, deadline)
+        self._startup_phase = "open_confirmation"
         while True:
             try:
                 current = self._read(deadline)
@@ -501,10 +545,12 @@ class OwnedPlayback:
             "prior_repeat": prior,
             "phase": "armed",
         }
+        self._startup_phase = "arm_persist"
         self._persist(receipt)
         self._owner = receipt
         # Keep validation inside the shared pre-mutation lease cleanup boundary.
         try:
+            self._startup_phase = "arm_validation"
             latest = self._read(deadline)
             if (
                 not latest["foreign_player"]
@@ -526,10 +572,12 @@ class OwnedPlayback:
             self._forget()
             raise
         try:
+            self._startup_phase = "repeat_dispatch"
             self._rpc("Player.SetRepeat", {"playerid": 1, "repeat": "one"}, deadline)
         except RpcNotDispatchedError:
             self._forget()
             raise
+        self._startup_phase = "repeat_proof"
         proof = self._observe(deadline)
         if proof.get("repeat_superseded") is True:
             return proof
@@ -538,6 +586,26 @@ class OwnedPlayback:
             error_message = "loop_unconfirmed"
             raise FireplaceError(error_message)
         return proof
+
+    def _startup_failure(self, error: Exception, deadline: float) -> None:
+        """Record only fixed phase labels, codes and types, never payloads."""
+        now = time.monotonic()
+        code = error.args[0] if len(error.args) == 1 else None
+        if not isinstance(code, str) or code not in STARTUP_ERROR_CODES:
+            code = None
+        value = {
+            "at": datetime.now(UTC).isoformat(),
+            "stage": "native_startup_failed",
+            "error_code": code,
+            "phase": self._startup_phase,
+            "method": self._last_rpc_method,
+            "error_class": type(error).__name__,
+            "cause_class": type(error.__cause__).__name__ if error.__cause__ else None,
+            "lease_phase": self._owner.get("phase") if self._owner else None,
+            "elapsed_ms": round((now - self._startup_started) * 1000),
+            "remaining_ms": round(max(0.0, deadline - now) * 1000),
+        }
+        print(json.dumps(value, sort_keys=True), file=sys.stderr, flush=True)  # noqa: T201
 
     def start(
         self, *, force_new: bool = False, deadline: float | None = None
@@ -550,32 +618,42 @@ class OwnedPlayback:
             if self._load_error:
                 error_message = "owner_unreadable"
                 raise FireplaceError(error_message)
-            startup_end = time.monotonic() + self._startup_timeout
+            self._startup_started = time.monotonic()
+            startup_end = self._startup_started + self._startup_timeout
             deadline = (
                 min(startup_end, deadline) if deadline is not None else startup_end
             )
             self._stop_requested = False
             self._idle_since = None
+            self._starting = True
+            self._last_rpc_method = None
+            self._startup_phase = "asset_check"
             try:
                 self._asset_check()
+                self._startup_phase = "resume_owner"
                 opened, proof = self._resume_owned(deadline, force_new=force_new)
                 if proof is not None:
                     self.start_monitor()
                     return proof
+                self._startup_phase = "prior_repeat_read"
                 prior = self._prior_mode(deadline)
                 current = (
                     opened if opened is not None else self._open_confirmed(deadline)
                 )
                 return self._arm_loop(current, prior, deadline)
-            except FireplaceError:
+            except FireplaceError as exc:
+                self._startup_failure(exc, deadline)
                 self._failed("start_unconfirmed")
                 self.start_monitor()
                 raise
             except Exception as exc:
+                self._startup_failure(exc, deadline)
                 self._failed("start_unconfirmed")
                 self.start_monitor()
                 error_message = "start_unconfirmed"
                 raise FireplaceError(error_message) from exc
+            finally:
+                self._starting = False
 
     def stop(self, *, deadline: float | None = None) -> dict[str, Any]:
         """Stop only the currently owned video while preserving newer user intent."""

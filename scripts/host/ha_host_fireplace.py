@@ -61,7 +61,7 @@ class FireplaceEndpoints:
         if self._audit is None:
             return
         error_class = type(error).__name__ if error is not None else "-"
-        if method not in {"Player.Open", "Player.Stop"}:
+        if method not in {"Player.Open", "Player.Stop", "Player.SetRepeat"}:
             key = (method, outcome, error_class)
             failure_log_interval = 5.0
             if (
@@ -85,7 +85,9 @@ class FireplaceEndpoints:
         if remaining <= 0:
             message = "deadline"
             raise _fireplace_module.RpcNotDispatchedError(message)
-        call_timeout = 8.0 if method in {"Player.Open", "Player.Stop"} else 1.0
+        call_timeout = (
+            8.0 if method in {"Player.Open", "Player.Stop", "Player.SetRepeat"} else 1.0
+        )
         try:
             response = self._rpc(method, params, timeout=min(call_timeout, remaining))
         except urllib.error.HTTPError as exc:
@@ -107,7 +109,7 @@ class FireplaceEndpoints:
             self._audit_rpc(method, "rejected", started)
             message = "rpc_unavailable"
             raise FireplaceError(message)
-        if method in {"Player.Open", "Player.Stop"}:
+        if method in {"Player.Open", "Player.Stop", "Player.SetRepeat"}:
             self._audit_rpc(method, "acknowledged", started)
         return body["result"]
 

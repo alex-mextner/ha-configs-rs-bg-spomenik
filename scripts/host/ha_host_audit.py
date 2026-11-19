@@ -1,4 +1,4 @@
-"""Private bounded audit records for the standalone host bridge."""  # noqa: INP001
+"""Private bounded audit records for the standalone host bridge."""
 # Installed beside the standalone executable; the copied bundle is not a package.
 
 from __future__ import annotations
