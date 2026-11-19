@@ -1,0 +1,199 @@
+# Native parser and calibration entities. No calibration values are forced.
+uart:
+  id: radar_uart
+  tx_pin: ${radar_tx_pin}
+  rx_pin: ${radar_rx_pin}
+  baud_rate: ${radar_baud_rate}
+  parity: NONE
+  stop_bits: 1
+
+ld2410:
+  id: presence_radar
+  uart_id: radar_uart
+
+binary_sensor:
+  - platform: ld2410
+    has_target:
+      id: radar_occupancy
+      name: Occupancy
+      device_class: occupancy
+      # MUST stay first and alone: it receives EVERY parsed periodic report,
+      # including unchanged values. Its timeout invalidates the entity instead
+      # of publishing false. Other filters can deduplicate or schedule a stale
+      # false state. Apply occupancy hold policy in the light controller.
+      filters:
+        - timeout: ${radar_report_timeout}
+    has_moving_target:
+      id: radar_moving_target
+      name: Moving Target
+      filters:
+        - timeout: ${radar_report_timeout}
+    has_still_target:
+      id: radar_still_target
+      name: Still Target
+      filters:
+        - timeout: ${radar_report_timeout}
+  - platform: template
+    id: radar_reports_healthy
+    name: Radar Reports Healthy
+    device_class: connectivity
+    entity_category: diagnostic
+    lambda: |-
+      return id(radar_occupancy).has_state();
+
+sensor:
+  - platform: ld2410
+    moving_distance:
+      name: Moving Distance
+      id: radar_moving_distance
+    still_distance:
+      name: Still Distance
+      id: radar_still_distance
+    moving_energy:
+      name: Moving Energy
+      id: radar_moving_energy
+    still_energy:
+      name: Still Energy
+      id: radar_still_energy
+    detection_distance:
+      name: Detection Distance
+      id: radar_detection_distance
+    g0:
+      move_energy:
+        name: G0 Moving Energy
+        id: radar_g0_moving_energy
+      still_energy:
+        name: G0 Still Energy
+        id: radar_g0_still_energy
+    g1:
+      move_energy:
+        name: G1 Moving Energy
+        id: radar_g1_moving_energy
+      still_energy:
+        name: G1 Still Energy
+        id: radar_g1_still_energy
+    g2:
+      move_energy:
+        name: G2 Moving Energy
+        id: radar_g2_moving_energy
+      still_energy:
+        name: G2 Still Energy
+        id: radar_g2_still_energy
+    g3:
+      move_energy:
+        name: G3 Moving Energy
+        id: radar_g3_moving_energy
+      still_energy:
+        name: G3 Still Energy
+        id: radar_g3_still_energy
+    g4:
+      move_energy:
+        name: G4 Moving Energy
+        id: radar_g4_moving_energy
+      still_energy:
+        name: G4 Still Energy
+        id: radar_g4_still_energy
+    g5:
+      move_energy:
+        name: G5 Moving Energy
+        id: radar_g5_moving_energy
+      still_energy:
+        name: G5 Still Energy
+        id: radar_g5_still_energy
+    g6:
+      move_energy:
+        name: G6 Moving Energy
+        id: radar_g6_moving_energy
+      still_energy:
+        name: G6 Still Energy
+        id: radar_g6_still_energy
+    g7:
+      move_energy:
+        name: G7 Moving Energy
+        id: radar_g7_moving_energy
+      still_energy:
+        name: G7 Still Energy
+        id: radar_g7_still_energy
+    g8:
+      move_energy:
+        name: G8 Moving Energy
+        id: radar_g8_moving_energy
+      still_energy:
+        name: G8 Still Energy
+        id: radar_g8_still_energy
+
+switch:
+  - platform: ld2410
+    engineering_mode:
+      name: Engineering Mode
+
+number:
+  - platform: ld2410
+    timeout:
+      name: Radar Vacancy Timeout
+    max_move_distance_gate:
+      name: Maximum Moving Gate
+    max_still_distance_gate:
+      name: Maximum Still Gate
+    g0:
+      move_threshold:
+        name: G0 Moving Threshold
+      still_threshold:
+        name: G0 Still Threshold
+    g1:
+      move_threshold:
+        name: G1 Moving Threshold
+      still_threshold:
+        name: G1 Still Threshold
+    g2:
+      move_threshold:
+        name: G2 Moving Threshold
+      still_threshold:
+        name: G2 Still Threshold
+    g3:
+      move_threshold:
+        name: G3 Moving Threshold
+      still_threshold:
+        name: G3 Still Threshold
+    g4:
+      move_threshold:
+        name: G4 Moving Threshold
+      still_threshold:
+        name: G4 Still Threshold
+    g5:
+      move_threshold:
+        name: G5 Moving Threshold
+      still_threshold:
+        name: G5 Still Threshold
+    g6:
+      move_threshold:
+        name: G6 Moving Threshold
+      still_threshold:
+        name: G6 Still Threshold
+    g7:
+      move_threshold:
+        name: G7 Moving Threshold
+      still_threshold:
+        name: G7 Still Threshold
+    g8:
+      move_threshold:
+        name: G8 Moving Threshold
+      still_threshold:
+        name: G8 Still Threshold
+
+select:
+  - platform: ld2410
+    distance_resolution:
+      name: Distance Resolution
+
+text_sensor:
+  - platform: ld2410
+    version:
+      name: Radar Firmware Version
+    mac_address:
+      name: Radar Bluetooth Address
+
+button:
+  - platform: ld2410
+    query_params:
+      name: Read Radar Parameters
