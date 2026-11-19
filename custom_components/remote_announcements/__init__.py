@@ -157,7 +157,7 @@ class SpeechPlayback:
         *,
         pause: bool,
         verify_volume: bool,
-        budget: float = ATTEMPT_BUDGET,
+        budget: float | None = None,
     ) -> None:
         """Snapshot original music and volume with one controller deadline."""
         self.entity = before.entity_id
@@ -168,7 +168,7 @@ class SpeechPlayback:
         self.verify_volume = verify_volume
         self.paused, self.raised = False, False
         self.started = time.monotonic()
-        self.budget = budget
+        self.budget = ATTEMPT_BUDGET if budget is None else budget
         self.recovery_deadline = self.started + self.budget
         self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
         self.recovery_failed = False

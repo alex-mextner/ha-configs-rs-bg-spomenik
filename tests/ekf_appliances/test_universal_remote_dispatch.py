@@ -1356,9 +1356,10 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 await self.prepare_mode("input")
                 route = await self.prepare_mode("up")
                 await self.hass.async_block_till_done()
+                selected = "projector" if tv == "on" else "tv"
                 self.assertEqual(
                     route,
-                    {"pair": "projector" if tv == "on" else "tv", "native": False},
+                    {"pair": selected, "native": False, "blocked": f"{selected}_off"},
                 )
                 self.assertEqual(
                     self.appliance_calls(),
@@ -1766,6 +1767,15 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     1,
                 )
+
+    async def test_rejected_kodi_library_request_does_not_fall_back_to_play(
+        self,
+    ) -> None:
+        self.reset(("projector", "off", "off"))
+        await self.scripts["kodi_play_next_episode"].async_run({}, context=Context())
+        self.assertEqual(self.appliance_calls(), [])
+        cues = [call for call in self.calls if call[0] == "remote_announcements.reject"]
+        self.assertEqual(len(cues), 1, cues)
 
     async def test_disney_hold_stops_after_one_busy_source_rejection(self) -> None:
         self.reset(("projector", "off", "off"))

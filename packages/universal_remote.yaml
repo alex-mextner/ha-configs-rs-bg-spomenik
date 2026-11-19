@@ -488,7 +488,7 @@ script:
               order: descending
               method: lastplayed
         response_variable: shows_resp
-      - if: "{{ shows_resp.blocked | default('') }}"
+      - if: "{{ shows_resp.blocked | default('') != '' }}"
         then:
           - stop: Library request was rejected before dispatch
       - choose:
@@ -517,7 +517,7 @@ script:
                       order: ascending
                       method: episode
                 response_variable: eps_resp
-              - if: "{{ eps_resp.blocked | default('') }}"
+              - if: "{{ eps_resp.blocked | default('') != '' }}"
                 then:
                   - stop: Episode request was rejected before dispatch
               - variables:
@@ -711,7 +711,7 @@ script:
                         'text': (' ' if (char | default('') | string) == 'space'
                                  else (char | default('') | string))} }}
                 response_variable: chromecast_text_result
-              - if: "{{ chromecast_text_result.blocked | default('') }}"
+              - if: "{{ chromecast_text_result.blocked | default('') != '' }}"
                 then:
                   - stop: Text command was rejected before native dispatch
               - if: >-
@@ -734,7 +734,7 @@ script:
                   mode: "{{ mode }}"
                   char: "{{ char | default('') | string }}"
                 response_variable: kodi_text_result
-              - if: "{{ kodi_text_result.blocked | default('') }}"
+              - if: "{{ kodi_text_result.blocked | default('') != '' }}"
                 then:
                   - stop: Text command was rejected before native dispatch
               - if: >-
@@ -1032,7 +1032,7 @@ automation:
           received_ms: >-
             {{ trigger.to_state.attributes.last_received | float * 1000 }}
         response_variable: route
-      - if: "{{ route.blocked | default('') }}"
+      - if: "{{ route.blocked | default('') != '' }}"
         then:
           - stop: Remote command was rejected when received
       - choose:
