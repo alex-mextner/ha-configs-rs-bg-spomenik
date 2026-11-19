@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# sysctl: [modules.sysctl.settings] "key" = value. Checks the file and the live value of every key, so a value
+# some other service overwrote at runtime shows up as drift and is set again.
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+conf=/etc/sysctl.d/90-debian-tweaks.conf
+settings=$(opt '.settings // {} | to_entries[] | "\(.key) = \(.value)"')
+
+# Process substitution, not a pipe: ensure_file must run in this shell so its DRIFT count survives.
+ensure_file "$conf" 644 root:root < <(
+	echo "$MARKER"
+	[[ -z $settings ]] || echo "$settings"
+) || true
+
+while IFS= read -r line; do
+	[[ -n $line ]] || continue
+	key=${line%% = *}
+	want=${line#* = }
+	have=$(sysctl -n "$key" 2>/dev/null | tr -s '[:space:]' ' ' || true)
+	have=${have% }
+	if [[ $have != "$want" ]]; then
+		drift "$key = $want (now ${have:-unset})" && sysctl -q -w "$key=$want"
+	fi
+done <<<"$settings"
+finish

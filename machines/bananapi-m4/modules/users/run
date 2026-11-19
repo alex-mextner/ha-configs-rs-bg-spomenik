@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# users: [[modules.users.users]] name, shell, groups, sudo ("nopasswd" | "password" | "none"), linger, authorized_keys.
+# authorized_keys is exclusive: the file holds exactly the declared keys. A user without a password is created with a
+# locked password (key-only login), which is why such a user wants sudo = "nopasswd".
+# Groups that do not exist yet are created as system groups; extra groups the user has are left alone.
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+count=$(opt '.users // [] | length')
+for ((i = 0; i < count; i++)); do
+	u=$(opt ".users[$i]")
+	name=$(jq -r '.name' <<<"$u")
+	shell=$(jq -r '.shell // "/bin/bash"' <<<"$u")
+	sudo_rule=$(jq -r '.sudo // "none"' <<<"$u")
+	linger=$(jq -r '.linger // false' <<<"$u")
+
+	if ! getent passwd "$name" >/dev/null; then
+		drift "create user $name ($shell)" && useradd --create-home --user-group --shell "$shell" "$name"
+	elif [[ $(getent passwd "$name" | cut -d: -f7) != "$shell" ]]; then
+		drift "$name: shell -> $shell" && usermod --shell "$shell" "$name"
+	fi
+	home=$(getent passwd "$name" | cut -d: -f6 || true)
+	home=${home:-/home/$name}
+
+	for group in $(jq -r '.groups // [] | .[]' <<<"$u"); do
+		if ! getent group "$group" >/dev/null; then
+			drift "create group $group" && groupadd --system "$group"
+		fi
+		if ! id -nG "$name" 2>/dev/null | tr ' ' '\n' | grep -qx "$group"; then
+			drift "$name: add to group $group" && usermod -aG "$group" "$name"
+		fi
+	done
+
+	rule=/etc/sudoers.d/90-debian-tweaks-$name
+	case "$sudo_rule" in
+	nopasswd | password)
+		tag=$([[ $sudo_rule == nopasswd ]] && echo "NOPASSWD: " || true)
+		tmp=$(mktemp)
+		printf '%s\n%s ALL=(ALL:ALL) %sALL\n' "$MARKER" "$name" "$tag" >"$tmp"
+		visudo -cqf "$tmp" >/dev/null || { echo "  $rule: visudo rejects the rule" >&2; rm -f "$tmp"; exit 1; }
+		ensure_file "$rule" 440 root:root <"$tmp" || true
+		rm -f "$tmp"
+		;;
+	none) absent "$rule" || true ;;
+	*) echo "  $name: sudo must be nopasswd, password or none" >&2; exit 2 ;;
+	esac
+
+	if [[ $(jq -r '.authorized_keys // null' <<<"$u") != null ]]; then
+		if [[ $MODE == install ]]; then install -d -m 700 -o "$name" -g "$name" "$home/.ssh"; fi
+		# Process substitution, not a pipe: ensure_file must run in this shell so its DRIFT count survives.
+		ensure_file "$home/.ssh/authorized_keys" 600 "$name:$name" < <(
+			echo "$MARKER"
+			jq -r '.authorized_keys[]' <<<"$u"
+		) || true
+	fi
+
+	if [[ $linger == true && ! -e /var/lib/systemd/linger/$name ]]; then
+		drift "$name: enable lingering (systemd --user runs without a login)" && loginctl enable-linger "$name"
+	elif [[ $linger == false && -e /var/lib/systemd/linger/$name ]]; then
+		drift "$name: disable lingering" && loginctl disable-linger "$name"
+	fi
+done
+finish

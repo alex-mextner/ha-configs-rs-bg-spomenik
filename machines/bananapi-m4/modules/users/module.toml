@@ -1,0 +1,3 @@
+description = "login users: groups, shell, sudo rule, exclusive authorized_keys, systemd --user lingering"
+# After packages: groups such as `docker` come from their packages.
+order = 40

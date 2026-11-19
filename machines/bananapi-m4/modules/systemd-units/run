@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# systemd-units:
+#   [modules.systemd-units] system = ["compose@.service"]   files from units/system/ -> /etc/systemd/system/
+#                           enable = ["compose@bots.service"] system units enabled and started
+#   [[modules.systemd-units.user]] name = "ultra", units = [...] (from units/user/ -> ~/.config/systemd/user/),
+#                           enable = [...] enabled and started in that user's manager (needs linger = true).
+# Units dropped from the lists are not removed: disable them by hand (removal is not reversible from config alone).
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+units_dir=$DT_DIR/units
+
+reload=0
+for unit in $(opt '.system // [] | .[]'); do
+	[[ -f $units_dir/system/$unit ]] || { echo "  missing units/system/$unit" >&2; exit 2; }
+	if ensure_file "/etc/systemd/system/$unit" 644 root:root <"$units_dir/system/$unit"; then reload=1; fi
+done
+if [[ $MODE == install && $reload == 1 ]]; then systemctl daemon-reload; fi
+
+for unit in $(opt '.enable // [] | .[]'); do
+	if ! systemctl is-enabled -q "$unit" 2>/dev/null; then
+		drift "enable --now $unit" && systemctl enable --now "$unit"
+	elif systemctl is-failed -q "$unit"; then
+		drift "$unit is failed: restart" && systemctl restart "$unit"
+	fi
+done
+
+count=$(opt '.user // [] | length')
+for ((i = 0; i < count; i++)); do
+	entry=$(opt ".user[$i]")
+	name=$(jq -r '.name' <<<"$entry")
+	home=$(getent passwd "$name" | cut -d: -f6 || true)
+	home=${home:-/home/$name}
+	uctl=(systemctl --user --machine="$name@.host")
+
+	reload=0
+	for unit in $(jq -r '.units // [] | .[]' <<<"$entry"); do
+		[[ -f $units_dir/user/$unit ]] || { echo "  missing units/user/$unit" >&2; exit 2; }
+		if [[ $MODE == install ]]; then install -d -o "$name" -g "$name" "$home/.config" "$home/.config/systemd" "$home/.config/systemd/user"; fi
+		if ensure_file "$home/.config/systemd/user/$unit" 644 "$name:$name" <"$units_dir/user/$unit"; then reload=1; fi
+	done
+	if [[ $MODE == install && $reload == 1 ]]; then "${uctl[@]}" daemon-reload; fi
+
+	for unit in $(jq -r '.enable // [] | .[]' <<<"$entry"); do
+		if ! "${uctl[@]}" is-enabled -q "$unit" 2>/dev/null; then
+			drift "$name: enable --now $unit (user manager)" && "${uctl[@]}" enable --now "$unit"
+		fi
+	done
+done
+finish

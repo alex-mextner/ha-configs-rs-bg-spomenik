@@ -1,0 +1,21 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/compose@.service, not this file.
+# One Docker Compose stack per instance: compose@bots.service runs /srv/compose/bots/compose.yaml.
+# The stack is not started until its compose.yaml exists (the unit stays inactive, not failed).
+[Unit]
+Description=Docker Compose stack %i
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/srv/compose/%i/compose.yaml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/compose/%i
+ExecStart=/usr/bin/docker compose --project-name %i up --detach --remove-orphans
+ExecReload=/usr/bin/docker compose --project-name %i up --detach --remove-orphans
+ExecStop=/usr/bin/docker compose --project-name %i down
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

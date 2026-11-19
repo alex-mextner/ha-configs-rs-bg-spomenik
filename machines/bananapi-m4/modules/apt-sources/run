@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# apt-sources: [modules.apt-sources.sources.<name>] = { uris, suites, components, key_url, fingerprint }.
+# The key is downloaded only by `install` and written only when its fingerprint equals the declared one, so a
+# compromised or rotated key stops the module instead of being trusted silently. `suites` may contain
+# "{codename}", replaced by VERSION_CODENAME from /etc/os-release.
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+arch=$(dpkg --print-architecture)
+changed=0
+
+# Fingerprint of the primary key, printed only when the file holds exactly one: a second key appended to a
+# tampered download would otherwise be trusted through Signed-By next to the pinned one.
+key_fingerprint() {
+	gpg --show-keys --with-colons "$1" 2>/dev/null |
+		awk -F: '/^pub/ {n++} /^fpr/ && !f {f = $10} END {if (n == 1) print f}'
+}
+
+for name in $(opt '.sources // {} | keys[]'); do
+	src=$(opt ".sources[\"$name\"]")
+	fpr=$(jq -r '.fingerprint' <<<"$src" | tr -d ' ')
+	key=/etc/apt/keyrings/$name.asc
+
+	if [[ ! -f $key || $(key_fingerprint "$key") != "$fpr" ]]; then
+		if drift "$key (fingerprint $fpr)"; then
+			tmp=$(mktemp)
+			curl -fsSL --retry 3 "$(jq -r '.key_url' <<<"$src")" -o "$tmp"
+			got=$(key_fingerprint "$tmp")
+			if [[ $got != "$fpr" ]]; then
+				echo "  $name: downloaded key file has fingerprint ${got:-none (not exactly one primary key)}, declared $fpr: refusing" >&2
+				rm -f "$tmp"
+				exit 1
+			fi
+			install -D -m 644 -o root -g root "$tmp" "$key"
+			rm -f "$tmp"
+			changed=1
+		fi
+	fi
+
+	if ensure_file "/etc/apt/sources.list.d/$name.sources" 644 root:root <<EOF; then changed=1; fi
+$MARKER
+Types: deb
+URIs: $(jq -r '.uris' <<<"$src")
+Suites: $(jq -r '.suites' <<<"$src" | sed "s/{codename}/$codename/g")
+Components: $(jq -r '.components' <<<"$src")
+Architectures: $arch
+Signed-By: $key
+EOF
+done
+
+if [[ $MODE == install && $changed == 1 ]]; then
+	apt-get update -o Acquire::Retries=3
+fi
+finish

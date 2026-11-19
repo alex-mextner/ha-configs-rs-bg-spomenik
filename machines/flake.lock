@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "amlogic-boot-fip": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794288343,
+        "narHash": "sha256-dL586Ac8N4ajsnVkm3A0oNAEYp0ZHT6eDBmOzfgm8jI=",
+        "owner": "LibreELEC",
+        "repo": "amlogic-boot-fip",
+        "rev": "b54e3bbbcf5613d451230d359d264844eeda7166",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LibreELEC",
+        "repo": "amlogic-boot-fip",
+        "rev": "b54e3bbbcf5613d451230d359d264844eeda7166",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1794872590,
+        "narHash": "sha256-E+XLAfnC7+bdr4qlEgRv6cdGmiqTU5oeFNKCha7epqQ=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "f68407657ad294471eb4b2e65d193df26edf729f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "amlogic-boot-fip": "amlogic-boot-fip",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
