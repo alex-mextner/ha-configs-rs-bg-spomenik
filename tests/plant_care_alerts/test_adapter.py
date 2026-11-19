@@ -10,6 +10,8 @@ from datetime import UTC, datetime, time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from tests.plant_care_alerts.service_fixtures import make_service_registry
+
 HA = importlib.util.find_spec("homeassistant") is not None
 
 
@@ -34,7 +36,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             bus=SimpleNamespace(async_fire=Mock()),
             config_entries=SimpleNamespace(async_get_entry=Mock(return_value=object())),
         )
-        with patch("custom_components.plant_care_alerts.Store"):
+        with patch("custom_components.plant_care_alerts.new_store"):
             self.manager = CareManager(
                 self.hass,
                 {
@@ -229,7 +231,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             async_setup,
         )
 
-        self.hass.services = SimpleNamespace(async_register=Mock())
+        self.hass.services = make_service_registry()
         self.hass.bus.async_listen = Mock(return_value=lambda: None)
         self.hass.bus.async_listen_once = Mock()
         self.manager.load = AsyncMock()

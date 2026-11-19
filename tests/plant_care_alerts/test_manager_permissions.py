@@ -16,6 +16,8 @@ from homeassistant.exceptions import Unauthorized, UnknownUser
 
 from custom_components.plant_care_alerts import DOMAIN, CareManager, async_setup
 
+from .service_fixtures import make_service_registry
+
 MODULE = "custom_components.plant_care_alerts"
 PLANT = "sensor.test_plant_care"
 SPEAKER = "media_player.test_speaker"
@@ -42,14 +44,14 @@ class TestManagerPermissions(unittest.IsolatedAsyncioTestCase):
             data={},
             states=SimpleNamespace(get=lambda _: None),
             auth=SimpleNamespace(async_get_user=AsyncMock(return_value=self.user)),
-            services=SimpleNamespace(async_register=Mock()),
+            services=make_service_registry(),
             bus=SimpleNamespace(
                 async_fire=Mock(),
                 async_listen=Mock(return_value=lambda: None),
                 async_listen_once=Mock(),
             ),
         )
-        with patch(f"{MODULE}.Store"):
+        with patch(f"{MODULE}.new_store"):
             self.manager = CareManager(
                 self.hass,
                 {

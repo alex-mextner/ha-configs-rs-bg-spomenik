@@ -55,6 +55,7 @@ def _initial_state(previous: dict, reading: dict, now: float) -> dict:
             last_sample_at=None,
             notified_status=None,
             reliability_pending_confirmation=False,
+            calibration_confirmation_pending=False,
         )
     s["source_identity"] = identity
     for key in (
@@ -169,6 +170,8 @@ def _hysteresis(s: dict, reading: dict, now: float, cfg: dict) -> None:
     s.update(dry_threshold=dry, recovery_threshold=recovery)
     if avg >= recovery:
         if s["due_since"] is None or len(s["samples"]) >= cfg["min_samples"]:
+            if s.get("notified_status") in {"due", "overdue"}:
+                s["clear_pending"] = True
             s.update(dry_since=None, due_since=None, notified_status=None)
     elif avg > dry and s["due_since"] is None:
         s["dry_since"] = None
@@ -186,8 +189,29 @@ def _sensor_reading(
     s["untrusted_moisture"] = finite(reading.get("moisture"))
     if not quality["reliability_valid"]:
         _mark_invalid(s, reading, now, cfg)
+        if quality.get("reliability_reason") == "calibrating":
+            s.update(
+                status="calibrating",
+                samples=[],
+                reliability_pending_confirmation=True,
+                calibration_confirmation_pending=True,
+            )
+        else:
+            s["calibration_confirmation_pending"] = False
         return False
     _restore_samples(s, now, quality, previous)
+    if (
+        previous.get("status") == "calibrating"
+        and not s["samples"]
+        and finite(reading.get("sample_at")) == s.get("last_sample_at")
+    ):
+        # No post-barrier physical measurement has arrived yet. Stay quiet.
+        s.update(
+            status="calibrating",
+            reliability_valid=False,
+            reliability_reason="calibrating",
+        )
+        return False
     if not _append_sample(s, reading, now, cfg):
         return False
     _hysteresis(s, reading, now, cfg)
@@ -199,6 +223,7 @@ def _final_status(s: dict, reading: dict, now: float, cfg: dict) -> None:
         s.update(dry_since=None, due_since=None, status="ok")
     if s["sample_count"] >= cfg["min_samples"]:
         s["reliability_pending_confirmation"] = False
+        s["calibration_confirmation_pending"] = False
     awaiting_current_evidence = reading.get("has_sensor", True) and s.get(
         "reliability_pending_confirmation", False
     )

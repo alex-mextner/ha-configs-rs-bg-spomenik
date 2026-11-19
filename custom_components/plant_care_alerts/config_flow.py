@@ -12,7 +12,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import selector
 
-from . import DOMAIN
+from .const import DOMAIN
 from .voice import CONF_VOICE_TARGET, configured_target
 
 

@@ -3,6 +3,8 @@
   "name": "Plant Care Alerts",
   "after_dependencies": [
     "adaptive_plant",
+    "input_number",
+    "logbook",
     "media_player",
     "recorder"
   ],

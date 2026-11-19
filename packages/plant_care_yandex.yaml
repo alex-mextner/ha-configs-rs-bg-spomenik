@@ -101,6 +101,8 @@ script:
               {% else %}
                 Стрелиция: показания датчика недостоверны. Проверь грунт вручную.
               {% endif %}
+            {% elif care_state == 'calibrating' %}
+              Стрелиция: проверяю показания после изменения калибровки. Оценка полива временно приостановлена.
             {% elif not fresh %}
               Стрелиция: свежих показаний нет. Проверь датчик и грунт перед поливом.
             {% elif wet_risk == 'prolonged' %}
@@ -119,8 +121,40 @@ script:
               Стрелиция: индекс влажности {{ moisture | float | round(0) | int }}%. Точного прогноза полива пока нет.
             {% endif %}
       - variables:
+          last_watering_at: "{{ state_attr(care_entity, 'last_watering_at') }}"
+          last_watering_source: "{{ state_attr(care_entity, 'last_watering_source') }}"
+          last_watering_precision: "{{ state_attr(care_entity, 'last_watering_precision') }}"
+          last_watering_window_start: "{{ state_attr(care_entity, 'last_watering_window_start') }}"
+          last_watering_window_end: "{{ state_attr(care_entity, 'last_watering_window_end') }}"
+      - variables:
+          last_watering_message: >-
+            {% if last_watering_source in ['user_report', 'upstream']
+                  and last_watering_precision in ['day', 'approximate_day'] %}
+              {% set day = strptime(last_watering_at | string, '%Y-%m-%d', none) %}
+              {% set months = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+                               'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'] %}
+              {% if day %}
+                {% if last_watering_precision == 'approximate_day' %}
+                  По вашей отметке, последний полив был примерно {{ day.day }} {{ months[day.month - 1] }}.
+                {% else %}
+                  Последняя отметка полива: {{ day.day }} {{ months[day.month - 1] }}.
+                {% endif %}
+              {% endif %}
+            {% elif last_watering_source == 'auto' and last_watering_precision == 'interval' %}
+              {% set start = as_timestamp(last_watering_window_start, none) %}
+              {% set end = as_timestamp(last_watering_window_end, none) %}
+              {% if start is number and end is number %}
+                Автоматически определён вероятный полив между {{ start | timestamp_custom('%d.%m %H:%M', true) }} и {{ end | timestamp_custom('%d.%m %H:%M', true) }}.
+              {% endif %}
+            {% endif %}
+      - variables:
           report:
-            message: "{{ message | trim }}"
+            message: "{{ (message | trim ~ ' ' ~ last_watering_message | trim) | trim }}"
+            last_watering_at: "{{ last_watering_at }}"
+            last_watering_source: "{{ last_watering_source }}"
+            last_watering_precision: "{{ last_watering_precision }}"
+            last_watering_window_start: "{{ last_watering_window_start }}"
+            last_watering_window_end: "{{ last_watering_window_end }}"
             available: "{{ calibrated and fresh }}"
             moisture: "{{ moisture if calibrated and fresh else none }}"
             care_state: "{{ care_state }}"

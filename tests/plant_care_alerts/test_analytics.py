@@ -35,12 +35,13 @@ class AnalyticsTests(unittest.TestCase):
         self.assertIsNone(result["forecast_due_at"])
         self.assertEqual(previous["forecast_due_at"], 10000)
 
-    def test_only_three_sustained_high_samples_establish_a_watering_event(self) -> None:
-        points = [[i * 300, value] for i, value in enumerate([10, 10, 10, 70, 70, 70])]
-        result = analyze({}, points, 1500, calibration=[0, 100])
-        self.assertEqual(result["last_watering_at"], 900)
+    def test_watering_requires_a_baseline_and_thirty_minute_confirmation(self) -> None:
+        points = [[i * 300, 10] for i in range(12)]
+        points.extend([[i * 300, 70] for i in range(12, 19)])
+        result = analyze({}, points, points[-1][0], calibration=[0, 100])
+        self.assertEqual(result["last_watering_at"], 3600)
         self.assertEqual(result["last_watering_source"], "auto")
-        for values in ([10, 10, 10, 70, 10, 10], [10, 10, 10, 70, 70]):
+        for values in ([10, 10, 10, 70, 10, 10], [10, 10, 10, 70, 70, 70]):
             with self.subTest(values=values):
                 samples = [[i * 300, value] for i, value in enumerate(values)]
                 self.assertNotIn(

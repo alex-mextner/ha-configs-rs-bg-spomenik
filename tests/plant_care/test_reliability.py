@@ -1,32 +1,12 @@
 """Bounded regression tests for real timestamps, frozen values and saturation."""
 
-import importlib.util
 import json
-import sys
-import types
 import unittest
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-PACKAGE = "_plant_reliability_test"
-package = types.ModuleType(PACKAGE)
-package.__path__ = [str(ROOT / "custom_components/plant_care_alerts")]
-sys.modules[PACKAGE] = package
+from calibration_fixtures import load_component_module
 
-
-def load(name) -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        PACKAGE + "." + name,
-        ROOT / "custom_components/plant_care_alerts" / (name + ".py"),
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-state_machine = load("state_machine")
-analytics = load("analytics")
+state_machine = load_component_module("state_machine")
+analytics = load_component_module("analytics")
 START = 1794538800.0
 
 
@@ -125,11 +105,10 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIsNone(result.get("last_watering_at"))
 
     def test_real_dry_to_wet_rise_can_infer_watering(self) -> None:
-        points = [
-            [START + i * 300, v] for i, v in enumerate([70, 72, 71, 160, 165, 170])
-        ]
+        points = [[START + i * 300, 71 + i % 3] for i in range(12)]
+        points.extend([[START + i * 300, 160 + i % 3] for i in range(12, 19)])
         result = analytics.analyze({}, points, points[-1][0], calibration=[67, 221])
-        self.assertEqual(result.get("last_watering_at"), points[3][0])
+        self.assertEqual(result.get("last_watering_at"), points[12][0])
 
     def test_recorder_bootstrap_ignores_outages_and_restored_equal_values(self) -> None:
         now = START + 5 * 86400
@@ -218,11 +197,10 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIsNone(record.get("reliability_incident_started_at"))
 
     def test_watering_from_below_dry_calibration_is_not_rejected(self) -> None:
-        points = [
-            [START + i * 300, v] for i, v in enumerate([67, 66, 65, 160, 165, 170])
-        ]
+        points = [[START + i * 300, 65 + i % 3] for i in range(12)]
+        points.extend([[START + i * 300, 160 + i % 3] for i in range(12, 19)])
         result = analytics.analyze({}, points, points[-1][0], calibration=[67, 221])
-        self.assertEqual(result.get("last_watering_at"), points[3][0])
+        self.assertEqual(result.get("last_watering_at"), points[12][0])
 
     def test_owner_twelve_hour_rule_also_flags_lower_clipping(self) -> None:
         record = {}
@@ -261,23 +239,24 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(record["last_value_change_at"], START)
 
     def test_rejected_auto_evidence_does_not_revive_after_recovery(self) -> None:
-        points = [
-            [START + i * 300, v] for i, v in enumerate([70, 72, 71, 160, 160, 160])
-        ]
+        points = [[START + i * 300, 70 + i % 3] for i in range(12)]
+        points.extend([[START + i * 300, 160 + i % 3] for i in range(12, 19)])
         previous = analytics.analyze({}, points, points[-1][0], calibration=[67, 221])
+        self.assertEqual(previous["last_watering_at"], points[12][0])
         previous = analytics.analyze(
             previous,
             points,
             points[-1][0],
             calibration=[67, 221],
             reliable=False,
-            unreliable_since=points[3][0],
+            unreliable_since=points[12][0],
         )
         recovered = analytics.analyze(
             previous, points, points[-1][0], calibration=[67, 221]
         )
         self.assertIsNone(recovered.get("last_watering_at"))
-        self.assertIn(points[3][0], recovered.get("rejected_watering_events", []))
+        self.assertIn(points[12][0], recovered.get("rejected_watering_events", []))
+        self.assertFalse(recovered["watering_history"][0]["valid"])
 
     def test_legacy_short_samples_cannot_bootstrap_unknown_history(self) -> None:
         previous = {
