@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# backup: nightly restic backup to Google Drive for a Debian/Ubuntu host (debian-tweaks module, verbs check|plan|install).
+#   [modules.backup] host = "<name>"   reads machines/backup/hosts/<name>.toml (default: this machine's hostname)
+# Installs restic (apt) and the pinned static rclone, lib/homelab-backup + lib/tasks_offsite.py, the rendered
+# config.json, and the systemd units/timers (policy.toml: schedule, retention); enables the timers.
+# scope = "system" (root): /usr/local, /etc/homelab-backup, system units.
+# scope = "user": run as that user, no root: ~/.local, ~/.config/homelab-backup, user units (restic must be installed).
+# The secrets (restic password, rclone.conf) are never written here: README.md, Secrets.
+self=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+# shellcheck source=/dev/null # debian-tweaks helpers: machines/bananapi-m4/lib/common.sh (DT_DIR is set by the engine / install.sh)
+source "${DT_DIR:?run through the debian-tweaks engine or machines/backup/debian/install.sh}/lib/common.sh" "$@"
+backup_dir=$(dirname "$self")
+
+host=$(opt '.host // empty')
+host=${host:-$(hostname)}
+host_file=$backup_dir/hosts/$host.toml
+[[ -f $host_file ]] || { echo "  no $host_file" >&2; exit 2; }
+toml() { python3 -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb"))))' "$1"; }
+host_json=$(toml "$host_file")
+policy_json=$(toml "$backup_dir/policy.toml")
+scope=$(jq -r '.scope // "system"' <<<"$host_json")
+
+if [[ $scope == user ]]; then
+	((EUID != 0)) || { echo "  $host has scope = \"user\": run install.sh as that user, not root" >&2; exit 2; }
+	owner="$(id -un):$(id -gn)"
+	bindir=$HOME/.local/bin
+	libdir=$HOME/.local/lib/homelab-backup
+	confdir=$HOME/.config/homelab-backup
+	unitdir=$HOME/.config/systemd/user
+	statedir=$HOME/.local/state/homelab-backup
+	cachedir=$HOME/.cache/homelab-backup
+	ctl=(systemctl --user)
+	path=$bindir:/usr/local/bin:/usr/bin:/bin
+else
+	owner=root:root
+	bindir=/usr/local/bin
+	libdir=/usr/local/lib/homelab-backup
+	confdir=/etc/homelab-backup
+	unitdir=/etc/systemd/system
+	statedir=/var/lib/homelab-backup
+	cachedir=/var/cache/homelab-backup
+	ctl=(systemctl)
+	path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+rclone_config=$(jq -r --arg d "$confdir/rclone.conf" '.rclone_config // $d' <<<"$host_json")
+password_file=$confdir/restic-password
+pol() { jq -r "$1" <<<"$policy_json"; }
+
+# --- packages: restic, and sqlite3 for the SQLite dumps and the drill ----------------------------------------
+missing=()
+for pkg in restic sqlite3; do command -v "$pkg" >/dev/null || missing+=("$pkg"); done
+if ((${#missing[@]})); then
+	if [[ $scope == user ]]; then
+		echo "  ${missing[*]} missing and scope = \"user\" cannot install: sudo apt-get install -y ${missing[*]}" >&2
+		exit 1
+	fi
+	if drift "apt-get install ${missing[*]}"; then
+		apt-get update -q
+		DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+	fi
+fi
+
+# --- rclone (static, pinned, sha256-verified) -----------------------------------------------------------------
+rclone_version=$(pol .rclone.version)
+arch=$(dpkg --print-architecture)
+rclone_sha=$(pol ".rclone.sha256.$arch // empty")
+[[ -n $rclone_sha ]] || { echo "  policy.toml has no rclone sha256 for $arch" >&2; exit 2; }
+if [[ $("$bindir/rclone" version 2>/dev/null | head -1) != "rclone v$rclone_version" ]]; then
+	if drift "install rclone v$rclone_version ($arch) to $bindir/rclone"; then
+		tmp=$(mktemp -d)
+		zip=rclone-v$rclone_version-linux-$arch.zip
+		curl -fsSL -o "$tmp/$zip" "https://downloads.rclone.org/v$rclone_version/$zip"
+		echo "$rclone_sha  $tmp/$zip" | sha256sum --check --quiet
+		python3 -m zipfile -e "$tmp/$zip" "$tmp"
+		install -D -m 755 "$tmp/rclone-v$rclone_version-linux-$arch/rclone" "$bindir/rclone"
+		rm -rf "$tmp"
+	fi
+fi
+
+# --- scripts and config ---------------------------------------------------------------------------------------
+# with_marker FILE: the file with the debian-tweaks marker as its second line (after the shebang)
+with_marker() { sed "1a $MARKER" "$1"; }
+if [[ $MODE == install ]]; then
+	install -d -m 700 -o "${owner%%:*}" -g "${owner##*:}" "$confdir" "$statedir" "$cachedir"
+fi
+# ensure_file reads stdin and counts drift in this shell: feed it with `< <(...)`, never through a pipe (subshell)
+ensure_file "$libdir/homelab-backup" 755 "$owner" < <(with_marker "$backup_dir/lib/homelab-backup") || true
+ensure_file "$libdir/tasks_offsite.py" 644 "$owner" < <(with_marker "$backup_dir/lib/tasks_offsite.py") || true
+
+render_config() {
+	jq -n --arg marker "$MARKER Source: machines/backup/hosts/$host.toml + policy.toml." \
+	--argjson h "$host_json" --argjson p "$policy_json" \
+	--arg password_file "$password_file" --arg rclone_config "$rclone_config" --arg rclone "$bindir/rclone" \
+	--arg state "$statedir" --arg cache "$cachedir" '
+	{
+		_comment: $marker,
+		host: $h.host,
+		repository: "rclone:\($p.remote):\($p.root)/restic/\($h.host)",
+		password_file: $password_file,
+		rclone_config: $rclone_config,
+		rclone_program: $rclone,
+		state_dir: $state,
+		cache_dir: $cache,
+		paths: $h.paths,
+		exclude: ($h.exclude // []),
+		dumps: ($h.dumps // []),
+		drill_file: ($h.drill_file // ""),
+		notify: ($h.notify // []),
+		tasks_offsite: ($h.tasks_offsite // null),
+		policy: $p
+	}'
+}
+ensure_file "$confdir/config.json" 644 "$owner" < <(render_config) || true
+
+# --- systemd units --------------------------------------------------------------------------------------------
+# service DESCRIPTION VERB [EXTRA_UNIT_LINE]: a oneshot that runs `homelab-backup VERB`
+service() {
+	printf '%s\n' "$MARKER" "[Unit]" "Description=$1"
+	# the user manager has no network-online.target
+	[[ $scope == user ]] || printf '%s\n' "Wants=network-online.target" "After=network-online.target"
+	[[ -z ${3:-} ]] || printf '%s\n' "$3"
+	cat <<EOF
+
+[Service]
+Type=oneshot
+Environment=HOMELAB_BACKUP_CONFIG=$confdir/config.json
+Environment=PATH=$path
+ExecStart=$libdir/homelab-backup $2
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=12h
+EOF
+}
+# timer DESCRIPTION ONCALENDAR [RANDOMIZED_DELAY]
+timer() {
+	cat <<EOF
+$MARKER
+[Unit]
+Description=$1
+
+[Timer]
+OnCalendar=$2
+RandomizedDelaySec=${3:-5min}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+reload=0
+unit() { if ensure_file "$unitdir/$1" 644 "$owner"; then reload=1; fi; }
+unit homelab-backup.service < <(service "homelab-backup: database dumps + restic backup to Google Drive" run)
+unit homelab-backup.timer < <(timer "homelab-backup: nightly backup" "$(pol .schedule.backup)" "$(pol .schedule.backup_randomized_delay)")
+unit homelab-backup-check.service < <(service "homelab-backup: restic check --read-data-subset=$(pol .check.read_data_subset)" check)
+unit homelab-backup-check.timer < <(timer "homelab-backup: weekly repository check" "$(pol .schedule.check)")
+unit homelab-backup-drill.service < <(service "homelab-backup: monthly restore drill" drill)
+unit homelab-backup-drill.timer < <(timer "homelab-backup: monthly restore drill" "$(pol .schedule.drill)")
+timers=(homelab-backup.timer homelab-backup-check.timer homelab-backup-drill.timer)
+if [[ $(jq -r '.tasks_offsite // empty' <<<"$host_json") != "" ]]; then
+	unit homelab-backup-tasks.service < <(service "homelab-backup: copy the encrypted Tasks backups to Google Drive" tasks \
+		"After=tasks-backup-pull.service")
+	unit homelab-backup-tasks.timer < <(timer "homelab-backup: hourly off-site copy of the Tasks backups" "$(pol .schedule.tasks)" 2min)
+	timers+=(homelab-backup-tasks.timer)
+fi
+if [[ $MODE == install && $reload == 1 ]]; then "${ctl[@]}" daemon-reload; fi
+
+for t in "${timers[@]}"; do
+	if ! "${ctl[@]}" is-enabled -q "$t" 2>/dev/null || ! "${ctl[@]}" is-active -q "$t" 2>/dev/null; then
+		drift "enable --now $t" && "${ctl[@]}" enable --now "$t"
+	fi
+done
+
+# --- secrets: provisioned once by the owner, never by this module ---------------------------------------------
+for secret in "$password_file" "$rclone_config"; do
+	[[ -s $secret ]] || say "! $secret is missing: the timers will fail until it exists (README.md, Secrets)"
+done
+finish

@@ -82,3 +82,6 @@ enable = ["compose@bots.service"]
 # pinned in ../dotfiles/debian/rev (one pin for every host; `rev = "<sha>"` here would override it).
 [modules.dotfiles]
 user = "ultra"
+[modules.backup]
+# nightly restic backup to Google Drive: what is backed up is ../backup/hosts/bananapi-m4.toml (see ../backup/README.md)
+host = "bananapi-m4"

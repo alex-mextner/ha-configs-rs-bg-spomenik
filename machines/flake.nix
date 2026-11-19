@@ -44,12 +44,23 @@
         modules = [
           ./odroid-n2plus/hardware/odroid-n2plus.nix
           ./odroid-n2plus/configuration.nix
+          ./backup/nixos.nix
+          {
+            homelab.backup = {
+              enable = true;
+              host = "odroidn2"; # backup/hosts/odroidn2.toml, shared with the Armbian install
+            };
+          }
         ];
       };
     in
     {
       nixosConfigurations.macmini = nixpkgs.lib.nixosSystem {
-        modules = [ ./macmini/configuration.nix ];
+        modules = [
+          ./macmini/configuration.nix
+          ./backup/nixos.nix
+          { homelab.backup.enable = true; }
+        ];
       };
 
       nixosConfigurations.odroid-n2plus = odroid;

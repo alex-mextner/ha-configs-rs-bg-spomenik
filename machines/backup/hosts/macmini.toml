@@ -1,0 +1,18 @@
+# macmini (NixOS): headless Docker host. The system itself is machines/flake.nix; only state is backed up.
+host = "macmini"
+scope = "system"
+drill_file = "/var/lib/nixos/uid-map"
+
+paths = [
+  # uid/gid allocations: restoring them first keeps file ownership stable after a reinstall
+  "/var/lib/nixos",
+  "/srv",
+  "/home/ultra",
+]
+
+exclude = [
+  ".cache",
+  "node_modules",
+  "__pycache__",
+  "/home/ultra/.local/share/containers",
+]
