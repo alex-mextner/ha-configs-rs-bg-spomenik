@@ -1,0 +1,2 @@
+description = "compressed swap in RAM: armbian-zram-config on Armbian, zram-tools (zramswap) elsewhere"
+order = 50

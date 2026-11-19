@@ -1,0 +1,2 @@
+description = "hostname, /etc/hosts entry and timezone"
+order = 10

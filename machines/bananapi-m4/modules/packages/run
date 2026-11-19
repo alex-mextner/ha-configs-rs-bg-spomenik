@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# packages: [modules.packages] install = [...] (installed, --no-install-recommends), purge = [...] (absent).
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+installed() { [[ $(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null) == installed ]]; }
+
+missing=()
+for pkg in $(opt '.install // [] | .[]'); do
+	installed "$pkg" || missing+=("$pkg")
+done
+present=()
+for pkg in $(opt '.purge // [] | .[]'); do
+	installed "$pkg" && present+=("$pkg")
+done
+
+export DEBIAN_FRONTEND=noninteractive
+if ((${#missing[@]})); then
+	if drift "install: ${missing[*]}"; then
+		apt-get update -o Acquire::Retries=3
+		apt-get install -y --no-install-recommends -o Acquire::Retries=3 "${missing[@]}"
+	fi
+fi
+if ((${#present[@]})); then
+	drift "purge: ${present[*]}" && apt-get purge -y "${present[@]}"
+fi
+finish

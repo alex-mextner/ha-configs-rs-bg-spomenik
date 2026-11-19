@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# docker: [modules.docker.daemon] is written as /etc/docker/daemon.json (the whole file is managed; keys sorted).
+# A changed file is validated with `dockerd --validate` first, then docker is restarted; keep "live-restore" = true
+# so running containers survive that restart. Docker itself comes from [modules.packages] (docker-ce from the
+# Docker repository in [modules.apt-sources]).
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+if ! command -v dockerd >/dev/null; then
+	echo "  dockerd is not installed: add docker-ce to [modules.packages] install" >&2
+	# In a preview on a fresh machine the packages module is about to install it: report drift, not failure.
+	[[ $MODE == install ]] && exit 1
+	DRIFT=$((DRIFT + 1))
+	finish
+fi
+
+tmp=$(mktemp)
+opt '.daemon // {}' | jq -S . >"$tmp"
+if ! out=$(dockerd --validate --config-file "$tmp" 2>&1); then
+	echo "  [modules.docker.daemon] is not a valid daemon.json: $out" >&2
+	exit 2
+fi
+if ensure_file /etc/docker/daemon.json 644 root:root <"$tmp" && [[ $MODE == install ]]; then
+	systemctl restart docker.service
+fi
+rm -f "$tmp"
+
+for unit in containerd.service docker.service; do
+	if ! systemctl is-enabled -q "$unit" 2>/dev/null || ! systemctl is-active -q "$unit"; then
+		drift "enable --now $unit" && systemctl enable --now "$unit"
+	fi
+done
+finish

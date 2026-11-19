@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# zram: [modules.zram] percent (swap size, % of RAM), algorithm, priority, mem_limit_percent (Armbian only),
+# tmp_size (Armbian only: its zram-backed /tmp).
+# Armbian ships armbian-zram-config (it also owns the zram /tmp and the ramlog), so there we only write its
+# /etc/default file; plain Debian gets zram-tools' /etc/default/zramswap (add zram-tools to the packages).
+# Armbian applies the new sizes at the next boot: resizing live zram swap would mean swapoff under memory pressure.
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+percent=$(opt '.percent // 50')
+algorithm=$(opt '.algorithm // "zstd"')
+priority=$(opt '.priority // 100')
+
+if [[ -x /usr/lib/armbian/armbian-zram-config ]]; then
+	if ensure_file /etc/default/armbian-zram-config 644 root:root <<EOF; then
+$MARKER
+# Read by /usr/lib/armbian/armbian-zram-config at boot.
+ENABLED=true
+SWAP=true
+ZRAM_PERCENTAGE=$percent
+MEM_LIMIT_PERCENTAGE=$(opt '.mem_limit_percent // 50')
+SWAP_ALGORITHM=$algorithm
+SWAP_PRIORITY=$priority
+TMP_SIZE=$(opt '.tmp_size // "256M"')
+EOF
+		say "  takes effect at the next reboot (armbian-zram-config runs at boot)"
+	fi
+else
+	if [[ ! -x /usr/sbin/zramswap ]]; then
+		echo "  zram-tools is not installed: add it to [modules.packages] install" >&2
+		exit 1
+	fi
+	if ensure_file /etc/default/zramswap 644 root:root <<EOF && [[ $MODE == install ]]; then
+$MARKER
+ALGO=$algorithm
+PERCENT=$percent
+PRIORITY=$priority
+EOF
+		systemctl enable zramswap.service
+		systemctl restart zramswap.service
+	fi
+fi
+finish

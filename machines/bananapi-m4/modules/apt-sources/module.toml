@@ -1,0 +1,3 @@
+description = "extra apt repositories: deb822 .sources files with fingerprint-pinned signing keys"
+# Before packages: the docker-ce packages come from the Docker repository declared here.
+order = 20

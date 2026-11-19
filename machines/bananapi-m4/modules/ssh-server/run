@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# ssh-server: /etc/ssh/sshd_config.d/10-debian-tweaks.conf from [modules.ssh-server]
+# (password_authentication, permit_root_login). Turning passwords off is refused while no user in
+# [modules.users] declares an authorized key and can sudo (sudo = "nopasswd", or "password" with a password
+# already set): that would lock the owner out.
+# The drop-in is validated with `sshd -t` before ssh is reloaded (a reload keeps open sessions).
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+password=$(opt '.password_authentication // false')
+root_login=$(opt '.permit_root_login // "no"')
+yn() { [[ $1 == true ]] && echo yes || echo no; }
+
+# A user counts as an admin only if they can log in with a key AND then use sudo: sudo = "nopasswd", or
+# sudo = "password" with a usable password already set on this machine (this spec never sets passwords).
+can_sudo() {
+	case "$2" in
+	nopasswd) return 0 ;;
+	password) [[ $(passwd -S "$1" 2>/dev/null | awk '{print $2}') == P ]] ;;
+	*) return 1 ;;
+	esac
+}
+if [[ $password == false ]]; then
+	admins=0
+	while read -r user rule; do
+		if can_sudo "$user" "$rule"; then admins=$((admins + 1)); fi
+	done < <(cfg '.modules.users.users // [] | .[] | select((.authorized_keys // []) | length > 0)
+		| "\(.name) \(.sudo // "none")"')
+	if ((admins == 0)); then
+		echo "  refusing password_authentication = false: no user in [modules.users] has authorized_keys and" \
+			"working sudo (nopasswd, or password with a password set)" >&2
+		exit 1
+	fi
+fi
+
+conf=/etc/ssh/sshd_config.d/10-debian-tweaks.conf
+tmp=$(mktemp)
+cat >"$tmp" <<EOF
+$MARKER
+PasswordAuthentication $(yn "$password")
+KbdInteractiveAuthentication no
+PermitRootLogin $root_login
+PubkeyAuthentication yes
+EOF
+# Validate the candidate before it is written: an sshd that rejects its config does not start after the next
+# reboot, which locks the owner out of this headless box. The candidate comes first, so its values win over the
+# current drop-in that the main config includes.
+if [[ $MODE == install ]]; then
+	candidate=$(mktemp)
+	{ cat "$tmp"; echo "Include /etc/ssh/sshd_config"; } >"$candidate"
+	if ! sshd -t -f "$candidate"; then
+		echo "  $conf: sshd -t rejects the new settings, file not written" >&2
+		rm -f "$tmp" "$candidate"
+		exit 1
+	fi
+	rm -f "$candidate"
+fi
+if ensure_file "$conf" 644 root:root <"$tmp" && [[ $MODE == install ]]; then
+	sshd -t
+	systemctl reload ssh
+fi
+rm -f "$tmp"
+finish

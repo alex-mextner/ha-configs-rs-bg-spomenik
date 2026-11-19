@@ -1,0 +1,75 @@
+# Banana Pi BPI-M4 (RTD1395, 4x A53, 2 GB RAM, 8 GB eMMC), Armbian 26.11 trixie minimal, kernel 6.18 "current".
+# Workload: bots in Docker Compose (Bun images, arm64), redis, GitHub Actions self-hosted runners (arm64),
+# the `computer` tool (Node 18+, systemd --user).
+# Apply: sudo ./install.sh (preview), sudo ./install.sh --commit (converge), sudo ./install.sh check (exit 0/3).
+
+[modules.system]
+hostname = "bananapi-m4"
+timezone = "Europe/Belgrade"
+
+[modules.apt-sources.sources.docker]
+uris = "https://download.docker.com/linux/debian"
+suites = "{codename}"
+components = "stable"
+key_url = "https://download.docker.com/linux/debian/gpg"
+# "Docker Release (CE deb) <docker@docker.com>", as published on https://docs.docker.com/engine/install/debian/
+fingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+
+[modules.packages]
+install = [
+  # docker engine + compose v2 from download.docker.com (docker.io in trixie has no compose v2 plugin)
+  "docker-ce", "docker-ce-cli", "containerd.io", "docker-compose-plugin", "docker-buildx-plugin",
+  # `computer` tool: Node 18+ (trixie ships nodejs 20), user services need the per-user D-Bus
+  "nodejs", "npm", "dbus-user-session",
+  # GitHub Actions runners (actions/runner arm64 tarball) need these at configure time
+  "git", "curl", "ca-certificates", "jq", "tar", "libicu76",
+  # day-to-day
+  "htop", "tmux", "rsync", "less", "vim-tiny",
+]
+
+[[modules.users.users]]
+name = "ultra"
+shell = "/bin/bash"
+groups = ["sudo", "docker", "systemd-journal", "adm"]
+# No password is ever set by this spec: key-only login, so sudo must not ask for one.
+sudo = "nopasswd"
+# systemd --user keeps running with nobody logged in (the `computer` tool, user timers)
+linger = true
+authorized_keys = [
+  # ubuntu-pc (~/.ssh/id_ed25519.pub)
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMdEyhpamHIpibpBBnExkEe/sTf4ga0frBRWEQhBLQtD ultra@home",
+  # https://github.com/alex-mextner.keys
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINpnCxVsKPqVbKHtg5fKYabNIO8Ue8qYMkeJh/UFNtLd",
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGpvc8Es/UxcnDgKsAn84iu+oofvL0yWbDOxTie4aTwC",
+]
+
+[modules.ssh-server]
+password_authentication = false
+permit_root_login = "no"
+
+[modules.zram]
+# 2 GB RAM: a 1 GB zstd swap (~3x compression) is effectively +2 GB for idle bot processes.
+percent = 50
+algorithm = "zstd"
+priority = 100
+mem_limit_percent = 50
+tmp_size = "256M"
+
+[modules.sysctl.settings]
+"vm.swappiness" = 100               # zram swap is cheap compared with dropping page cache on eMMC
+"vm.vfs_cache_pressure" = 50
+"vm.page-cluster" = 0               # no readahead from zram
+"fs.inotify.max_user_watches" = 524288
+"fs.inotify.max_user_instances" = 512
+"net.ipv4.ip_forward" = 1           # docker sets it too; declared so a reboot before docker starts agrees
+
+[modules.docker.daemon]
+"live-restore" = true               # containers survive dockerd restarts (this spec restarts it on change)
+"log-driver" = "local"              # compressed, rotated logs: the eMMC is 8 GB
+"log-opts" = { "max-size" = "10m", "max-file" = "3" }
+"default-ulimits" = { nofile = { Name = "nofile", Soft = 65536, Hard = 65536 } }
+
+[modules.systemd-units]
+system = ["compose@.service"]
+# put the bots stack in /srv/compose/bots/compose.yaml; the unit stays inactive until that file exists
+enable = ["compose@bots.service"]

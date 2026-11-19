@@ -1,0 +1,26 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/compose@.service, not this file.
+# One Docker Compose stack per instance: compose@bots.service runs /srv/compose/bots/compose.yaml.
+# The stack is not started until its compose.yaml exists (the unit stays inactive, not failed); the systemd-units
+# module starts it on the next --commit once the file is there.
+[Unit]
+Description=Docker Compose stack %i
+# Wants, not Requires: systemd passes a restart of a Requires= dependency on to this unit, so a docker.service restart
+# (the docker module restarts it when daemon.json changes) would run ExecStop's `down` and recreate every container.
+# With Wants the stack is left alone and live-restore keeps its containers running across the dockerd restart. This
+# relies on live-restore already being active: on the restart that first enables it (or with it off) the containers
+# stop while this unit stays active (exited); run `systemctl reload 'compose@*.service'` afterwards to bring them back.
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+ConditionPathExists=/srv/compose/%i/compose.yaml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/compose/%i
+ExecStart=/usr/bin/docker compose --project-name %i up --detach --remove-orphans
+ExecReload=/usr/bin/docker compose --project-name %i up --detach --remove-orphans
+ExecStop=/usr/bin/docker compose --project-name %i down
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target
