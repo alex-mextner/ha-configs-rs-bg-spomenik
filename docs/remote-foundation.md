@@ -13,19 +13,25 @@ The package definitions come from the isolated Odroid source checkpoint `16b7023
 | `packages/host_actions.yaml` | Authenticated REST definitions expose Kodi power, keyboard state and text input. |
 | `packages/music_remote.yaml` | Existing backend selection and music commands support AUDIO play/pause. Explicit compatibility beep scripts remain available; automatic AUDIO transitions use canonical target speech. |
 
-The selected host bridge additions publish `GET /kodi/status`, `POST /kodi/keyboard` and `POST /kodi/text-input`, with their existing authentication, revision checks and volatile-text rules. The bridge's media and audit helpers were extracted without changing these contracts. The source contains neither the unrelated fireplace feature nor a production-service replacement instruction.
+The selected host bridge additions publish `GET /kodi/status`, `POST /kodi/keyboard` and `POST /kodi/text-input`, with their existing authentication, revision checks and volatile-text rules. The bridge's media and audit helpers were extracted without changing these contracts. The later fireplace integration adds its own endpoints while preserving these remote contracts. Publication does not authorize replacing additional live owner features.
 
 ## Host installation boundary
 
 The observed Odroid service executes `/home/ultra/.local/bin/ha-host-actions.py`. It does not import this repository's copy automatically. The running script observed during this task had SHA256 `462d114f832ece2cfdf35de57fc77baec47b95f2490a5b3570c7fefe6997b2f8` and already registered the required three routes along with additional owner features.
 
-A fresh installation of the published bridge must keep these three files adjacent:
+A fresh installation of the integrated bridge must keep these files adjacent:
 
 - `ha-host-actions.py`, executable mode `0755`;
 - `ha_host_media.py`, mode `0644`;
-- `ha_host_audit.py`, mode `0644`.
+- `ha_host_audit.py`, mode `0644`;
+- `ha_host_fireplace.py`, mode `0644`;
+- `ha_kodi_fireplace.py`, mode `0644`;
+- `ha_kodi_fireplace_rotation.py`, mode `0644`;
+- `ha_kodi_youtube_manifest.py`, mode `0644`;
+- `ha_kodi_youtube_resolve.py`, preserving its executable source mode;
+- `kodi_fireplaces.json`, mode `0644`.
 
-The copied-bundle regression imports all three from an isolated directory and verifies the actual registered routes. No tracked installer copies the bridge by itself. The existing Odroid executable and its service are excluded from this remote deployment; a later host deployment must reconcile its additional features before replacement.
+The copied-bundle regression imports the complete bundle from an isolated directory and verifies the three original remote routes plus the fireplace and authenticated manifest routes. The fireplace resolver additionally uses the separately installed, pinned provider modules and Kodi addon described in [the fireplace guide](living-room-fireplace.md). No tracked installer copies the bridge by itself. The existing Odroid executable and its service are excluded from this remote deployment; a later host deployment must reconcile its additional features before replacement.
 
 ## Native Android text provider
 

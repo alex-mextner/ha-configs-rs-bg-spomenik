@@ -1,0 +1,67 @@
+name: Kodi fireplace regressions
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-controller:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Exercise rotation, ownership, cancellation, and authenticated manifest delivery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/kodi-fireplace-host-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          trap 'rc=$?; printf "%s completed rc=%s elapsed=%ss log=%s\n" "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting log=%s\n' "$(date -Is)" "$task_log"
+          python3 -m unittest discover -s tests/kodi_fireplace -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-fireplace-host-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/kodi-fireplace-host-*.log
+          retention-days: 14
+
+  home-assistant-script:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+      - name: Execute the actual YAML in the production Home Assistant version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_log="/tmp/kodi-fireplace-ha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          exec > >(tee -a "$task_log") 2>&1
+          task_started=$SECONDS
+          trap 'rc=$?; printf "%s completed rc=%s elapsed=%ss log=%s\n" "$(date -Is)" "$rc" "$((SECONDS-task_started))" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting log=%s\n' "$(date -Is)" "$task_log"
+          python3 -m pip install 'homeassistant==2026.9.3'
+          python3 -m unittest discover -s tests/kodi_fireplace_ha -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kodi-fireplace-ha-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/kodi-fireplace-ha-*.log
+          retention-days: 14

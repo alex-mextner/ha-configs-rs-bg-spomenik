@@ -1,0 +1,177 @@
+# Source rotation, request correlation and durable repeat ownership live in the host bridge.
+# Source/license/hash and recovery semantics: docs/living-room-fireplace.md.
+rest_command:
+  host_kodi_fireplace:
+    url: http://172.20.0.1:8787/kodi/fireplace
+    method: POST
+    headers:
+      X-HA-Host-Token: !secret host_actions_token
+    content_type: application/json
+    payload: >-
+      {{ {'action': 'start', 'request_id': fireplace_request.id} | to_json }}
+    timeout: 120
+
+rest:
+  - resource: http://172.20.0.1:8787/kodi/fireplace
+    headers:
+      X-HA-Host-Token: !secret host_actions_token
+    scan_interval: 3
+    timeout: 3
+    sensor:
+      - name: Living room fireplace
+        unique_id: living_room_fireplace
+        value_template: "{{ value_json.state }}"
+        json_attributes:
+          - owned
+          - file_matches
+          - repeat
+          - observed_at
+          - error
+          - request_id
+          - launch_started_at
+          - source_id
+          - source_kind
+          - title
+          - progressing
+
+homeassistant:
+  customize:
+    sensor.living_room_fireplace:
+      friendly_name: Камин на проекторе
+      icon: mdi:fireplace
+
+script:
+  living_room_fireplace:
+    alias: Камин на проекторе
+    description: Включает проектор и Kodi, затем запускает другой камин с подтверждением воспроизведения.
+    mode: queued
+    max: 3
+    max_exceeded: error
+    sequence:
+      - variables:
+          # Keep the ID inside a mapping: HA must not coerce numeric-looking
+          # caller strings into numbers when rendering scalar templates.
+          fireplace_request: >-
+            {{ {'id': request_id | default(now().strftime('%Y%m%dT%H%M%S%f') ~ '-' ~ (range(100000) | random), true) | string} }}
+          # last_reported advances even when a successful refresh changes nothing.
+          projector_reported_before: >-
+            {% set projector = states.media_player.projector %}
+            {{ as_timestamp(projector.last_reported, 0) if projector is not none else 0 }}
+      # Publish an existing pair after cold startup before testing its contract.
+      # A refresh does not issue a power intent; unavailable pairs still fail below.
+      - action: homeassistant.update_entity
+        target:
+          entity_id: media_player.projector
+      - if: >-
+          {% set projector = states.media_player.projector %}
+          {{ projector is none
+             or as_timestamp(projector.last_reported, 0) <= (projector_reported_before | float(0))
+             or state_attr('media_player.projector', 'power_intent_revision') is none
+             or states('binary_sensor.projector_hdmi_connected') in ['unknown', 'unavailable']
+             or states('sensor.kodi_service_state') in ['unknown', 'unavailable'] }}
+        then:
+          - stop: Не настроено подтверждённое совместное управление проектором и Kodi.
+            error: true
+      - action: script.source_to_pc
+      - variables:
+          power_revision: "{{ state_attr('media_player.projector', 'power_intent_revision') }}"
+      - wait_template: >-
+          {{ state_attr('media_player.projector', 'power_intent_revision') != power_revision
+             or (is_state('binary_sensor.projector_hdmi_connected', 'on')
+                 and is_state('sensor.kodi_service_state', 'on')
+                 and states('media_player.home') in ['on', 'idle', 'paused', 'playing']
+                 and states('media_player.projector') not in ['off', 'unknown', 'unavailable']
+                 and state_attr('media_player.projector', 'last_power_intent') is true
+                 and state_attr('media_player.projector', 'power_sync_target') is none
+                 and state_attr('media_player.projector', 'power_sync_error') is none) }}
+        # Measured cold startup took 70s under memory/I/O pressure. The
+        # prestart recovery itself is bounded at 55s; cancel still wins above.
+        timeout: "00:02:00"
+        continue_on_timeout: true
+      - if: >-
+          {{ not wait.completed
+             or state_attr('media_player.projector', 'power_intent_revision') != power_revision
+             or state_attr('media_player.projector', 'last_power_intent') is not true
+             or not is_state('binary_sensor.projector_hdmi_connected', 'on')
+             or not is_state('sensor.kodi_service_state', 'on')
+             or states('media_player.home') not in ['on', 'idle', 'paused', 'playing']
+             or states('media_player.projector') in ['off', 'unknown', 'unavailable']
+             or state_attr('media_player.projector', 'power_sync_target') is not none
+             or state_attr('media_player.projector', 'power_sync_error') is not none }}
+        then:
+          - stop: Проектор и Kodi не подтвердили готовность или команда питания изменилась.
+            error: true
+      - variables:
+          launch_started: "{{ now().isoformat() }}"
+      - action: rest_command.host_kodi_fireplace
+        data:
+          fireplace_request: "{{ fireplace_request }}"
+        response_variable: fireplace_response
+      - if: >-
+          {{ fireplace_response.status | default(0) != 200
+             or fireplace_response.content is not mapping
+             or fireplace_response.content.get('ok') is not true
+             or fireplace_response.content.get('state') != 'playing'
+             or fireplace_response.content.get('owned') is not true
+             or fireplace_response.content.get('file_matches') is not true
+             or fireplace_response.content.get('repeat') != 'one'
+             or fireplace_response.content.get('request_id') != fireplace_request.id
+             or fireplace_response.content.get('progressing') is not true
+             or fireplace_response.content.get('source_kind') not in ['youtube', 'local']
+             or not fireplace_response.content.get('source_id')
+             or not fireplace_response.content.get('title')
+             or as_timestamp(fireplace_response.content.get('launch_started_at'), 0)
+                < as_timestamp(launch_started)
+             or as_timestamp(fireplace_response.content.get('observed_at'), 0)
+                < as_timestamp(launch_started) }}
+        then:
+          - stop: Kodi не подтвердил выбранный камин, движение видео и циклическое воспроизведение.
+            error: true
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.living_room_fireplace
+      # Native Kodi exposes uniqueid as media_content_id, so cross-check its
+      # title while the authenticated host sensor verifies the actual file.
+      - wait_template: >-
+          {{ state_attr('media_player.projector', 'power_intent_revision') != power_revision
+             or (is_state('media_player.home', 'playing')
+                 and state_attr('media_player.home', 'media_title') == fireplace_response.content.get('title')
+                 and state_attr('sensor.living_room_fireplace', 'request_id') == fireplace_request.id
+                 and state_attr('sensor.living_room_fireplace', 'source_id') == fireplace_response.content.get('source_id')
+                 and state_attr('sensor.living_room_fireplace', 'progressing') is true
+                 and is_state('sensor.living_room_fireplace', 'playing')
+                 and state_attr('sensor.living_room_fireplace', 'owned') is true
+                 and state_attr('sensor.living_room_fireplace', 'file_matches') is true
+                 and state_attr('sensor.living_room_fireplace', 'repeat') == 'one'
+                 and as_timestamp(state_attr('sensor.living_room_fireplace', 'observed_at'), 0)
+                     >= as_timestamp(launch_started)) }}
+        timeout: "00:00:15"
+        continue_on_timeout: true
+      - if: >-
+          {{ not wait.completed
+             or state_attr('media_player.projector', 'power_intent_revision') != power_revision
+             or not is_state('media_player.home', 'playing')
+             or state_attr('media_player.home', 'media_title') != fireplace_response.content.get('title')
+             or state_attr('sensor.living_room_fireplace', 'request_id') != fireplace_request.id
+             or state_attr('sensor.living_room_fireplace', 'source_id') != fireplace_response.content.get('source_id')
+             or state_attr('sensor.living_room_fireplace', 'progressing') is not true
+             or not is_state('sensor.living_room_fireplace', 'playing')
+             or state_attr('sensor.living_room_fireplace', 'owned') is not true
+             or state_attr('sensor.living_room_fireplace', 'file_matches') is not true
+             or state_attr('sensor.living_room_fireplace', 'repeat') != 'one'
+             or as_timestamp(state_attr('sensor.living_room_fireplace', 'observed_at'), 0)
+                 < as_timestamp(launch_started) }}
+        then:
+          - stop: Kodi не подтвердил воспроизведение камина или команда питания изменилась.
+            error: true
+      - variables:
+          fireplace_success: >-
+            {{ {'ok': true, 'request_id': fireplace_request.id} }}
+      - stop: Камин подтверждён.
+        response_variable: fireplace_success
+
+yandex_smart_home:
+  entity_config:
+    script.living_room_fireplace:
+      name: Камин на проекторе
+      room: Гостиная

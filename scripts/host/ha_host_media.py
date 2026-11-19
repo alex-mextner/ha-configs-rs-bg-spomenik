@@ -1,4 +1,4 @@
-"""Filesystem and metadata helpers for the standalone host bridge."""  # noqa: INP001
+"""Filesystem and metadata helpers for the standalone host bridge."""
 # Installed beside the standalone executable; the copied bundle is not a package.
 
 from __future__ import annotations

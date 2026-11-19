@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import ha_host_fireplace as _fireplace_http
 import ha_host_media as _media
 from ha_host_audit import _AUDIT, _audit, _start_audit
 from ha_host_media import (
@@ -946,28 +947,8 @@ def kodi_jsonrpc_quit() -> dict[str, Any]:
 
 
 def stop_kodi() -> dict[str, Any]:
-    """Wait for graceful exit before requesting the configured unit to stop."""
-    if not kodi_running():
-        return {"kodi": "not_running"}
-
-    rpc_result = kodi_jsonrpc_quit()
-    # Kodi needs a few seconds to shut down on this board; killing the unit mid-
-    # shutdown also
-    # kills its virtual X server and Kodi then dies with an X IO error (unit left
-    # "failed").
-    deadline = time.monotonic() + 8
-    while kodi_running() and time.monotonic() < deadline:
-        time.sleep(0.5)
-    if not kodi_running():
-        return {"kodi": "stopped", "method": "jsonrpc", "jsonrpc": rpc_result}
-
-    stop = run(["sudo", "-n", "systemctl", "stop", KODI_UNIT], timeout=20)
-    return {
-        "kodi": "stopped" if not kodi_running() else "stop_requested",
-        "method": "systemctl_stop",
-        "jsonrpc": rpc_result,
-        "systemctl_returncode": stop.returncode,
-    }
+    """Retain graceful shutdown and cancellation of an unfinished unit start."""
+    return _fireplace_http.stop_kodi(run, kodi_running, kodi_jsonrpc_quit, KODI_UNIT)
 
 
 def projector_on() -> dict[str, Any]:
@@ -2203,7 +2184,17 @@ def network_summary(_query: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_fireplace_endpoints = _fireplace_http.FireplaceEndpoints(
+    kodi_jsonrpc, CONFIG_DIR, InvalidInput, audit=_audit
+)
+kodi_fireplace = _fireplace_endpoints.command
+kodi_fireplace_status = _fireplace_endpoints.status
+kodi_youtube_manifest = _fireplace_endpoints.manifest
+
 ROUTES = {
+    ("GET", "/kodi/youtube/manifest"): kodi_youtube_manifest,
+    ("GET", "/kodi/fireplace"): kodi_fireplace_status,
+    ("POST", "/kodi/fireplace"): kodi_fireplace,
     ("POST", "/projector/on"): projector_on,
     ("POST", "/projector/off"): projector_off,
     ("GET", "/kodi/status"): kodi_status,
@@ -2233,6 +2224,7 @@ ROUTES = {
 }
 
 BODY_ROUTES = {
+    ("POST", "/kodi/fireplace"),
     ("POST", "/network/update"),
     ("POST", "/kodi/text-input"),
     ("POST", "/kodi/keyboard"),
@@ -2249,11 +2241,17 @@ BODY_ROUTES = {
     ("POST", "/network/stats"),
 }
 QUERY_ROUTES = {
+    ("GET", "/kodi/youtube/manifest"),
     ("GET", "/network/inventory"),
     ("GET", "/network/summary"),
     ("GET", "/network/history"),
     ("GET", "/network/stats"),
 }
+
+
+_route_response = _fireplace_http.RouteResponse(
+    BODY_ROUTES, QUERY_ROUTES, _fireplace_endpoints
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2315,14 +2313,9 @@ class Handler(BaseHTTPRequestHandler):
                 status = 403
                 self.send_json(status, {"ok": False, "error": "forbidden"})
                 return
-            if route_key in BODY_ROUTES:
-                result = route(self.read_json_body())
-            elif route_key in QUERY_ROUTES:
-                result = route(urllib.parse.parse_qs(url.query))
-            else:
-                result = route()
-            status = 200
-            self.send_json(status, {"ok": True, **result})
+            status, error_class = _route_response.send(
+                self, route_key, route, url.query
+            )
         except KeyboardFailure as exc:
             status = 422 if exc.code == "invalid_input" else 409
             error_class = type(exc).__name__
@@ -2367,6 +2360,7 @@ def main() -> None:
         bind = os.environ.get("HA_HOST_ACTIONS_BIND", "172.20.0.1")
         port = int(os.environ.get("HA_HOST_ACTIONS_PORT", "8787"))
         server = ThreadingHTTPServer((bind, port), Handler)
+        _fireplace_endpoints.recover(_audit)
         _audit("listener", outcome="ready", log=str(path))
         server.serve_forever()
     except BaseException as exc:
@@ -2378,6 +2372,7 @@ def main() -> None:
             outcome, error_class = "failed", type(exc).__name__
         raise
     finally:
+        _fireplace_endpoints.close()
         if server is not None:
             server.server_close()
         _audit(
