@@ -1,3 +1,4 @@
-description = "login users: groups, shell, sudo rule, exclusive authorized_keys, systemd --user lingering"
-# After packages: groups such as `docker` come from their packages.
+description = "login users: groups, sudo rule, exclusive authorized_keys, systemd --user lingering"
+# After packages: groups such as `docker` come from their packages. Not `requires`: a key or sudo rule change must not
+# wait for apt. The login shell is the login-shell module's, so a shell that did not install never blocks `ssh-server`.
 order = 40

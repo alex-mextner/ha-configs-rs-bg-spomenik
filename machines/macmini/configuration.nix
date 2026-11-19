@@ -15,7 +15,10 @@
 }:
 
 {
-  imports = [ ./hardware-configuration.nix ];
+  imports = [
+    ./hardware-configuration.nix
+    ../dotfiles/nixos.nix
+  ];
 
   # --- Boot -----------------------------------------------------------------
   boot.loader.systemd-boot.enable = true;
@@ -172,6 +175,9 @@
     smartmontools
     vim
   ];
+
+  # ~/.files for ultra, zsh as its login shell (../dotfiles/nixos.nix)
+  homelab.dotfiles.enable = true;
 
   time.timeZone = "Europe/Belgrade";
   i18n.defaultLocale = "en_US.UTF-8";

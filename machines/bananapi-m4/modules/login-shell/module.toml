@@ -1,0 +1,5 @@
+description = "login shells of existing users, each set only once it is installed and in /etc/shells"
+# Last: a shell such as zsh comes from `packages` here, or from the dotfiles module on a host that runs only that one.
+# Nothing requires this module: a shell that did not install fails it alone, so `ssh-server` still turns off password
+# and root login (Armbian's first-boot defaults) on a run whose apt failed.
+order = 95

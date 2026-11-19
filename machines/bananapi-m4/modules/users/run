@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
-# users: [[modules.users.users]] name, shell, groups, sudo ("nopasswd" | "password" | "none"), linger, authorized_keys.
+# users: [[modules.users.users]] name, groups, sudo ("nopasswd" | "password" | "none"), linger, authorized_keys.
 # authorized_keys is exclusive: the file holds exactly the declared keys. A user without a password is created with a
 # locked password (key-only login), which is why such a user wants sudo = "nopasswd".
 # Groups that do not exist yet are created as system groups; extra groups the user has are left alone.
+# The login shell is the login-shell module's: a new user is created with the shell it declares there once that shell
+# is usable, and while it is not with nologin unless sudo = "nopasswd" (a restricted shell that is not installed yet
+# must not become useradd's /bin/sh for whoever holds the key written below); see new_user_shell in lib/common.sh.
 source "$(dirname "$0")/../../lib/common.sh" "$@"
 
 count=$(opt '.users // [] | length')
 for ((i = 0; i < count; i++)); do
 	u=$(opt ".users[$i]")
 	name=$(jq -r '.name' <<<"$u")
-	shell=$(jq -r '.shell // "/bin/bash"' <<<"$u")
+	if [[ $(jq 'has("shell")' <<<"$u") == true ]]; then
+		echo "  $name: shell is declared in [modules.login-shell.shells] now, not in [[modules.users.users]]" >&2
+		exit 2
+	fi
 	sudo_rule=$(jq -r '.sudo // "none"' <<<"$u")
+	case "$sudo_rule" in nopasswd | password | none) ;; *)
+		echo "  $name: sudo must be nopasswd, password or none" >&2
+		exit 2
+		;;
+	esac
 	linger=$(jq -r '.linger // false' <<<"$u")
 
 	if ! getent passwd "$name" >/dev/null; then
-		drift "create user $name ($shell)" && useradd --create-home --user-group --shell "$shell" "$name"
-	elif [[ $(getent passwd "$name" | cut -d: -f7) != "$shell" ]]; then
-		drift "$name: shell -> $shell" && usermod --shell "$shell" "$name"
+		shell=$(new_user_shell "$name" "$sudo_rule")
+		drift "create user $name (shell $shell)" && useradd --create-home --user-group --shell "$shell" "$name"
 	fi
 	home=$(getent passwd "$name" | cut -d: -f6 || true)
 	home=${home:-/home/$name}
@@ -41,7 +51,6 @@ for ((i = 0; i < count; i++)); do
 		rm -f "$tmp"
 		;;
 	none) absent "$rule" || true ;;
-	*) echo "  $name: sudo must be nopasswd, password or none" >&2; exit 2 ;;
 	esac
 
 	if [[ $(jq -r '.authorized_keys // null' <<<"$u") != null ]]; then

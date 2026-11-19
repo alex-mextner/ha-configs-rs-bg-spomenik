@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# dotfiles: github.com/alex-mextner/.files at ~/.files of one user, applied by its own install-ubuntu.sh,
+# the way ubuntu-pc has it. Options ([modules.dotfiles]):
+#   user         whose home gets ~/.files (default "ultra"; the user must already exist)
+#   repo         clone URL for a fresh checkout (default the public https URL: no GitHub auth needed)
+#   branch       the branch ~/.files is checked out on (default "master")
+#   rev          the pinned .files commit (full sha; default: the one in the `rev` file next to this script, shared
+#                with the NixOS module). Its installer runs as a root-equivalent user, so a push to .files reaches a
+#                host only once its pin is bumped here.
+# The login shell is the login-shell module's ([modules.login-shell.shells]).
+# Converged means: the packages the installer needs are installed, ~/.files is at `rev` the way `checkout` (next to
+# this file, shared with the NixOS module) defines it, and `install-ubuntu.sh --check` has nothing pending. Its exit
+# 10 (only manual steps remain, such as GitHub access for a private submodule or bun) is converged: no run of this
+# module can do those; they are printed. Anything else is a failure, and so is a run of the installer that takes
+# longer than 15 minutes; SIGINT or SIGTERM to this module stops it too. The user runs `checkout` and the installer,
+# so this directory must be readable by them.
+# This module never calls apt from install-ubuntu.sh: the installer is user level and needs no root.
+# DT_DIR (set by the engine), not $0/../..: modules/dotfiles is a symlink in the repo, and `..` after it would leave
+# the host directory
+source "${DT_DIR:-$(dirname "$0")/../..}/lib/common.sh" "$@"
+
+if [[ $(opt 'has("login_shell")') == true ]]; then
+	echo "  dotfiles: login_shell is declared in [modules.login-shell.shells] now, not in [modules.dotfiles]" >&2
+	exit 2
+fi
+user=$(opt '.user // "ultra"')
+repo=$(opt '.repo // "https://github.com/alex-mextner/.files.git"')
+branch=$(opt '.branch // "master"')
+rev=$(opt '.rev // ""')
+[[ -n $rev ]] || rev=$(tr -d '[:space:]' <"$(dirname "$0")/rev")
+checkout=$(cd "$(dirname "$0")" && pwd)/checkout
+# install-ubuntu.sh: git and curl (clones, vim-plug), zsh (zplug), vim (plugins), python3 + PyYAML (rig config
+# merge), gh (the credential helper the private submodules need once GitHub access is set up), ssh (ssh submodule
+# URLs); sha256sum, awk, timeout come with coreutils/mawk on every Debian.
+deps=(git ca-certificates curl zsh vim python3 python3-yaml gh openssh-client)
+
+installed() { [[ $(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null) == installed ]]; }
+missing=()
+for pkg in "${deps[@]}"; do installed "$pkg" || missing+=("$pkg"); done
+if ((${#missing[@]})); then
+	if drift "install: ${missing[*]}"; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update -o Acquire::Retries=3
+		apt-get install -y --no-install-recommends -o Acquire::Retries=3 "${missing[@]}"
+	fi
+fi
+
+if ! entry=$(getent passwd "$user"); then
+	echo "  dotfiles: user $user does not exist (declare it in the users module or create it first)" >&2
+	exit 1
+fi
+IFS=: read -r _ _ uid gid _ home shell <<<"$entry"
+# The installer sees the login shell the login-shell module (which runs after this one) is about to set, once usable.
+declared=$(declared_shell "$user")
+if [[ -n $declared ]] && shell_usable "$declared"; then shell=$declared; fi
+files=$home/.files
+# git and the installer run as the user (runuser, setpriv); the engine runs every module as root
+if ((EUID != 0)); then
+	echo "  dotfiles: run as root" >&2
+	exit 1
+fi
+
+# user_env CMD...: run in a clean environment from the user's home. No terminal prompts: an unreachable private
+# repository must fail fast (the installer reports it as a manual step), never wait for a password or an ssh host key
+# confirmation. as_user CMD...: that, as the user.
+user_env=(
+	env -i -C "$home" HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" LANG=C.UTF-8
+	PATH="$home/.local/bin:$home/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+	GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+)
+as_user() { runuser -u "$user" -- "${user_env[@]}" "$@"; }
+
+# ~/.files at the pin (checkout validates rev: exit 2)
+if [[ $MODE == install ]]; then
+	as_user "$checkout" apply "$files" "$repo" "$branch" "$rev" | sed 's/^/  ~ /'
+else
+	pending=$(as_user "$checkout" status "$files" "$repo" "$branch" "$rev")
+	while IFS= read -r line; do
+		if [[ -n $line ]]; then drift "$line" || true; fi
+	done <<<"$pending"
+fi
+
+# install-ubuntu.sh --check: 0 nothing pending, 10 only manual steps remain, 1 pending, anything else an error.
+# In install mode the checkout above already exists, so the installer always runs.
+quote_output() { sed 's/^/  | /' >&2; }
+if [[ -x $files/install-ubuntu.sh ]]; then
+	if [[ $MODE == install ]]; then
+		# setpriv, env and setsid each exec the next, so $! is timeout itself: SIGTERM to it reaches the installer's
+		# process group, and --kill-after SIGKILLs that group 30 s later if the installer ignores it (runuser would
+		# SIGKILL timeout 2 s after forwarding TERM, cancelling that). setsid: no controlling terminal under `ssh -t`
+		# (timeout's own process group would be stopped by any terminal access), so the installer gets no Ctrl-C from
+		# the terminal either: the traps pass SIGINT and SIGTERM on as SIGTERM. They are set before the installer
+		# starts; one that arrives before $! is known is passed on right after. stdin from /dev/null, so nothing can
+		# wait for input.
+		log=$(mktemp)
+		installer='' signal=''
+		forward() {
+			signal=${signal:-$1}
+			[[ -z $installer ]] || kill -TERM "$installer" 2>/dev/null || true
+		}
+		trap 'forward INT' INT
+		trap 'forward TERM' TERM
+		# by full path: env resolves them from the user's PATH, whose ~/.local/bin the installer writes to
+		setpriv --reuid "$uid" --regid "$gid" --init-groups \
+			"${user_env[@]}" /usr/bin/setsid /usr/bin/timeout --kill-after=30s 15m "$files/install-ubuntu.sh" \
+			</dev/null >"$log" 2>&1 &
+		installer=$!
+		[[ -z $signal ]] || forward "$signal"
+		rc=0
+		wait "$installer" || rc=$?
+		# a trapped signal ends `wait` early: wait until timeout (and so the installer's group) has stopped too
+		while [[ -n $signal ]] && kill -0 "$installer" 2>/dev/null; do
+			rc=0
+			wait "$installer" || rc=$?
+		done
+		# timeout returns once the installer itself has exited: on a stop or the 15 minute timeout, whatever is left
+		# in its process group (a child that ignores TERM) goes too
+		if [[ -n $signal ]] || ((rc == 124)); then kill -KILL -- "-$installer" 2>/dev/null || true; fi
+		stop_on_signals
+		out=$(<"$log")
+		rm -f "$log"
+		grep -E '^(apply|manual):' <<<"$out" | sed 's/^/  /' || true
+		if [[ -n $signal ]]; then
+			quote_output <<<"$out"
+			echo "  dotfiles: install-ubuntu.sh stopped on SIG$signal (exit $rc)" >&2
+			exit 1
+		fi
+		case $rc in
+		0) ;;
+		10) echo "  install-ubuntu.sh: done; the manual steps above remain" ;;
+		*)
+			quote_output <<<"$out"
+			case $rc in
+			124) why="exit 124: timed out after 15 minutes" ;;
+			9 | 137) why="exit $rc: killed (30 s after the 15 minute timeout, or out of memory)" ;;
+			*) why="exit $rc" ;;
+			esac
+			echo "  dotfiles: install-ubuntu.sh failed ($why)" >&2
+			exit 1
+			;;
+		esac
+	else
+		rc=0
+		out=$(as_user "$files/install-ubuntu.sh" --check 2>&1) || rc=$?
+		case $rc in
+		0 | 10) ;;
+		1) drift "install-ubuntu.sh: $(grep -c '^pending:' <<<"$out") pending" || true ;;
+		*)
+			[[ $MODE == check ]] || quote_output <<<"$out"
+			exit 1
+			;;
+		esac
+		if [[ $MODE == plan ]]; then grep -E '^(pending|manual):' <<<"$out" | sed 's/^/    /' || true; fi
+	fi
+elif [[ -e $files ]]; then
+	echo "  dotfiles: $files has no executable install-ubuntu.sh" >&2
+	exit 1
+else
+	say "then: $files/install-ubuntu.sh"
+fi
+finish

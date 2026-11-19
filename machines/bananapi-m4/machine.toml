@@ -25,11 +25,12 @@ install = [
   "git", "curl", "ca-certificates", "jq", "tar", "libicu76",
   # day-to-day
   "htop", "tmux", "rsync", "less", "vim-tiny",
+  # ultra's login shell (installed before the login-shell module sets it; the dotfiles are a zsh setup)
+  "zsh",
 ]
 
 [[modules.users.users]]
 name = "ultra"
-shell = "/bin/bash"
 groups = ["sudo", "docker", "systemd-journal", "adm"]
 # No password is ever set by this spec: key-only login, so sudo must not ask for one.
 sudo = "nopasswd"
@@ -42,6 +43,9 @@ authorized_keys = [
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINpnCxVsKPqVbKHtg5fKYabNIO8Ue8qYMkeJh/UFNtLd",
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGpvc8Es/UxcnDgKsAn84iu+oofvL0yWbDOxTie4aTwC",
 ]
+
+[modules.login-shell.shells]
+ultra = "/usr/bin/zsh"
 
 [modules.ssh-server]
 password_authentication = false
@@ -73,3 +77,8 @@ tmp_size = "256M"
 system = ["compose@.service"]
 # put the bots stack in /srv/compose/bots/compose.yaml; the unit stays inactive until that file exists
 enable = ["compose@bots.service"]
+
+# ~/.files (github.com/alex-mextner/.files) for ultra: modules/dotfiles links ../../dotfiles/debian. At the commit
+# pinned in ../dotfiles/debian/rev (one pin for every host; `rev = "<sha>"` here would override it).
+[modules.dotfiles]
+user = "ultra"

@@ -1,0 +1,5 @@
+description = "~/.files (github.com/alex-mextner/.files) for one user, applied by its install-ubuntu.sh"
+# Late: the user and the network (apt sources, packages) are in place by now. Before login-shell, which may need the
+# zsh this module installs (a host that runs only these two).
+order = 90
+requires = ["users", "packages"]

@@ -17,8 +17,9 @@ never stops at the first failure: a failed module only blocks the modules that
 `requires` it. After `install` the module is checked again, so "converged" is
 observed, not assumed.
 
-Exit codes: 0 converged, 2 usage / bad config, 3 drift (preview, check),
-6 not root (everything but `list`), 7 failed or blocked.
+Exit codes: 0 converged, 2 usage / bad config / not the host machine.toml names,
+3 drift (preview, check), 6 not root (everything but `list`), 7 failed or blocked,
+130 / 143 stopped by SIGINT / SIGTERM (see Stops).
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
+import socket
 import subprocess
 import sys
 import tomllib
@@ -37,6 +40,50 @@ DRIFT = 3
 USAGE = 2
 NO_ROOT = 6
 FAILED = 7
+
+
+class StopSignalError(Exception):
+    """SIGINT or SIGTERM arrived while a module ran: the run stops after it."""
+
+    def __init__(self, signum: int) -> None:
+        """Keep the signal number; the message is its name."""
+        super().__init__(signal.Signals(signum).name)
+        self.signum = signum
+
+
+class Stops:
+    """
+    SIGINT and SIGTERM during a run: passed on to the running module.
+
+    A module ends once its current command has finished (the traps in
+    lib/common.sh), so apt or dpkg is never left running on its own; the
+    dotfiles module also stops the installer it runs in a session of its own.
+    The run then stops before the next module (StopSignalError).
+    """
+
+    def __init__(self) -> None:
+        """No signal yet, no module running."""
+        self.signum = 0
+        self.module: subprocess.Popen | None = None
+
+    def catch(self) -> None:
+        """Handle both signals from now on."""
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, self.handle)
+
+    def handle(self, signum: int, _frame: object) -> None:
+        """Remember the first signal, pass every one on to the running module."""
+        self.signum = self.signum or signum
+        if self.module is not None:
+            self.module.send_signal(signum)
+
+    def check(self) -> None:
+        """Stop the run once a signal has arrived."""
+        if self.signum:
+            raise StopSignalError(self.signum)
+
+
+STOPS = Stops()
 
 
 @dataclass(frozen=True)
@@ -91,7 +138,7 @@ def load(machine_file: Path) -> tuple[dict, list[Module]]:
 
 
 def call(module: Module, verb: str, config: dict, *, quiet: bool) -> int:
-    """Run one verb of one module; return its exit code."""
+    """Run one verb of one module; return its exit code (STOPS: signals)."""
     env = dict(
         os.environ,
         DT_OPTIONS=json.dumps(module.options),
@@ -99,9 +146,19 @@ def call(module: Module, verb: str, config: dict, *, quiet: bool) -> int:
         DT_DIR=str(DIR),
     )
     out = subprocess.DEVNULL if quiet else None
-    return subprocess.run(
-        [str(module.run), verb], env=env, stdout=out, stderr=out, check=False
-    ).returncode
+    STOPS.check()
+    with subprocess.Popen(
+        [str(module.run), verb], env=env, stdout=out, stderr=out
+    ) as proc:
+        STOPS.module = proc
+        if STOPS.signum:  # arrived while the module was starting
+            proc.send_signal(STOPS.signum)
+        try:
+            code = proc.wait()
+        finally:
+            STOPS.module = None
+    STOPS.check()
+    return code
 
 
 def classify(code: int) -> str:
@@ -159,6 +216,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--machine", type=Path, default=DIR / "machine.toml")
     parser.add_argument("--only", default="", help="comma-separated module names")
+    parser.add_argument(
+        "--force-host",
+        metavar="HOSTNAME",
+        help="run although `hostname` differs from [modules.system] hostname; "
+        "HOSTNAME must be this box's current `hostname`",
+    )
     args = parser.parse_args()
     if args.commit and args.command != "apply":
         parser.error("--commit only goes with apply")
@@ -170,6 +233,36 @@ def list_modules(modules: list[Module]) -> None:
     for m in modules:
         state = "on " if m.enabled else "off"
         print(f"{m.order:>3} {m.name:<14} {state} {m.description}")
+
+
+def host_mismatch(
+    config: dict, machine_file: Path, force_host: str | None
+) -> str | None:
+    """
+    Explain why machine_file must not converge this box, or return None.
+
+    The declared name is [modules.system] hostname (read even with the module
+    off; required): a machine.toml copied to another box must not converge
+    that box. --force-host overrides it only when it names this box, so a
+    wrong ssh target still stops (a fresh board, or a rename, is the intended
+    case).
+    """
+    declared = config.get("modules", {}).get("system", {}).get("hostname")
+    actual = socket.gethostname()
+    if not isinstance(declared, str) or not declared:
+        return (
+            f"debian-tweak: {machine_file} declares no [modules.system] hostname: "
+            f"set it to the name of the box it is for (this is {actual}), also "
+            "with the system module off"
+        )
+    names = (actual, actual.split(".", 1)[0])
+    if declared in names or force_host in names:
+        return None
+    return (
+        f"debian-tweak: {machine_file} is for {declared}, this is {actual}: pass "
+        f"the right --machine, or --force-host {actual} if this box is to "
+        f"become {declared} (a fresh board, or a rename)"
+    )
 
 
 def run_selected(
@@ -206,6 +299,10 @@ def main() -> int:
     if args.command == "list":
         list_modules(modules)
         return 0
+    mismatch = host_mismatch(config, args.machine, args.force_host)
+    if mismatch:
+        print(mismatch, file=sys.stderr)
+        return USAGE
     # Without root, /etc/sudoers.d/* cannot be read and would show up as false drift.
     if os.geteuid() != 0:
         print(
@@ -213,9 +310,17 @@ def main() -> int:
             file=sys.stderr,
         )
         return NO_ROOT
-    results = run_selected(modules, config, only, args)
-    preview = args.command == "apply" and not args.commit
-    return summarize(results, preview=preview)
+    STOPS.catch()
+    try:
+        results = run_selected(modules, config, only, args)
+        preview = args.command == "apply" and not args.commit
+        code = summarize(results, preview=preview)
+        # a signal after the last module (or during the summary) still stops the run
+        STOPS.check()
+    except StopSignalError as stop:
+        print(f"debian-tweak: stopped on {stop}", file=sys.stderr)
+        return 128 + stop.signum
+    return code
 
 
 if __name__ == "__main__":
