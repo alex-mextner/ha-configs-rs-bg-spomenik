@@ -13,9 +13,11 @@ sudo ./install.sh check        # read-only, exit 0 converged / 3 drift (for a ti
 sudo ./install.sh --only docker,sysctl --commit
 ```
 
-Exit codes: `0` converged, `2` usage or bad config, `3` drift, `6` not root, `7` a module failed or was blocked by a
-failed module it `requires`. A failure never stops the run: independent modules still converge. Everything except
-`list` needs root (`sudo`): without it, files such as `/etc/sudoers.d/*` cannot be read and would show as drift.
+Exit codes: `0` converged, `2` usage, bad config or the wrong host (`hostname` is not `[modules.system] hostname`:
+a `machine.toml` copied to another box; `--force-host <current hostname>` overrides it), `3` drift, `6` not root,
+`7` a module failed or was blocked by a failed module it `requires`. A failure never stops the run: independent
+modules still converge. Everything except `list` needs root (`sudo`): without it, files such as `/etc/sudoers.d/*`
+cannot be read and would show as drift.
 
 ## Layout
 
@@ -36,7 +38,7 @@ failed module it `requires`. A failure never stops the run: independent modules 
 | 10 | `system` | hostname (+ `127.0.1.1` in `/etc/hosts`), timezone |
 | 20 | `apt-sources` | deb822 repositories; the signing key is written only if its fingerprint equals the declared one (Docker CE) |
 | 30 | `packages` | `install` (missing ones, `--no-install-recommends`) and `purge` lists |
-| 40 | `users` | users, groups, shell, sudo rule (validated by `visudo`), exclusive `authorized_keys`, lingering for `systemd --user` |
+| 40 | `users` | users, groups, shell (set only once it is usable: in `/etc/shells`, or `nologin`/`false`; a failed shell blocks `ssh-server`), sudo rule (validated by `visudo`), exclusive `authorized_keys`, lingering for `systemd --user` |
 | 45 | `ssh-server` | sshd drop-in: no passwords, no root login; refuses while no user with a key can sudo (`nopasswd`, or `password` with a password set); `sshd -t` before reload |
 | 50 | `zram` | zram swap: Armbian's `/etc/default/armbian-zram-config` (applied at next boot), else zram-tools |
 | 55 | `sysctl` | `/etc/sysctl.d/90-debian-tweaks.conf`; live values are checked and set too |
@@ -77,10 +79,15 @@ and an executable `run` that sources `lib/common.sh`; its options arrive as JSON
    `rsync` + `--commit` re-applies it):
 
    ```sh
+   ssh ultra@<ip> hostname   # Armbian's name for a fresh board; a known host's name (odroidn2, ...) is the wrong box
    rsync -aL --delete machines/bananapi-m4/ ultra@<ip>:debian-tweaks/   # -L: modules/dotfiles is a symlink
-   ssh -t ultra@<ip> 'cd debian-tweaks && sudo ./install.sh && sudo ./install.sh --commit'
+   ssh -t ultra@<ip> 'cd debian-tweaks && sudo ./install.sh --force-host <that name>'            # preview: read it
+   ssh -t ultra@<ip> 'cd debian-tweaks && sudo ./install.sh --force-host <that name> --commit'
    ssh ultra@<ip> 'cd debian-tweaks && sudo ./install.sh check'   # exit 0
    ```
+
+   `--force-host` only on this first run, and only with the name the board has now: until the `system` module names
+   it `bananapi-m4`, the host guard refuses this `machine.toml` there. Every later run goes without it.
 
    The `ssh-server` module turns password login off, so make sure `ssh ultra@<ip>` works with a key first
    (`users` writes the keys from `machine.toml` in the same run, before `ssh-server`).

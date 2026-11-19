@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# ~/.files at the pinned commit: the git half of both dotfiles modules (the Debian `run` next to this file and the
+# NixOS dotfiles.service in ../nixos.nix), run as the user. It lives in debian/ because that is the directory rsync
+# copies to a Debian host.
+#   checkout status FILES REPO BRANCH REV   read-only, no network: one line per change `apply` would make (none when
+#                                           converged); exit 1 on a state it refuses to change (reason on stderr)
+#   checkout apply  FILES REPO BRANCH REV   makes those changes, printing the same lines
+# Converged: FILES is a checkout on BRANCH at REV, or at REV plus local commits (ones not on origin/BRANCH). It gets
+# there by a fresh clone (made next to FILES, moved into place only once REV is checked out), a fast-forward, or a
+# move back over upstream commits only (the pin was rolled back, or the checkout followed BRANCH before it was
+# pinned). Upstream commits past REV mixed with local ones are refused; another checked-out branch is left alone.
+# Initialised submodules in detached HEAD away from the commit their superproject records ($sha1 in
+# `git submodule foreach`) get their URL synced from .gitmodules (a moved repository) and are updated; one checked
+# out on a branch is someone's work in progress and keeps its commit and remotes. Initialising the others is
+# install-ubuntu.sh's business.
+set -euo pipefail
+
+mode=${1:-} files=${2:-} repo=${3:-} branch=${4:-} rev=${5:-}
+case $mode in status | apply) ;; *)
+	echo "usage: $0 status|apply FILES REPO BRANCH REV" >&2
+	exit 2
+	;;
+esac
+if [[ ! $rev =~ ^[0-9a-f]{40}$ ]]; then
+	echo "dotfiles: rev must be a full 40-character commit sha, not '$rev'" >&2
+	exit 2
+fi
+
+# change DESCRIPTION: one change; true when it is to be made now
+change() {
+	echo "$*"
+	[[ $mode == apply ]]
+}
+g() { git -C "$files" "$@"; }
+
+if [[ ! -e $files ]]; then
+	if change "clone $repo into $files at ${rev:0:12} on $branch"; then
+		clone=$files.clone
+		rm -rf "$clone"
+		git clone --quiet --no-checkout --branch "$branch" "$repo" "$clone"
+		git -C "$clone" checkout --quiet -B "$branch" "$rev"
+		mv -T "$clone" "$files"
+	fi
+	exit 0
+fi
+if ! g rev-parse --git-dir >/dev/null 2>&1; then
+	echo "dotfiles: $files exists but is not a git checkout; move it aside" >&2
+	exit 1
+fi
+if [[ $(g symbolic-ref --short -q HEAD || true) != "$branch" ]]; then
+	echo "dotfiles: $files is not on $branch: left as it is" >&2
+	exit 0
+fi
+
+if g merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
+	# where HEAD leaves upstream: at or before the pin, everything after the pin is local
+	upstream=$(g merge-base HEAD "refs/remotes/origin/$branch" 2>/dev/null || true)
+	if [[ -z $upstream ]] || g merge-base --is-ancestor "$upstream" "$rev"; then
+		:
+	elif [[ $upstream == "$(g rev-parse HEAD)" ]]; then
+		if change "move $files back to the pinned ${rev:0:12} (the commits after it are upstream ones)"; then
+			g reset --quiet --keep --no-recurse-submodules "$rev"
+		fi
+	else
+		echo "dotfiles: $files has upstream commits past the pinned ${rev:0:12} mixed with local ones: move the" \
+			"local work to another branch, then reset $branch to the pin" >&2
+		exit 1
+	fi
+elif g cat-file -e "$rev^{commit}" 2>/dev/null && ! g merge-base --is-ancestor HEAD "$rev"; then
+	echo "dotfiles: $files has commits that are not in the pinned ${rev:0:12} (local work on an older pin?): move" \
+		"them to another branch, then reset $branch to the pin" >&2
+	exit 1
+elif change "fast-forward $files to the pinned ${rev:0:12}"; then
+	# the superproject only: the submodules' own fetch comes after their URL sync below
+	g cat-file -e "$rev^{commit}" 2>/dev/null || g fetch --quiet --recurse-submodules=no origin "$branch"
+	if ! g cat-file -e "$rev^{commit}" 2>/dev/null; then
+		echo "dotfiles: $rev is not in $files, not even after fetching $branch from its origin" >&2
+		exit 1
+	fi
+	g merge --ff-only --quiet "$rev"
+fi
+
+# install-ubuntu.sh fetches GitHub ssh submodule URLs over https once git uses gh's credential helper; so does this
+gh_https=()
+if [[ $(git config --get-urlmatch credential.helper https://github.com 2>/dev/null || true) == \
+	*'gh auth git-credential'* ]]; then
+	gh_https=(-c url.https://github.com/.insteadOf=git@github.com:)
+fi
+# stale_submodules CMD: run CMD for each initialised submodule (any depth) in detached HEAD away from its recorded
+# commit. foreach runs it before descending, so nested ones are compared with their updated parent.
+stale_submodules() {
+	g "${gh_https[@]}" submodule foreach --quiet --recursive \
+		"git symbolic-ref -q HEAD >/dev/null || [ \"\$(git rev-parse HEAD)\" = \"\$sha1\" ] || { $1; }"
+}
+stale=$(stale_submodules 'echo "$displaypath"')
+# One that cannot be fetched (a private repository whose access expired) is reported and skipped, so the others and
+# install-ubuntu.sh (which reports the access as a manual step) still run; it stays stale, so `status` keeps showing it.
+if [[ -n $stale ]] && change "check out the recorded commits of the submodules $(paste -sd ' ' <<<"$stale")"; then
+	stale_submodules '{ git -C "$toplevel" submodule sync --quiet -- "$sm_path" &&
+		git -C "$toplevel" submodule update --quiet -- "$sm_path"; } ||
+		echo "dotfiles: submodule $displaypath: cannot update (repository access?)" >&2'
+fi
+exit 0

@@ -17,8 +17,8 @@ never stops at the first failure: a failed module only blocks the modules that
 `requires` it. After `install` the module is checked again, so "converged" is
 observed, not assumed.
 
-Exit codes: 0 converged, 2 usage / bad config, 3 drift (preview, check),
-6 not root (everything but `list`), 7 failed or blocked.
+Exit codes: 0 converged, 2 usage / bad config / not the host machine.toml names,
+3 drift (preview, check), 6 not root (everything but `list`), 7 failed or blocked.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import tomllib
@@ -159,6 +160,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--machine", type=Path, default=DIR / "machine.toml")
     parser.add_argument("--only", default="", help="comma-separated module names")
+    parser.add_argument(
+        "--force-host",
+        metavar="HOSTNAME",
+        help="run although `hostname` differs from [modules.system] hostname; "
+        "HOSTNAME must be this box's current `hostname`",
+    )
     args = parser.parse_args()
     if args.commit and args.command != "apply":
         parser.error("--commit only goes with apply")
@@ -170,6 +177,29 @@ def list_modules(modules: list[Module]) -> None:
     for m in modules:
         state = "on " if m.enabled else "off"
         print(f"{m.order:>3} {m.name:<14} {state} {m.description}")
+
+
+def host_mismatch(
+    config: dict, machine_file: Path, force_host: str | None
+) -> str | None:
+    """
+    Explain why machine_file must not converge this box, or return None.
+
+    The declared name is [modules.system] hostname (read even with the module
+    off): a machine.toml copied to another box must not converge that box.
+    --force-host overrides it only when it names this box, so a wrong ssh
+    target still stops (a fresh board, or a rename, is the intended case).
+    """
+    declared = config.get("modules", {}).get("system", {}).get("hostname")
+    actual = socket.gethostname()
+    names = (actual, actual.split(".", 1)[0])
+    if declared is None or declared in names or force_host in names:
+        return None
+    return (
+        f"install.sh: {machine_file} is for {declared}, this is {actual}: pass "
+        f"the right --machine, or --force-host {actual} if this box is to "
+        f"become {declared} (a fresh board, or a rename)"
+    )
 
 
 def run_selected(
@@ -206,6 +236,10 @@ def main() -> int:
     if args.command == "list":
         list_modules(modules)
         return 0
+    mismatch = host_mismatch(config, args.machine, args.force_host)
+    if mismatch:
+        print(mismatch, file=sys.stderr)
+        return USAGE
     # Without root, /etc/sudoers.d/* cannot be read and would show up as false drift.
     if os.geteuid() != 0:
         print(

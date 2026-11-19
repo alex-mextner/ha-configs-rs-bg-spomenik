@@ -74,6 +74,15 @@ absent() {
 	return 0
 }
 
+# shell_usable PATH: PATH may become a user's shell: an executable file listed in /etc/shells, or a non-login shell
+# (nologin, false: never listed there). sshd refuses a user whose shell is missing, so setting one before its package
+# is installed locks the user out of this headless box.
+shell_usable() {
+	[[ -f $1 && -x $1 ]] || return 1
+	case ${1##*/} in nologin | false) return 0 ;; esac
+	grep -qxF -- "$1" /etc/shells 2>/dev/null
+}
+
 finish() {
 	[[ $MODE == install ]] && exit 0
 	((DRIFT == 0)) || exit 3

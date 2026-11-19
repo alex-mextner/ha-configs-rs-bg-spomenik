@@ -6,7 +6,9 @@ hostname=$(opt '.hostname')
 timezone=$(opt '.timezone')
 
 if [[ $hostname != null ]]; then
-	if [[ $(cat /etc/hostname 2>/dev/null) != "$hostname" ]]; then
+	# the kernel's name too: install.sh's host guard compares that one, and a hand-edited /etc/hostname changes it only
+	# at the next boot
+	if [[ $(cat /etc/hostname 2>/dev/null) != "$hostname" || $(uname -n) != "$hostname" ]]; then
 		drift "hostname -> $hostname" && hostnamectl set-hostname "$hostname"
 	fi
 	if ! grep -qE "^127\.0\.1\.1[[:space:]]+$hostname([[:space:]]|$)" /etc/hosts; then

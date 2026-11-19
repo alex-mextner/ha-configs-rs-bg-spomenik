@@ -4,6 +4,9 @@
 #   sudo ./install.sh --commit     apply; re-running is safe and ends in "N ok" once converged
 #   sudo ./install.sh check        read-only, exit 0 converged / 3 drift (cron, monitoring); 6 without root
 #   ./install.sh list              modules, order, on/off
+# Every command but `list` exits 2 when `hostname` is not [modules.system] hostname of machine.toml (a file copied to
+# the wrong box); `--force-host <current hostname>` overrides it, e.g. on a fresh board before the `system` module
+# renames it (a different name still stops: the wrong box picked by its address).
 # Needs python3 (3.11+, tomllib) and jq for the engine, gpg and curl for apt-sources (which runs before `packages`
 # could install them). Engine: lib/engine.py.
 set -euo pipefail

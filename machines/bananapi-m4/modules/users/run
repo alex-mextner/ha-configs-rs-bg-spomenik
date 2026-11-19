@@ -3,6 +3,9 @@
 # authorized_keys is exclusive: the file holds exactly the declared keys. A user without a password is created with a
 # locked password (key-only login), which is why such a user wants sudo = "nopasswd".
 # Groups that do not exist yet are created as system groups; extra groups the user has are left alone.
+# A shell is set only once it is usable (shell_usable), as sshd refuses a user whose shell is missing: until then an
+# existing user keeps the current shell, a new one gets /usr/sbin/nologin (never a login shell it was not declared
+# with), and the module reports drift.
 source "$(dirname "$0")/../../lib/common.sh" "$@"
 
 count=$(opt '.users // [] | length')
@@ -13,10 +16,19 @@ for ((i = 0; i < count; i++)); do
 	sudo_rule=$(jq -r '.sudo // "none"' <<<"$u")
 	linger=$(jq -r '.linger // false' <<<"$u")
 
-	if ! getent passwd "$name" >/dev/null; then
-		drift "create user $name ($shell)" && useradd --create-home --user-group --shell "$shell" "$name"
-	elif [[ $(getent passwd "$name" | cut -d: -f7) != "$shell" ]]; then
-		drift "$name: shell -> $shell" && usermod --shell "$shell" "$name"
+	entry=$(getent passwd "$name" || true)
+	current=$(cut -d: -f7 <<<"$entry")
+	# the shell to set now: the declared one once usable, else the current one (nologin for a new user)
+	want=$shell
+	if ! shell_usable "$shell"; then
+		if [[ -n $entry ]]; then want=$current; else want=/usr/sbin/nologin; fi
+		drift "$name: shell $shell once it is installed (and listed in /etc/shells); until then ${want:-unchanged}" ||
+			true
+	fi
+	if [[ -z $entry ]]; then
+		drift "create user $name ($want)" && useradd --create-home --user-group --shell "$want" "$name"
+	elif [[ $current != "$want" ]]; then
+		drift "$name: shell -> $want" && usermod --shell "$want" "$name"
 	fi
 	home=$(getent passwd "$name" | cut -d: -f6 || true)
 	home=${home:-/home/$name}

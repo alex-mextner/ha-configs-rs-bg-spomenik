@@ -1,3 +1,5 @@
 description = "login users: groups, shell, sudo rule, exclusive authorized_keys, systemd --user lingering"
-# After packages: groups such as `docker` come from their packages.
+# After packages: groups such as `docker` and login shells such as zsh come from their packages. Not `requires`: a key
+# or sudo rule change must not wait for apt. A shell that did not install is never set; its drift fails this module,
+# which blocks `ssh-server`.
 order = 40

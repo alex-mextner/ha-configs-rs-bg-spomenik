@@ -76,6 +76,7 @@ system = ["compose@.service"]
 # put the bots stack in /srv/compose/bots/compose.yaml; the unit stays inactive until that file exists
 enable = ["compose@bots.service"]
 
-# ~/.files (github.com/alex-mextner/.files) for ultra: modules/dotfiles links ../../dotfiles/debian
+# ~/.files (github.com/alex-mextner/.files) for ultra: modules/dotfiles links ../../dotfiles/debian. At the commit
+# pinned in ../dotfiles/debian/rev (one pin for every host; `rev = "<sha>"` here would override it).
 [modules.dotfiles]
 user = "ultra"

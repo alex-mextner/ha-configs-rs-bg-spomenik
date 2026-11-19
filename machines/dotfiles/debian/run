@@ -3,13 +3,17 @@
 # the way ubuntu-pc has it. Options ([modules.dotfiles]):
 #   user         whose home gets ~/.files (default "ultra"; the user must already exist)
 #   repo         clone URL for a fresh checkout (default the public https URL: no GitHub auth needed)
-#   branch       the branch ~/.files follows (default "master")
-#   login_shell  optional, e.g. "/usr/bin/zsh": set the user's login shell here. Leave it out on a host whose
-#                `users` module declares the shell, so one module owns it.
-# Converged means: the packages the installer needs are installed, ~/.files is a checkout at the tip of `branch`
-# (a fast-forward only; local commits or another checked-out branch are left alone) and
-# `install-ubuntu.sh --check` has nothing pending. Its exit 10 (only manual steps remain, such as GitHub access
-# for a private submodule or bun) is converged: no run of this module can do those; they are printed.
+#   branch       the branch ~/.files is checked out on (default "master")
+#   rev          the pinned .files commit (full sha; default: the one in the `rev` file next to this script, shared
+#                with the NixOS module). Its installer runs as a root-equivalent user, so a push to .files reaches a
+#                host only once its pin is bumped here.
+#   login_shell  optional, e.g. "/usr/bin/zsh": set the user's login shell here (only once shell_usable). Leave it out
+#                on a host whose `users` module declares the shell, so one module owns it.
+# Converged means: the packages the installer needs are installed, ~/.files is at `rev` the way `checkout` (next to
+# this file, shared with the NixOS module) defines it, and `install-ubuntu.sh --check` has nothing pending. Its exit
+# 10 (only manual steps remain, such as GitHub access for a private submodule or bun) is converged: no run of this
+# module can do those; they are printed. Anything else is a failure, and so is a run of the installer that takes
+# longer than 15 minutes. The user runs `checkout` and the installer, so this directory must be readable by them.
 # This module never calls apt from install-ubuntu.sh: the installer is user level and needs no root.
 # DT_DIR (set by the engine), not $0/../..: modules/dotfiles is a symlink in the repo, and `..` after it would leave
 # the host directory
@@ -18,9 +22,12 @@ source "${DT_DIR:-$(dirname "$0")/../..}/lib/common.sh" "$@"
 user=$(opt '.user // "ultra"')
 repo=$(opt '.repo // "https://github.com/alex-mextner/.files.git"')
 branch=$(opt '.branch // "master"')
+rev=$(opt '.rev // ""')
+[[ -n $rev ]] || rev=$(tr -d '[:space:]' <"$(dirname "$0")/rev")
 login_shell=$(opt '.login_shell // ""')
+checkout=$(cd "$(dirname "$0")" && pwd)/checkout
 # install-ubuntu.sh: git and curl (clones, vim-plug), zsh (zplug), vim (plugins), python3 + PyYAML (rig config
-# merge), gh (the credential helper the private submodules need once `gh auth login` is done), ssh (ssh submodule
+# merge), gh (the credential helper the private submodules need once GitHub access is set up), ssh (ssh submodule
 # URLs); sha256sum, awk, timeout come with coreutils/mawk on every Debian.
 deps=(git ca-certificates curl zsh vim python3 python3-yaml gh openssh-client)
 
@@ -49,7 +56,9 @@ if ((EUID != 0)) && [[ $(id -un) != "$user" ]]; then
 fi
 
 if [[ -n $login_shell && $shell != "$login_shell" ]]; then
-	if drift "$user: login shell $shell -> $login_shell"; then
+	if ! shell_usable "$login_shell"; then
+		drift "$user: login shell $shell -> $login_shell once $login_shell is installed; keeping $shell" || true
+	elif drift "$user: login shell $shell -> $login_shell"; then
 		usermod --shell "$login_shell" "$user"
 		shell=$login_shell
 	fi
@@ -71,33 +80,14 @@ as_user() {
 	fi
 }
 
-if [[ ! -e $files ]]; then
-	drift "clone $repo ($branch) into $files" && as_user git clone --quiet --branch "$branch" "$repo" "$files"
-elif ! as_user git -C "$files" rev-parse --git-dir >/dev/null 2>&1; then
-	echo "  dotfiles: $files exists but is not a git checkout; move it aside" >&2
-	exit 1
-elif [[ $(as_user git -C "$files" symbolic-ref --short -q HEAD || true) != "$branch" ]]; then
-	say "$files is not on $branch: left as it is"
+# ~/.files at the pin (checkout validates rev: exit 2)
+if [[ $MODE == install ]]; then
+	as_user "$checkout" apply "$files" "$repo" "$branch" "$rev" | sed 's/^/  ~ /'
 else
-	if ! tip=$(as_user git -C "$files" ls-remote --exit-code origin "refs/heads/$branch" | cut -f1) || [[ -z $tip ]]; then
-		echo "  dotfiles: cannot read $branch from the origin of $files (network?)" >&2
-		exit 1
-	fi
-	head=$(as_user git -C "$files" rev-parse HEAD)
-	# HEAD already contains the tip: nothing to do (local commits on top are the user's)
-	if [[ $head != "$tip" ]] && ! as_user git -C "$files" merge-base --is-ancestor "$tip" HEAD 2>/dev/null; then
-		if drift "fast-forward $files to $branch ${tip:0:12}"; then
-			as_user git -C "$files" fetch --quiet origin "$branch"
-			as_user git -C "$files" merge --ff-only --quiet FETCH_HEAD
-		fi
-	fi
-	# initialised submodules at the commits HEAD records (a fast-forward moves the pointers, not the checkouts);
-	# initialising the others is install-ubuntu.sh's business
-	submodules=$(as_user git -C "$files" submodule status --recursive)
-	if grep -q '^+' <<<"$submodules"; then
-		drift "check out the submodule commits $files records" &&
-			as_user git -C "$files" submodule update --quiet --recursive
-	fi
+	pending=$(as_user "$checkout" status "$files" "$repo" "$branch" "$rev")
+	while IFS= read -r line; do
+		if [[ -n $line ]]; then drift "$line" || true; fi
+	done <<<"$pending"
 fi
 
 # install-ubuntu.sh --check: 0 nothing pending, 10 only manual steps remain, 1 pending, anything else an error.
@@ -106,14 +96,21 @@ quote_output() { sed 's/^/  | /' >&2; }
 if [[ -x $files/install-ubuntu.sh ]]; then
 	if [[ $MODE == install ]]; then
 		rc=0
-		out=$(as_user "$files/install-ubuntu.sh" 2>&1) || rc=$?
+		# setsid: no controlling terminal under `ssh -t` (timeout's own process group would be stopped by any terminal
+		# access); stdin from /dev/null, so nothing can wait for input
+		out=$(as_user setsid -w timeout --kill-after=30s 15m "$files/install-ubuntu.sh" </dev/null 2>&1) || rc=$?
 		grep -E '^(apply|manual):' <<<"$out" | sed 's/^/  /' || true
 		case $rc in
 		0) ;;
 		10) echo "  install-ubuntu.sh: done; the manual steps above remain" ;;
 		*)
 			quote_output <<<"$out"
-			echo "  dotfiles: install-ubuntu.sh failed (exit $rc)" >&2
+			case $rc in
+			124) why="exit 124: timed out after 15 minutes" ;;
+			9 | 137) why="exit $rc: killed (30 s after the 15 minute timeout, or out of memory)" ;;
+			*) why="exit $rc" ;;
+			esac
+			echo "  dotfiles: install-ubuntu.sh failed ($why)" >&2
 			exit 1
 			;;
 		esac
@@ -130,6 +127,9 @@ if [[ -x $files/install-ubuntu.sh ]]; then
 		esac
 		if [[ $MODE == plan ]]; then grep -E '^(pending|manual):' <<<"$out" | sed 's/^/    /' || true; fi
 	fi
+elif [[ -e $files ]]; then
+	echo "  dotfiles: $files has no executable install-ubuntu.sh" >&2
+	exit 1
 else
 	say "then: $files/install-ubuntu.sh"
 fi

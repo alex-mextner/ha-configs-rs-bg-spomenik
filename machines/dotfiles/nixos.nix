@@ -4,10 +4,12 @@
 #
 # The dotfiles.service oneshot runs once per boot (after network-online) and again on a switch that changes it
 # (RemainAfterExit: an unchanged unit stays active, so other switches leave it alone); re-run it by hand with
-# `sudo systemctl restart dotfiles`. It clones the public https URL, or fast-forwards an existing checkout that is
-# on `branch` (and checks out the submodule commits it records), then runs install-ubuntu.sh. Exit 10 from the
-# installer means only manual steps remain (GitHub access for the private submodules, bun): the unit logs them
-# (`journalctl -u dotfiles`) and succeeds. Local commits that block a fast-forward fail the unit.
+# `sudo systemctl restart dotfiles`. It brings ~/.files to the pinned `rev` with debian/checkout (shared with the
+# Debian module: a fresh clone, a fast-forward, or back over upstream commits only; local commits on top of `rev`
+# stay; stale detached submodules synced and updated), then runs install-ubuntu.sh. The installer runs as a
+# root-equivalent user, so a push to .files reaches a host only once its pin is bumped in this repo. The unit
+# succeeds on the installer's exit 0 or 10 (only manual steps remain: GitHub access for the private submodules, bun;
+# logged, `journalctl -u dotfiles`); anything else fails it, and so does a whole run longer than 15 minutes.
 {
   config,
   lib,
@@ -20,7 +22,7 @@ let
   # rig/merge-config.py needs PyYAML; the installer runs it with `python3 -I`, which still sees this env's packages
   python = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
   # install-ubuntu.sh: git + curl (clones, vim-plug), zsh (zplug), vim (plugins), gh (the credential helper the
-  # private submodules need once `gh auth login` is done), ssh (ssh submodule URLs)
+  # private submodules need once GitHub access is set up), ssh (ssh submodule URLs)
   tools = with pkgs; [
     git
     curl
@@ -47,7 +49,14 @@ in
     branch = lib.mkOption {
       type = lib.types.str;
       default = "master";
-      description = "The branch ~/.files follows (fast-forward only).";
+      description = "The branch ~/.files is checked out on (fast-forward only).";
+    };
+    rev = lib.mkOption {
+      type = lib.types.strMatching "[0-9a-f]{40}";
+      # one pin for the NixOS and the Debian module; debian/ is the directory rsync copies to a Debian host
+      default = lib.fileContents ./debian/rev;
+      defaultText = lib.literalExpression "lib.fileContents ./debian/rev";
+      description = "The pinned .files commit (on `branch`): ~/.files is moved to it, forward or back.";
     };
     zshLoginShell = lib.mkOption {
       type = lib.types.bool;
@@ -87,31 +96,18 @@ in
         RemainAfterExit = true;
         User = cfg.user;
         WorkingDirectory = "~";
+        TimeoutStartSec = "15min";
+        # install-ubuntu.sh exit 10: applied, only manual steps remain
+        SuccessExitStatus = "10";
       };
       script = ''
         # what the user installed by hand counts too (bun after the manual step, per-user and system packages)
         export PATH="$HOME/.local/bin:$HOME/.bun/bin:/etc/profiles/per-user/$USER/bin:/run/current-system/sw/bin:$PATH"
-        files="$HOME/.files"
-        if [ ! -e "$files" ]; then
-          git clone --quiet --branch ${lib.escapeShellArg cfg.branch} ${lib.escapeShellArg cfg.repo} "$files"
-        elif ! git -C "$files" rev-parse --git-dir >/dev/null 2>&1; then
-          echo "dotfiles: $files exists but is not a git checkout; move it aside" >&2
-          exit 1
-        elif [ "$(git -C "$files" symbolic-ref --short -q HEAD || true)" = ${lib.escapeShellArg cfg.branch} ]; then
-          git -C "$files" fetch --quiet origin ${lib.escapeShellArg cfg.branch}
-          git -C "$files" merge --ff-only --quiet FETCH_HEAD
-          # initialised submodules only; initialising the others is install-ubuntu.sh's business
-          git -C "$files" submodule update --quiet --recursive
-        else
-          echo "dotfiles: $files is not on ${cfg.branch}: left as it is"
-        fi
+        bash ${./debian/checkout} apply "$HOME/.files" ${lib.escapeShellArg cfg.repo} ${lib.escapeShellArg cfg.branch} ${lib.escapeShellArg cfg.rev}
         rc=0
-        "$files/install-ubuntu.sh" || rc=$?
-        case $rc in
-          0) ;;
-          10) echo "dotfiles: applied; the manual: steps above remain (install-ubuntu.sh exit 10)" ;;
-          *) exit "$rc" ;;
-        esac
+        "$HOME/.files/install-ubuntu.sh" || rc=$?
+        if [ "$rc" = 10 ]; then echo "dotfiles: applied; the manual: steps above remain (install-ubuntu.sh exit 10)"; fi
+        exit "$rc"
       '';
     };
   };
