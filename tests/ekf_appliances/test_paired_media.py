@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from custom_components.ekf_appliances.paired_media import (
     install_power_pairs,
     observed_boolean,
 )
+from custom_components.ekf_appliances.runtime import ApplianceRuntime
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -146,6 +148,16 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_real_ha_services_start_and_stop_both_pairs(self) -> None:
+        self.assertTrue(self.runtime.tv_power_pair.preempt_commands)
+        self.assertFalse(self.runtime.projector_power_pair.preempt_commands)
+        self.assertTrue(
+            self.runtime.tv_power_pair.endpoints["player"].wait_for_feedback
+        )
+        self.assertFalse(
+            self.runtime.tv_power_pair.endpoints["display"].wait_for_feedback
+        )
+        for endpoint in self.runtime.projector_power_pair.endpoints.values():
+            self.assertFalse(endpoint.wait_for_feedback)
         await self.runtime.projector_power_pair.request(target=True)
         self.assertIn(("rest_command", "host_kodi_start", {}), self.calls)
         self.assertIn(("projector", True), self.calls)
@@ -157,6 +169,64 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
             self.calls,
         )
         self.assertIn(("tv", True), self.calls)
+
+    async def test_kodi_restart_during_shutdown_save_keeps_projector_off_command(
+        self,
+    ) -> None:
+        pair = self.runtime.projector_power_pair
+        await pair.request(target=True)
+        self.calls.clear()
+        runtime = ApplianceRuntime(
+            self.hass,
+            SimpleNamespace(
+                data={
+                    "remote_entity_id": "remote.ir",
+                    "temperature_entity_id": "sensor.temperature",
+                    "projector_power_entity_id": "binary_sensor.hdmi",
+                    "projector_on_script": "script.projector_on",
+                    "projector_off_script": "script.projector_off",
+                }
+            ),
+        )
+        self.hass.states.async_set("remote.ir", "on")
+        self.runtime.async_projector_power = runtime.async_projector_power
+        self.runtime.note_projector_off_requested = runtime.note_projector_off_requested
+        save_started = asyncio.Event()
+        release_save = asyncio.Event()
+
+        async def save(_data) -> None:
+            save_started.set()
+            await release_save.wait()
+
+        runtime._shutdown_store = SimpleNamespace(async_save=save)
+
+        async def projector_script(call) -> None:
+            target = call.service == "projector_on"
+            self.calls.append(("projector", target))
+            self.hass.states.async_set("binary_sensor.hdmi", "on" if target else "off")
+            runtime.check_shutdown_feedback()
+
+        for name in ("projector_on", "projector_off"):
+            self.hass.services.async_register("script", name, projector_script)
+        try:
+            self.hass.states.async_set("sensor.kodi_service_state", "off")
+            await asyncio.wait_for(save_started.wait(), 1)
+            self.assertTrue(runtime.projector_shutting_down)
+            self.assertIsNone(runtime._projector_power_task)
+            self.hass.states.async_set("sensor.kodi_service_state", "on")
+            for _ in range(12):
+                await asyncio.sleep(0)
+            self.assertEqual(self.calls, [])
+            release_save.set()
+            await self.hass.async_block_till_done()
+            self.assertEqual(self.calls, [("projector", False), ("projector", True)])
+            self.assertFalse(runtime.projector_shutting_down)
+            self.assertIsNone(pair.last_error)
+            self.assertIs(pair.last_intent, expr2=True)
+        finally:
+            release_save.set()
+            await runtime.async_close_shutdown()
+            await runtime.async_cancel_projector_power()
 
     async def test_kodi_json_rpc_unavailable_does_not_switch_projector_off(
         self,

@@ -211,10 +211,12 @@ def install_power_pairs(
                 hass, routing.entity_id(CONF_TV_ANDROIDTV_ENTITY_ID)
             ),
             lambda target: android_power(target=target),
+            wait_for_feedback=True,
         ),
         hooks=PowerPairHooks(
             changed=notify(television),
             create_task=hass.async_create_task,
+            preempt_commands=True,
         ),
     )
     runtime.tv_power_pair = television_pair
