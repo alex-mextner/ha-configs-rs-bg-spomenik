@@ -1,10 +1,11 @@
 # NixOS side of machines/backup: nightly restic backup of this host to Google Drive.
 #
-# One restic repository per host, rclone:<remote>:<root>/restic/<host> (policy.toml), filled by nixpkgs'
-# services.restic.backups.homelab. What to back up comes from hosts/<host>.toml, the same file the Debian hosts
-# use; the dump, path-list, check and drill logic is lib/homelab-backup, shared with debian/. Secrets are not in
-# the store: /etc/homelab-backup/restic-password and /etc/homelab-backup/rclone.conf are provisioned once by hand
-# (README.md, Secrets); until they exist the timers fail and say so in /var/lib/homelab-backup/status-*.json.
+# One restic repository per host, rclone:<remote>:<folder_prefix>-<host>/restic (policy.toml). What to back up
+# comes from hosts/<host>.toml, the same file the Debian hosts use, and every timer runs a lib/homelab-backup verb
+# (run, check, drill), exactly as on the Debian hosts: one code path for the dumps, the backup, the retention and
+# the status files. Secrets are not in the store: /etc/homelab-backup/restic-password and
+# /etc/homelab-backup/rclone.conf are provisioned once by hand, then `homelab-backup init` (README.md, Secrets);
+# until then the timers fail and say so in /var/lib/homelab-backup/status-*.json.
 #
 # A host enables it with
 #   imports = [ ../backup/nixos.nix ];  homelab.backup.enable = true;
@@ -22,14 +23,15 @@ let
   spec = builtins.fromTOML (builtins.readFile (./hosts + "/${cfg.host}.toml"));
   confDir = "/etc/homelab-backup";
   stateDir = "/var/lib/homelab-backup";
-  rcloneExe = lib.getExe pkgs.rclone;
+  driveFolder = "${policy.remote}:${policy.folder_prefix}-${spec.host}";
 
   settings = {
     host = spec.host;
-    repository = "rclone:${policy.remote}:${policy.root}/restic/${spec.host}";
+    drive_folder = driveFolder;
+    repository = "rclone:${driveFolder}/restic";
     password_file = "${confDir}/restic-password";
     rclone_config = "${confDir}/rclone.conf";
-    rclone_program = rcloneExe;
+    rclone_program = lib.getExe pkgs.rclone;
     restic_program = lib.getExe pkgs.restic;
     state_dir = stateDir;
     cache_dir = "/var/cache/homelab-backup";
@@ -38,7 +40,9 @@ let
     dumps = spec.dumps or [ ];
     drill_file = spec.drill_file or "";
     notify = spec.notify or [ ];
+    # debian/run implements these two (ubuntu-pc); the assertion below refuses them here
     tasks_offsite = null;
+    watch = [ ];
     inherit policy;
   };
 
@@ -55,35 +59,46 @@ let
         restic
         rclone
         sqlite
-        util-linux # setpriv: SQLite dumps run as the database owner
+        util-linux # flock: one run or dump at a time
       ]
       ++ lib.optional config.virtualisation.docker.enable config.virtualisation.docker.package;
     text = builtins.readFile ./lib/homelab-backup;
   };
   exe = lib.getExe homelab-backup;
 
-  # weekly check and monthly drill: lib/homelab-backup, scheduled like on the Debian hosts
-  scheduled = verb: description: calendar: {
-    services."homelab-backup-${verb}" = {
-      inherit description;
-      wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${exe} ${verb}";
-        Nice = 10;
-        IOSchedulingClass = "idle";
+  # timedVerb: a oneshot running `homelab-backup <verb>` and its timer, as debian/run writes them
+  timedVerb =
+    {
+      name,
+      verb,
+      description,
+      calendar,
+      delay ? "5min",
+    }:
+    {
+      services.${name} = {
+        inherit description;
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        # a rebuild must not stop a running backup, prune or drill midway (the next timer run picks up the change)
+        restartIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${exe} ${verb}";
+          Nice = 10;
+          IOSchedulingClass = "idle";
+          TimeoutStartSec = "12h";
+        };
+      };
+      timers.${name} = {
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnCalendar = calendar;
+          RandomizedDelaySec = delay;
+          Persistent = true;
+        };
       };
     };
-    timers."homelab-backup-${verb}" = {
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnCalendar = calendar;
-        RandomizedDelaySec = "5min";
-        Persistent = true;
-      };
-    };
-  };
 in
 {
   options.homelab.backup = {
@@ -96,82 +111,54 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (
-    lib.mkMerge [
+  config = lib.mkIf cfg.enable {
+    assertions = [
       {
-        assertions = [
-          {
-            assertion = (spec.scope or "system") == "system";
-            message = "machines/backup/hosts/${cfg.host}.toml: NixOS hosts back up as root (scope = \"system\").";
-          }
-        ];
+        assertion = (spec.scope or "system") == "system";
+        message = "machines/backup/hosts/${cfg.host}.toml: NixOS hosts back up as root (scope = \"system\").";
+      }
+      {
+        assertion = (spec.watch or [ ]) == [ ] && !(spec ? tasks_offsite);
+        message = "machines/backup/hosts/${cfg.host}.toml: `watch` and [tasks_offsite] are implemented by debian/run only.";
+      }
+      {
+        assertion = lib.versionAtLeast pkgs.restic.version "0.17";
+        message = "machines/backup needs restic 0.17 or newer (exit code 10), nixpkgs has ${pkgs.restic.version}.";
+      }
+    ];
 
-        environment.etc."homelab-backup/config.json".text = builtins.toJSON settings;
-        # rclone too: the one-time `rclone config` of the Secrets steps runs on the host
-        environment.systemPackages = [
-          homelab-backup
-          pkgs.rclone
-        ];
-        systemd.tmpfiles.rules = [
+    environment.etc."homelab-backup/config.json".text = builtins.toJSON settings;
+    # rclone too: the one-time `rclone config` of the Secrets steps runs on the host
+    environment.systemPackages = [
+      homelab-backup
+      pkgs.rclone
+    ];
+    systemd = lib.mkMerge [
+      {
+        tmpfiles.rules = [
           "d ${confDir} 0700 root root -"
           "d ${stateDir} 0700 root root -"
         ];
-
-        services.restic.backups.homelab = {
-          inherit (settings) repository;
-          passwordFile = settings.password_file;
-          rcloneConfigFile = settings.rclone_config;
-          extraOptions = [ "rclone.program=${rcloneExe}" ];
-          initialize = true;
-          # the dump staging dir + the host's paths that exist, and the excludes (live SQLite files included)
-          dynamicFilesFrom = "${exe} paths";
-          # a failed dump must not stop the backup of everything else: it is recorded in status-dump.json
-          # (and turns status-run.json into a failure below); the `||` stays outside homelab-backup's own shell
-          backupPrepareCommand = ''
-            ${exe} dump || true
-            ${exe} excludes > /run/restic-backups-homelab/excludes
-          '';
-          extraBackupArgs = [
-            # wait for a running weekly check / monthly drill instead of failing on the repository lock
-            "--retry-lock 2h"
-            "--host ${spec.host}"
-            "--tag nightly"
-            "--exclude-caches"
-            "--exclude-file=/run/restic-backups-homelab/excludes"
-          ];
-          pruneOpts = [
-            "--retry-lock 2h"
-            "--host ${spec.host}"
-            "--group-by host"
-            "--keep-daily ${toString policy.retention.keep_daily}"
-            "--keep-weekly ${toString policy.retention.keep_weekly}"
-            "--keep-monthly ${toString policy.retention.keep_monthly}"
-          ];
-          # the full check runs weekly (homelab-backup-check), not after every backup
-          runCheck = false;
-          timerConfig = {
-            OnCalendar = policy.schedule.backup;
-            RandomizedDelaySec = policy.schedule.backup_randomized_delay;
-            Persistent = true;
-          };
-          # ExecStopPost: status-run.json for monitoring, whatever the result; failed dumps fail the run too
-          backupCleanupCommand = ''
-            if [ "$SERVICE_RESULT" != success ]; then
-              ${exe} record run fail "restic-backups-homelab: $SERVICE_RESULT ($EXIT_CODE $EXIT_STATUS), see journalctl -u restic-backups-homelab"
-            elif ! ${lib.getExe pkgs.jq} -e .ok ${stateDir}/status-dump.json > /dev/null; then
-              ${exe} record run fail "$(${lib.getExe pkgs.jq} -r .message ${stateDir}/status-dump.json) (the snapshot holds the previous dumps of those)"
-            else
-              ${exe} record run ok
-            fi
-          '';
-        };
       }
-      {
-        systemd = lib.mkMerge [
-          (scheduled "check" "homelab-backup: restic check --read-data-subset=${policy.check.read_data_subset}" policy.schedule.check)
-          (scheduled "drill" "homelab-backup: monthly restore drill" policy.schedule.drill)
-        ];
-      }
-    ]
-  );
+      (timedVerb {
+        name = "homelab-backup";
+        verb = "run";
+        description = "homelab-backup: database dumps + restic backup to Google Drive";
+        calendar = policy.schedule.backup;
+        delay = policy.schedule.backup_randomized_delay;
+      })
+      (timedVerb {
+        name = "homelab-backup-check";
+        verb = "check";
+        description = "homelab-backup: restic check --read-data-subset=${policy.check.read_data_subset}";
+        calendar = policy.schedule.check;
+      })
+      (timedVerb {
+        name = "homelab-backup-drill";
+        verb = "drill";
+        description = "homelab-backup: monthly restore drill";
+        calendar = policy.schedule.drill;
+      })
+    ];
+  };
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -B
-# ruff: noqa: T201, S603, CPY001  # a CLI prints; it runs only rclone
+# ruff: noqa: T201, S603  # a CLI prints; it runs only rclone
 """
 Off-site copy of the Tasks backups: the encrypted sets the Tasks puller verified.
 
@@ -40,7 +40,9 @@ def main() -> int:
     """Copy new runs, then prune the remote runs the puller's retention drops."""
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--remote", required=True, help="gdrive:homelab-backups/tasks")
+    parser.add_argument(
+        "--remote", required=True, help="gdrive:homelab-backup-ubuntu-pc/tasks"
+    )
     parser.add_argument("--rclone", default="rclone")
     args = parser.parse_args()
 
