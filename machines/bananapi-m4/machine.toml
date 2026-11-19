@@ -1,7 +1,7 @@
 # Banana Pi BPI-M4 (RTD1395, 4x A53, 2 GB RAM, 8 GB eMMC), Armbian 26.11 trixie minimal, kernel 6.18 "current".
 # Workload: bots in Docker Compose (Bun images, arm64), redis, GitHub Actions self-hosted runners (arm64),
 # the `computer` tool (Node 18+, systemd --user).
-# Apply: sudo ./install.sh (preview), sudo ./install.sh --commit (converge), ./install.sh check (exit 0/3).
+# Apply: sudo ./install.sh (preview), sudo ./install.sh --commit (converge), sudo ./install.sh check (exit 0/3).
 
 [modules.system]
 hostname = "bananapi-m4"

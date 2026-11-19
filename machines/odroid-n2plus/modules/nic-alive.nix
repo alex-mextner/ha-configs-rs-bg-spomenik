@@ -2,16 +2,25 @@
 #
 # The on-board Ethernet (stmmac / meson8b-dwmac + RTL8211F PHY) has been seen to wedge: carrier
 # stays up but RX stops. The kernel keeps feeding the hardware watchdog, so nothing recovers on
-# its own. This check reboots when end0 has carrier but its RX byte counter has not moved for
+# its own. This check reboots when the on-board NIC has carrier but its RX byte counter has not moved for
 # 10 minutes. The home LAN always carries broadcast traffic (ARP/mDNS), so a frozen counter with
 # link up means the NIC is stuck. No carrier (cable out, router off) never triggers a reboot.
+# The interface is found at run time: `end0` with predictable names, `eth0` if they are off (the networkd
+# config in configuration.nix matches both).
 { pkgs, ... }:
 
 let
   check = pkgs.writeShellScript "odroid-nic-alive" ''
-    IF=end0
+    IF=
+    for candidate in end0 eth0; do
+      if [ -e "/sys/class/net/$candidate" ]; then IF=$candidate; break; fi
+    done
+    if [ -z "$IF" ]; then
+      echo "no end0/eth0 interface, nothing to watch" >&2
+      exit 0
+    fi
     STALE=600
-    STATE=/run/odroid-nic-alive
+    STATE=/run/odroid-nic-alive.$IF
 
     if [ "$(cat "/sys/class/net/$IF/carrier" 2>/dev/null)" != 1 ]; then
       rm -f "$STATE"
@@ -32,7 +41,7 @@ let
 in
 {
   systemd.services.odroid-nic-alive = {
-    description = "Reboot when end0 has carrier but RX is frozen";
+    description = "Reboot when the on-board NIC (end0/eth0) has carrier but RX is frozen";
     unitConfig.FailureAction = "reboot";
     serviceConfig = {
       Type = "oneshot";

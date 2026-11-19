@@ -18,7 +18,7 @@ never stops at the first failure: a failed module only blocks the modules that
 observed, not assumed.
 
 Exit codes: 0 converged, 2 usage / bad config, 3 drift (preview, check),
-6 --commit without root, 7 failed or blocked.
+6 not root (everything but `list`), 7 failed or blocked.
 """
 
 from __future__ import annotations
@@ -61,7 +61,8 @@ def load(machine_file: Path) -> tuple[dict, list[Module]]:
     try:
         config = tomllib.loads(machine_file.read_text())
     except (OSError, tomllib.TOMLDecodeError) as error:
-        sys.exit(f"debian-tweak: cannot read {machine_file}: {error}")
+        print(f"debian-tweak: cannot read {machine_file}: {error}", file=sys.stderr)
+        sys.exit(USAGE)
     tables = config.get("modules", {})
     known = {p.parent.name for p in (DIR / "modules").glob("*/module.toml")}
     unknown = sorted(set(tables) - known)
@@ -197,13 +198,20 @@ def main() -> int:
     only = {n for n in args.only.split(",") if n}
     missing = only - {m.name for m in modules}
     if missing:
-        print(f"install.sh: --only: unknown module(s) {', '.join(sorted(missing))}")
+        print(
+            f"debian-tweak: --only: unknown module(s) {', '.join(sorted(missing))}",
+            file=sys.stderr,
+        )
         return USAGE
     if args.command == "list":
         list_modules(modules)
         return 0
-    if args.commit and os.geteuid() != 0:
-        print("debian-tweak: --commit needs root: sudo ./install.sh --commit")
+    # Without root, /etc/sudoers.d/* cannot be read and would show up as false drift.
+    if os.geteuid() != 0:
+        print(
+            "debian-tweak: needs root (every command but list): sudo ./install.sh ...",
+            file=sys.stderr,
+        )
         return NO_ROOT
     results = run_selected(modules, config, only, args)
     preview = args.command == "apply" and not args.commit

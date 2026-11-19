@@ -2,7 +2,7 @@
 # The one entry point: converge this machine to machine.toml.
 #   sudo ./install.sh              preview: every change, as diffs; changes nothing (exit 3 while something drifts)
 #   sudo ./install.sh --commit     apply; re-running is safe and ends in "N ok" once converged
-#   ./install.sh check             read-only, exit 0 converged / 3 drift (cron, monitoring)
+#   sudo ./install.sh check        read-only, exit 0 converged / 3 drift (cron, monitoring); 6 without root
 #   ./install.sh list              modules, order, on/off
 # Needs python3 (3.11+, tomllib) and jq for the engine, gpg and curl for apt-sources (which runs before `packages`
 # could install them). Engine: lib/engine.py.

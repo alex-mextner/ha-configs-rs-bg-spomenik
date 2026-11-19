@@ -8,14 +8,14 @@ preview before change, observed convergence.
 ```sh
 sudo ./install.sh              # preview: every change as a diff, nothing written (exit 3 while anything drifts)
 sudo ./install.sh --commit     # apply; a second run prints "N ok" and exit 0
-./install.sh check             # read-only, exit 0 converged / 3 drift (for a timer or monitoring)
+sudo ./install.sh check        # read-only, exit 0 converged / 3 drift (for a timer or monitoring)
 ./install.sh list              # modules in order, on/off
 sudo ./install.sh --only docker,sysctl --commit
 ```
 
-Exit codes: `0` converged, `2` usage or bad config, `3` drift, `6` `--commit` without root, `7` a module failed or
-was blocked by a failed module it `requires`. A failure never stops the run: independent modules still converge.
-Run the preview with `sudo` too: without root, files such as `/etc/sudoers.d/*` cannot be read and show as drift.
+Exit codes: `0` converged, `2` usage or bad config, `3` drift, `6` not root, `7` a module failed or was blocked by a
+failed module it `requires`. A failure never stops the run: independent modules still converge. Everything except
+`list` needs root (`sudo`): without it, files such as `/etc/sudoers.d/*` cannot be read and would show as drift.
 
 ## Layout
 
@@ -37,7 +37,7 @@ Run the preview with `sudo` too: without root, files such as `/etc/sudoers.d/*` 
 | 20 | `apt-sources` | deb822 repositories; the signing key is written only if its fingerprint equals the declared one (Docker CE) |
 | 30 | `packages` | `install` (missing ones, `--no-install-recommends`) and `purge` lists |
 | 40 | `users` | users, groups, shell, sudo rule (validated by `visudo`), exclusive `authorized_keys`, lingering for `systemd --user` |
-| 45 | `ssh-server` | sshd drop-in: no passwords, no root login; refuses while no sudo user has a key; `sshd -t` before reload |
+| 45 | `ssh-server` | sshd drop-in: no passwords, no root login; refuses while no user with a key can sudo (`nopasswd`, or `password` with a password set); `sshd -t` before reload |
 | 50 | `zram` | zram swap: Armbian's `/etc/default/armbian-zram-config` (applied at next boot), else zram-tools |
 | 55 | `sysctl` | `/etc/sysctl.d/90-debian-tweaks.conf`; live values are checked and set too |
 | 60 | `docker` | the whole `/etc/docker/daemon.json` (validated by `dockerd --validate`), docker + containerd enabled and running |
@@ -78,7 +78,7 @@ and an executable `run` that sources `lib/common.sh`; its options arrive as JSON
    ```sh
    rsync -a --delete machines/bananapi-m4/ ultra@<ip>:debian-tweaks/
    ssh -t ultra@<ip> 'cd debian-tweaks && sudo ./install.sh && sudo ./install.sh --commit'
-   ssh ultra@<ip> 'cd debian-tweaks && ./install.sh check'   # exit 0
+   ssh ultra@<ip> 'cd debian-tweaks && sudo ./install.sh check'   # exit 0
    ```
 
    The `ssh-server` module turns password login off, so make sure `ssh ultra@<ip>` works with a key first

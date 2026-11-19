@@ -16,11 +16,47 @@ for unit in $(opt '.system // [] | .[]'); do
 done
 if [[ $MODE == install && $reload == 1 ]]; then systemctl daemon-reload; fi
 
+# conditions_met UNIT: the unit has ConditionPathExists= lines and every one (with %i expanded) holds now, `!path`
+# meaning absent; an empty ConditionPathExists= (drop-in reset) clears the earlier ones. Anything this cannot evaluate
+# (another Condition*= kind, a `|` trigger, another %-specifier) reports "not met", so such a unit is never started.
+conditions_met() {
+	local unit=$1 instance='' key value path
+	local -a paths=()
+	if [[ $unit == *@* ]]; then
+		instance=${unit#*@}
+		instance=${instance%.*}
+	fi
+	while IFS='=' read -r key value; do
+		key=${key%"${key##*[![:space:]]}"}
+		value=${value#"${value%%[![:space:]]*}"}
+		value=${value%"${value##*[![:space:]]}"}
+		[[ $key == ConditionPathExists ]] || return 1
+		if [[ -z $value ]]; then paths=(); else paths+=("${value//%i/$instance}"); fi
+	done < <(systemctl cat "$unit" 2>/dev/null | sed -n 's/^[[:space:]]*\(Condition\)/\1/p')
+	((${#paths[@]})) || return 1
+	for path in "${paths[@]}"; do
+		case $path in
+		*%* | '|'*) return 1 ;;
+		'!'*) [[ ! -e ${path#!} ]] || return 1 ;;
+		*) [[ -e $path ]] || return 1 ;;
+		esac
+	done
+	return 0
+}
+
 for unit in $(opt '.enable // [] | .[]'); do
 	if ! systemctl is-enabled -q "$unit" 2>/dev/null; then
 		drift "enable --now $unit" && systemctl enable --now "$unit"
 	elif systemctl is-failed -q "$unit"; then
 		drift "$unit is failed: restart" && systemctl restart "$unit"
+	# ConditionResult=no after a check (ConditionTimestamp set): the last start was skipped by a condition (a unit
+	# that stopped on its own or was stopped by an admin reports yes). A unit enabled while its condition was false
+	# stays inactive, and nothing starts it when the path appears later. A queued start job (boot) is left to run.
+	elif [[ $(systemctl show -P ConditionResult "$unit") == no &&
+		$(systemctl show -P ConditionTimestampMonotonic "$unit") != 0 &&
+		-z $(systemctl list-jobs --no-legend "$unit") ]] &&
+		! systemctl is-active -q "$unit" && conditions_met "$unit"; then
+		drift "$unit: its condition holds now but it is not running: start" && systemctl start "$unit"
 	fi
 done
 
