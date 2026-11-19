@@ -59,6 +59,19 @@ Private ESPHome secrets are `wifi_ssid`, `wifi_password` and the unique
 `homeassistant-esphome-1`. These secrets are separate from Home Assistant's.
 
 Keep real values outside git, CI, logs and artifacts. CI uses dummy values only.
+The helper can inventory required secret names without printing their values:
+
+```sh
+python3 scripts/prepare_esphome_secrets.py --config esphome/toilet-presence.yaml --source-secrets /home/ultra/esphome/secrets.yaml
+```
+
+On the host that owns that private secrets file, add
+`--output-dir /home/ultra/esphome-private/toilet-presence --prepare --harden-source`
+to prepare a new private deployment bundle. The helper creates a 0700 directory,
+0600 secrets file, and a missing per-device API key locally. It refuses to
+overwrite an existing output directory; source secret bytes remain unchanged.
+It does not connect by SSH or flash a device.
+
 The configuration requires ESPHome 2026.9.1 or later; use the repository's pinned
 validation version for a reproducible build.
 
@@ -165,6 +178,56 @@ performed merely by source inspection or CI compilation.
 Record placement, firmware version, resolution, thresholds, maximum gates,
 native vacancy timeout and these observations before automatic control is
 enabled. Keep manual control available throughout commissioning.
+
+## Reusing the existing corridor fade
+
+The running source inspected for this work was
+`odroidn2:/home/ultra/esphome/esp32-c3-light.yaml`. It uses a configurable
+fade-in followed by a gradual decline over 30 minutes in 10-second transitions,
+then a one-second final fade to off. Manual off starts a separate one-minute
+motion block. This work does not change that live file or its keys, network
+configuration, firmware, entry policy or cooldown.
+
+`esphome/libs/gradual_fade.yaml` extracts the decay operation for reuse.
+`fade_profile.hpp` supplies its linear curve. The caller selects the light through
+`fade_light_id`, commands any entry brightness, waits for that entry transition
+if one was requested, then runs:
+
+```yaml
+- script.execute:
+    id: gradual_fade
+    duration_ms: 1800000
+    floor_level: 0.10
+```
+
+The fade reads `current_values.as_brightness`, including the interpolated on/off
+state multiplied by brightness, freezes that level and ends at
+`min(start, floor)` before switching off. Thus an initial 5% night level is
+not raised to a 10% floor. Restarting starts a complete new duration from the
+current brightness. A fully-off light is left off.
+
+`script.execute: gradual_fade_stop` cancels the queued decay and freezes an
+ongoing native transition at its current level. If the light was manually
+commanded off, it does not turn it on again. An adapter must use this operation
+when taking ownership for a hold or manual override, rather than stopping only
+the script while its last 10-second transition continues.
+
+The package exposes `fade_internal_call` for synchronous light-call guards and
+`fade_automatic_off` for the final asynchronous off callback. The light's
+`on_turn_off` handler must acknowledge/reset `fade_automatic_off`; otherwise it
+must stop the fade and apply the owner's manual-off policy. See the compile
+fixture for that wiring. The package does not choose night/day brightness,
+cooldown, occupancy or manual-override policy itself.
+
+`esphome/tests/corridor-fade.yaml` is a compile fixture only. It deliberately
+has no networking or OTA and must not be flashed. The native C++ regression
+fixture `esphome/tests/test_fade_profile.cpp` checks hand-calculated day/night,
+restart, off and endpoint cases. Full firmware compilation and the complete
+regression set run in CI with no live credentials.
+
+The Home Assistant light adapter follows the same 30-minute/10-second decay
+contract. A Tuya light without native transitions requires stepped commands;
+matching the schedule does not promise identical visible smoothness.
 
 ## Sources
 

@@ -1,0 +1,125 @@
+# Decay section extracted from odroidn2:/home/ultra/esphome/esp32-c3-light.yaml.
+# The caller owns entry policy, manual override and cooldown.
+# For the existing corridor use the same 30 min duration, 10 s steps, 1 s off.
+substitutions:
+  fade_light_id: motion_light
+  fade_header_path: libs/fade_profile.hpp
+  fade_step_ms: "10000"
+  fade_final_ms: "1000"
+
+esphome:
+  includes:
+    - ${fade_header_path}
+
+globals:
+  - id: fade_running
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: fade_internal_call
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: fade_automatic_off
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: fade_start_level
+    type: float
+    restore_value: false
+    initial_value: "0.0"
+  - id: fade_floor_level
+    type: float
+    restore_value: false
+    initial_value: "0.0"
+  - id: fade_elapsed_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: fade_current_step_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+script:
+  - id: gradual_fade
+    mode: restart
+    parameters:
+      duration_ms: uint32_t
+      floor_level: float
+    then:
+      - lambda: |-
+          id(fade_running) = false;
+      - if:
+          # An approach/hold caller must not turn a fully-off light on.
+          condition:
+            lambda: return id(${fade_light_id}).remote_values.is_on();
+          then:
+            - lambda: |-
+                id(fade_running) = true;
+                id(fade_automatic_off) = false;
+                float current;
+                id(${fade_light_id}).current_values.as_brightness(&current);
+                id(fade_start_level) = current;
+                // Normalize state*brightness before replacing an entry ramp.
+                id(fade_internal_call) = true;
+                auto freeze = id(${fade_light_id}).turn_on();
+                freeze.set_brightness(current);
+                freeze.set_transition_length(0);
+                freeze.perform();
+                id(fade_internal_call) = false;
+                id(fade_floor_level) =
+                    std::max(0.0f, std::min(1.0f, floor_level));
+                id(fade_elapsed_ms) = 0;
+            - while:
+                condition:
+                  lambda: |-
+                    return id(fade_elapsed_ms) < duration_ms &&
+                           id(${fade_light_id}).remote_values.is_on();
+                then:
+                  - lambda: |-
+                      id(fade_current_step_ms) = std::min<uint32_t>(
+                          ${fade_step_ms}, duration_ms - id(fade_elapsed_ms));
+                      id(fade_elapsed_ms) += id(fade_current_step_ms);
+                      const float level = presence_fade::level(
+                          id(fade_start_level), id(fade_floor_level),
+                          id(fade_elapsed_ms), duration_ms);
+                      id(fade_internal_call) = true;
+                      auto call = id(${fade_light_id}).turn_on();
+                      call.set_brightness(level);
+                      call.set_transition_length(id(fade_current_step_ms));
+                      call.perform();
+                      id(fade_internal_call) = false;
+                  - delay: !lambda return id(fade_current_step_ms);
+            - if:
+                condition:
+                  lambda: return id(${fade_light_id}).remote_values.is_on();
+                then:
+                  # Like the original g_auto_off, this survives the transition.
+                  # The light's on_turn_off handler must acknowledge/reset it.
+                  - lambda: id(fade_automatic_off) = true;
+                  - light.turn_off:
+                      id: ${fade_light_id}
+                      transition_length: ${fade_final_ms}ms
+            - lambda: id(fade_running) = false;
+
+  - id: gradual_fade_stop
+    mode: restart
+    then:
+      - script.stop: gradual_fade
+      - lambda: |-
+          id(fade_running) = false;
+          // script.stop alone leaves a native 10 s transition running.
+          // Freeze its actual interpolated level, not its commanded endpoint.
+          // A manual off has remote state off and must never be reversed here.
+          if (id(${fade_light_id}).remote_values.is_on()) {
+            id(fade_automatic_off) = false;
+            float current;
+            id(${fade_light_id}).current_values.as_brightness(&current);
+            id(fade_internal_call) = true;
+            auto call = id(${fade_light_id}).turn_on();
+            call.set_brightness(current);
+            call.set_transition_length(0);
+            call.perform();
+            id(fade_internal_call) = false;
+          }
