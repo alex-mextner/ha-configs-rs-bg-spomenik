@@ -1,0 +1,346 @@
+# Reference snapshot only; not a deployment entry point.
+# Sanitized from odroidn2:/home/ultra/esphome/esp32-c3-light.yaml on 2026-11-19.
+# Existing identity, networking, OTA scheme and controller behavior are retained.
+# Literal credentials were replaced by private !secret references.
+# The reusable decay extraction is ../libs/gradual_fade.yaml.
+
+esphome:
+  name: esp32-c3-light
+  friendly_name: Motion Light
+  on_boot:
+    priority: -100
+    then:
+      - delay: 60s
+      # If PIR was already HIGH during the boot delay, on_press won't fire again.
+      # Replay it now so a person already in the room gets the light.
+      - lambda: |-
+          id(g_boot_done) = true;
+          if (id(pir_motion).state && id(motion_enabled).state) {
+            id(light_timer).execute();
+          }
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: ESP32C3
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # ESP32-C3 drops wifi with the default modem power-save on. Match the IR
+  # device (power_save_mode: none) to keep the node reachable for OTA/HA.
+  power_save_mode: none
+  # Static IP: DHCP kept reassigning the node, leaving HA's ESPHome integration
+  # pointed at a stale address (device fell to "unavailable"). Pin it so HA's
+  # stored host stays valid. .12 is the address DHCP last issued — RESERVE it for
+  # this node's MAC (A0:F2:62:B3:08:48) in the router, or use an address outside
+  # the DHCP pool, else the router may lease .12 to another client while it's
+  # offline and cause an IP conflict.
+  manual_ip:
+    static_ip: 192.168.0.12
+    gateway: 192.168.0.1
+    subnet: 255.255.255.0
+    dns1: 192.168.0.1
+  ap:
+    ssid: !secret corridor_wifi_ap_ssid
+    password: !secret corridor_wifi_ap_password
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+ota:
+  platform: esphome
+
+api:
+
+web_server:
+  port: 80
+  version: 3
+
+debug:
+  update_interval: 5s
+
+# GPIO2: strapping pin on ESP32-C3 (internal pullup keeps it HIGH at boot).
+# Driving transistor base from here causes a brief LED-on at power-up — fine
+# for a strip. Rewire to GPIO5/GPIO6 if the flash at boot is unacceptable.
+output:
+  - platform: ledc
+    pin: GPIO2
+    id: out_led_strip
+    frequency: 1000Hz
+
+# g_scripting: true while the script is issuing a light call, preventing
+# on_turn_on / on_turn_off from recursively restarting or stopping light_timer.
+# g_motion_blocked: true for motion_block_duration minutes after HA manually turns off the light.
+globals:
+  - id: g_scripting
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: g_motion_blocked
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: g_dim_brightness
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: g_dim_step
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: g_boot_done
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # g_auto_off: true while the script performs its own final fade-to-off, so the
+  # late-firing on_turn_off (end of the 1 s transition) can tell a script-driven
+  # shutdown from a manual HA turn-off and skip the motion-block cooldown.
+  - id: g_auto_off
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+number:
+  - platform: template
+    name: "Target Brightness"
+    id: target_brightness
+    min_value: 10
+    max_value: 100
+    step: 1
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    initial_value: 80
+    on_value:
+      then:
+        - if:
+            condition:
+              light.is_on: motion_light
+            then:
+              - script.execute: light_timer
+
+  - platform: template
+    name: "Timer Duration"
+    id: timer_duration
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+
+  - platform: template
+    name: "Motion Block Duration"
+    id: motion_block_duration
+    min_value: 0
+    max_value: 60
+    step: 1
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 1
+
+  - platform: template
+    name: "Fade In Time"
+    id: fade_in_time
+    min_value: 1
+    max_value: 10
+    step: 1
+    unit_of_measurement: "s"
+    optimistic: true
+    restore_value: true
+    initial_value: 2
+
+  - platform: template
+    name: "Dim Floor"
+    id: dim_floor
+    min_value: 1
+    max_value: 50
+    step: 1
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+
+switch:
+  - platform: template
+    name: "Motion Detection"
+    id: motion_enabled
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+light:
+  - platform: monochromatic
+    name: "Motion Light"
+    id: motion_light
+    output: out_led_strip
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(g_scripting);'
+            then:
+              - script.execute: light_timer
+    on_turn_off:
+      then:
+        - if:
+            condition:
+              # g_scripting guards the synchronous fade/dim turn-ons; g_auto_off
+              # marks the script's own final fade-to-off, whose on_turn_off fires
+              # only AFTER the 1 s transition completes (g_scripting already
+              # cleared by then). Either case is script-driven — never start the
+              # cooldown; only a genuine manual HA turn-off should.
+              # Accepted edge: a manual HA off landing inside that final 1 s fade
+              # is read as script-driven and skips the cooldown — negligible window.
+              lambda: 'return id(g_scripting) || id(g_auto_off);'
+            then:
+              - lambda: 'id(g_auto_off) = false;'
+            else:
+              - script.stop: light_timer
+              - script.execute: motion_block_timer
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode:
+        input: true
+    id: pir_motion
+    name: "PIR Motion"
+    device_class: motion
+    filters:
+      - delayed_on: 500ms
+    on_press:
+      then:
+        - if:
+            condition:
+              and:
+                - switch.is_on: motion_enabled
+                - lambda: 'return !id(g_motion_blocked);'
+                - lambda: 'return id(g_boot_done);'
+            then:
+              - script.execute: light_timer
+
+sensor:
+  # Mirror the light's live brightness as a numeric sensor so HA records a clean
+  # history/graph of the dim curve. The light entity reports brightness live, but
+  # HA's recorder dedupes rapid light-attribute steps out of history; a dedicated
+  # sensor persists reliably. Reports 0 when the light is off.
+  - platform: template
+    name: "Brightness"
+    id: light_brightness_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: 5s
+    lambda: |-
+      if (id(motion_light).current_values.is_on()) {
+        return id(motion_light).current_values.get_brightness() * 100.0f;
+      }
+      return 0.0f;
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 5s
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 10s
+  - platform: debug
+    free:
+      name: "Heap Free"
+    block:
+      name: "Heap Max Block"
+    loop_time:
+      name: "Loop Time"
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    ssid:
+      name: "SSID"
+
+script:
+  - id: motion_block_timer
+    mode: restart
+    then:
+      - lambda: 'id(g_motion_blocked) = true;'
+      - delay: !lambda 'return (uint32_t)(id(motion_block_duration).state * 60000);'
+      - lambda: 'id(g_motion_blocked) = false;'
+
+  - id: light_timer
+    mode: restart
+    then:
+      # 1. Fade in to configured brightness over 2 seconds.
+      - lambda: |-
+          id(g_scripting) = true;
+          id(g_auto_off) = false;
+      - light.turn_on:
+          id: motion_light
+          brightness: !lambda 'return id(target_brightness).state / 100.0f;'
+          transition_length: !lambda 'return (uint32_t)(id(fade_in_time).state * 1000);'
+      - lambda: 'id(g_scripting) = false;'
+      # 2. Wait for the fade-in to finish.
+      - delay: !lambda 'return (uint32_t)(id(fade_in_time).state * 1000);'
+      # 3. Calculate per-step decrement: total steps = timer_duration*60s / 10s per step.
+      #    Sentinel g_dim_step = -1.0 means "no dimming range, hold at floor for full duration".
+      - lambda: |-
+          id(g_dim_brightness) = id(target_brightness).state / 100.0f;
+          float floor_val = id(dim_floor).state / 100.0f;
+          float range = id(g_dim_brightness) - floor_val;
+          if (range <= 0.0f) {
+            id(g_dim_step) = -1.0f;
+            id(g_dim_brightness) = floor_val;
+          } else {
+            float steps = (id(timer_duration).state * 60.0f) / 10.0f;
+            id(g_dim_step) = range / steps;
+          }
+      # 4. Step-based dim loop — 10 s per step so HA always shows the current level.
+      - while:
+          condition:
+            lambda: 'return id(g_dim_brightness) > id(dim_floor).state / 100.0f;'
+          then:
+            - lambda: |-
+                float floor_val = id(dim_floor).state / 100.0f;
+                id(g_dim_brightness) -= id(g_dim_step);
+                if (id(g_dim_brightness) < floor_val) id(g_dim_brightness) = floor_val;
+            - lambda: 'id(g_scripting) = true;'
+            - light.turn_on:
+                id: motion_light
+                brightness: !lambda 'return id(g_dim_brightness);'
+                transition_length: 10s
+            - lambda: 'id(g_scripting) = false;'
+            - delay: 10s
+      # Hold at floor brightness for the full timer_duration when target <= dim_floor
+      # (dim loop was skipped; sentinel g_dim_step < 0 marks this case).
+      # Explicitly set floor brightness here so light lands at floor even when
+      # target_brightness was set below dim_floor.
+      - if:
+          condition:
+            lambda: 'return id(g_dim_step) < 0.0f;'
+          then:
+            - lambda: 'id(g_scripting) = true;'
+            - light.turn_on:
+                id: motion_light
+                brightness: !lambda 'return id(dim_floor).state / 100.0f;'
+                transition_length: 1s
+            - lambda: 'id(g_scripting) = false;'
+            - delay: !lambda 'return (uint32_t)(id(timer_duration).state * 60000);'
+      # 5. Quick final fade to off (~1 s). Mark as auto-off FIRST: on_turn_off
+      #    fires only when this 1 s transition completes, by which point a
+      #    synchronous g_scripting guard would already be cleared — so the
+      #    motion-block cooldown would wrongly start and blind the PIR. The
+      #    g_auto_off flag survives the transition and tells on_turn_off this
+      #    was the script's own shutdown.
+      - lambda: 'id(g_auto_off) = true;'
+      - light.turn_off:
+          id: motion_light
+          transition_length: 1s

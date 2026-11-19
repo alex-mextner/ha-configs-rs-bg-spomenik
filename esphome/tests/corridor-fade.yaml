@@ -1,0 +1,55 @@
+# Compile fixture only. Do not flash: it intentionally has no networking or OTA.
+# Hardware/output identity mirrors the existing corridor solely for validation.
+substitutions:
+  fade_header_path: ../libs/fade_profile.hpp
+
+packages:
+  decay: !include ../libs/gradual_fade.yaml
+
+esphome:
+  name: corridor-fade-validation
+  min_version: 2026.9.1
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: ESP32C3
+  framework:
+    type: esp-idf
+
+logger:
+  baud_rate: 0
+
+output:
+  - platform: ledc
+    id: out_led_strip
+    pin: GPIO2
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    id: motion_light
+    name: Validation Light
+    output: out_led_strip
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      then:
+        - if:
+            condition:
+              lambda: return id(fade_automatic_off);
+            then:
+              - lambda: id(fade_automatic_off) = false;
+            else:
+              - script.execute: gradual_fade_stop
+
+button:
+  - platform: template
+    name: Start Thirty Minute Decay
+    on_press:
+      - script.execute:
+          id: gradual_fade
+          duration_ms: 1800000
+          floor_level: 0.10
+  - platform: template
+    name: Freeze Current Brightness
+    on_press:
+      - script.execute: gradual_fade_stop

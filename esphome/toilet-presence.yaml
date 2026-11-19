@@ -1,0 +1,24 @@
+# Seeed XIAO ESP32-C3 + 24GHz mmWave for XIAO (SKU 101010001).
+# This is the LD2410-compatible expansion board, not MR24HPC1.
+# Commission the placement and radar thresholds before enabling light control.
+substitutions:
+  device_name: toilet-presence
+  friendly_name: Toilet Presence
+  radar_tx_pin: GPIO5
+  radar_rx_pin: GPIO4
+  radar_baud_rate: "256000"
+  radar_report_timeout: 5s
+
+packages:
+  base: !include libs/base.yaml
+  radar: !include libs/ld2410.yaml
+
+esp32:
+  board: seeed_xiao_esp32c3
+  variant: ESP32C3
+  framework:
+    type: esp-idf
+
+api:
+  encryption:
+    key: !secret toilet_presence_api_key

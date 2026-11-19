@@ -1,0 +1,36 @@
+# Shared network and diagnostics for devices using a per-device static API key.
+# Each device entry point declares its own api.encryption.key via !secret.
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.9.1
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+
+# Logs remain available through the encrypted native API.
+logger:
+  baud_rate: 0
+
+# ESPHome 2026.9.1 resolves this to the static API encryption key.
+# No legacy shared password, fallback hotspot, or HTTP server is enabled.
+ota:
+  - platform: esphome
+    encryption: {}
+
+sensor:
+  - platform: uptime
+    name: Uptime
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: wifi_signal
+    name: WiFi Signal
+    update_interval: 60s
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: status
+    name: Connectivity
+    entity_category: diagnostic
