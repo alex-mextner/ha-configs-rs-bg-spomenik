@@ -72,6 +72,11 @@ to prepare a new private deployment bundle. The helper creates a 0700 directory,
 overwrite an existing output directory; source secret bytes remain unchanged.
 It does not connect by SSH or flash a device.
 
+The prepared bundle's `secrets.yaml` is the durable device key store. For later
+rebuilds, source `/home/ultra/esphome-private/toilet-presence/secrets.yaml` and
+choose a new output directory. Reusing the original WiFi-only source could
+generate a different API/OTA key and lose the installed device's identity.
+
 The configuration requires ESPHome 2026.9.1 or later; use the repository's pinned
 validation version for a reproducible build.
 
@@ -144,9 +149,17 @@ entry/door sensor. Simply raising thresholds can lose a still occupant.
 ## Door and other rooms
 
 The board exposes scalar distances and energies, not X/Y, tracked people or a
-door-open state. Door motion can trigger it, but that is not a door contact.
-Use a magnetic contact if actual opening/closing is required. A contact alone
-does not establish occupancy with an open or ajar door.
+door-open state. Door motion can trigger it, but that does not establish an
+open/closed state. A magnetic contact is one option for a separate door input;
+it alone does not establish occupancy with an open or ajar door.
+
+The pictured HC-SR04 is also a possible experiment: a fixed mounting might
+distinguish the door leaf's distance in selected positions. This depends on
+geometry, clean echoes and tests across the full door swing. A missing or
+invalid echo means unknown, not open or clear. It is not a reliable occupancy
+sensor and is not enabled by this configuration. Standard HC-SR04 Echo is 5 V
+logic and needs level reduction before connection to a 3.3 V ESP32 input; see
+[Adafruit's pinout guide](https://learn.adafruit.com/ultrasonic-sonar-distance-sensors/pinouts).
 
 Radial distance bands cannot reliably identify kitchen, living room and hallway
 when their distances overlap. Restricting this radar to the toilet also removes
@@ -187,6 +200,14 @@ fade-in followed by a gradual decline over 30 minutes in 10-second transitions,
 then a one-second final fade to off. Manual off starts a separate one-minute
 motion block. This work does not change that live file or its keys, network
 configuration, firmware, entry policy or cooldown.
+
+`esphome/reference/esp32-c3-light.yaml` preserves a sanitized, inactive snapshot
+of that source for comparison. Its device identity, static networking, original
+OTA scheme and existing controller behavior are retained. Literal credentials
+are replaced with private `!secret` references; these aliases need their original
+values mapped privately before any future deployment. This snapshot is not a
+build or deployment entry point, and does not import the new base package or
+rotate the corridor's credentials. The compile fixture below is separate.
 
 `esphome/libs/gradual_fade.yaml` extracts the decay operation for reuse.
 `fade_profile.hpp` supplies its linear curve. The caller selects the light through
