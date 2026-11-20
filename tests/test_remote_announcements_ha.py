@@ -205,23 +205,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_stop(force=True)
         self.temp.cleanup()
 
-    async def check_absolute_digit_during_label(
-        self, *, playing: bool, owner: str = "speaker", other_output: bool = False
-    ) -> None:
-        desired = 0.6 if playing else 0.4
-        output = "media_player.other_output" if other_output else self.entity
-        attrs = dict(
-            self.hass.states.get(self.entity).attributes,
-            volume_level=0.8,
-            supported_features=4,
-        )
-        self.hass.states.async_set(
-            self.entity, "playing" if playing else "paused", attrs
-        )
-        if other_output:
-            self.hass.states.async_set(
-                output, "idle", dict(attrs, volume_level=desired)
-            )
+    def music_script(self, owner: str, output: str) -> Script:
         self.hass.states.async_set(
             "sensor.remote_announcements", "ready", self.manager.public_status
         )
@@ -251,12 +235,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             supports_response=SupportsResponse.ONLY,
         )
         music = yaml.safe_load((ROOT / "packages/music_remote.yaml").read_text())
-        script = Script(
+        return Script(
             self.hass,
             cv.SCRIPT_SCHEMA(music["script"]["music_remote_command"]["sequence"]),
             "Music command fixture",
             "script",
         )
+
+    async def check_absolute_digit_during_label(
+        self, *, playing: bool, owner: str = "speaker", other_output: bool = False
+    ) -> None:
+        desired = 0.6 if playing else 0.4
+        output = "media_player.other_output" if other_output else self.entity
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            supported_features=4,
+        )
+        self.hass.states.async_set(
+            self.entity, "playing" if playing else "paused", attrs
+        )
+        if other_output:
+            self.hass.states.async_set(
+                output, "idle", dict(attrs, volume_level=desired)
+            )
+        script = self.music_script(owner, output)
 
         async def digit_during_native(call) -> dict[str, str]:
             await script.async_run(
@@ -587,6 +590,151 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.get(self.entity).attributes["volume_level"], 0.2
         )
 
+    async def start_delayed_restore(self, *, muted: bool = True) -> dict:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=muted,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def delayed(call) -> None:
+            if self.calls:
+                self.calls.append((call.service, dict(call.data)))
+                return
+            await self.media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", delayed)
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.1),
+            patch.object(integration, "RECOVERY_RESERVE", 0.06),
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(
+            [n for n, _ in self.calls], ["volume_set", "send_command", "volume_set"]
+        )
+        return attrs
+
+    async def check_digit_before_old_echo(
+        self, *, muted: bool, lost_ack: bool = False
+    ) -> None:
+        attrs = await self.start_delayed_restore(muted=muted)
+        if lost_ack:
+
+            async def manual_ack_lost(call) -> None:
+                self.calls.append((call.service, dict(call.data)))
+                message = "manual-volume-ack-lost"
+                raise RuntimeError(message)
+
+            self.hass.services.async_register(
+                "media_player", "volume_set", manual_ack_lost
+            )
+        script = self.music_script("speaker", self.entity)
+        entered = asyncio.Event()
+        handoff = self.manager.handoff_volume
+
+        async def heard(*args: object) -> bool:
+            entered.set()
+            return await handoff(*args)
+
+        with patch.object(self.manager, "handoff_volume", heard):
+            command = asyncio.create_task(
+                script.async_run(
+                    {"command": "volume_set", "volume_level": 0.4}, context=Context()
+                )
+            )
+            await asyncio.wait_for(entered.wait(), 0.5)
+            self.assertEqual(len(self.calls), 3)
+            self.hass.states.async_set(
+                self.entity, "paused", {**attrs, "is_volume_muted": False}
+            )
+            if lost_ack:
+                with self.assertRaisesRegex(RuntimeError, "manual-volume-ack-lost"):
+                    await asyncio.wait_for(command, 0.5)
+            else:
+                await asyncio.wait_for(command, 0.5)
+        if pending := self.manager.pending_remutes.get(self.entity):
+            await asyncio.gather(pending[1], return_exceptions=True)
+        levels = [d["volume_level"] for n, d in self.calls if n == "volume_set"]
+        self.assertEqual(levels, [0.4, 0.8, 0.4])
+        self.assertNotIn("volume_mute", [n for n, _ in self.calls])
+        with self.assertRaisesRegex(
+            ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+        ):
+            await self.manager.announce("tv")
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.4, "is_volume_muted": False},
+        )
+        await self.manager.announce("tv")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], levels
+        )
+
+    async def test_digit_waits_for_old_echo_then_protects_new_choice(self) -> None:
+        await self.check_digit_before_old_echo(muted=True)
+
+    async def test_lost_digit_ack_cannot_allow_stale_restore_or_remute(self) -> None:
+        await self.check_digit_before_old_echo(muted=True, lost_ack=True)
+
+    async def test_digit_protects_new_choice_after_unmuted_restore(self) -> None:
+        await self.check_digit_before_old_echo(muted=False)
+
+    async def test_manual_level_during_late_restore_yields(self) -> None:
+        attrs = await self.start_delayed_restore()
+        task = self.manager.pending_remutes[self.entity][1]
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.7, "is_volume_muted": False},
+        )
+        await asyncio.wait_for(task, 0.5)
+        self.assertEqual(len(self.calls), 3)
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_manual_mute_during_late_restore_yields(self) -> None:
+        attrs = await self.start_delayed_restore()
+        task = self.manager.pending_remutes[self.entity][1]
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.4, "is_volume_muted": True},
+        )
+        await asyncio.wait_for(task, 0.5)
+        self.assertEqual(len(self.calls), 3)
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_shutdown_cancels_late_remute_before_echo(self) -> None:
+        attrs = await self.start_delayed_restore()
+        task = self.manager.pending_remutes[self.entity][1]
+        await self.manager.close()
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "is_volume_muted": False}
+        )
+        await self.hass.async_block_till_done()
+        self.assertTrue(task.done())
+        self.assertFalse(self.manager.pending_remutes)
+        self.assertFalse(self.manager.volume_waiters)
+        self.assertEqual(len(self.calls), 3)
+
+    async def test_late_echo_after_continuation_expiry_never_remutes(self) -> None:
+        with patch.object(integration, "REMUTE_GRACE", 0.04):
+            attrs = await self.start_delayed_restore()
+            task = self.manager.pending_remutes[self.entity][1]
+            with self.assertRaisesRegex(
+                ProviderNotReadyError, "yandex_volume_recovery_unconfirmed"
+            ):
+                await asyncio.wait_for(task, 0.5)
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "is_volume_muted": False}
+        )
+        self.manager.check_aisis_volume_recovery(self.hass.states.get(self.entity))
+        self.assertFalse(self.manager.pending_remutes)
+        self.assertFalse(self.manager.volume_waiters)
+        self.assertEqual(len(self.calls), 3)
+
     async def test_delayed_volume_echo_cannot_skip_original_mute(self) -> None:
         state = self.hass.states.get(self.entity)
         self.hass.states.async_set(
@@ -595,8 +743,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             {**state.attributes, "volume_level": 0.8, "is_volume_muted": True},
         )
 
+        mute_sent = asyncio.Event()
+        remembered_at_mute = []
+
         async def echo_later(call) -> None:
             if call.service == "volume_mute" or call.data["volume_level"] == 0.8:
+                if call.service == "volume_mute":
+                    remembered_at_mute.append(
+                        self.hass.states.get(self.entity).attributes["volume_level"]
+                    )
+                    mute_sent.set()
                 self.calls.append((call.service, dict(call.data)))
                 return
             await self.media(call)
@@ -610,8 +766,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.announce("tv")
         self.assertEqual(
             [name for name, _ in self.calls],
-            ["volume_set", "send_command", "volume_set", "volume_mute"],
+            ["volume_set", "send_command", "volume_set"],
         )
+        deadline_task = self.manager.pending_remutes[self.entity][1]
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**state.attributes, "volume_level": 0.8, "is_volume_muted": False},
+        )
+        await asyncio.wait_for(mute_sent.wait(), 0.5)
+        services_settled = asyncio.Event()
+
+        def after_ack(_task) -> None:
+            if not self.manager.services.pending:
+                services_settled.set()
+
+        for pending in tuple(self.manager.services.pending):
+            pending.add_done_callback(after_ack)
+        if self.manager.services.pending:
+            await asyncio.wait_for(services_settled.wait(), 0.5)
+        self.assertEqual(remembered_at_mute, [0.8])
         for level, muted in ((0.4, False), (0.8, False), (0.4, True)):
             self.hass.states.async_set(
                 self.entity,
@@ -627,6 +801,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "paused",
             {**state.attributes, "volume_level": 0.8, "is_volume_muted": True},
         )
+        await asyncio.wait_for(deadline_task, 0.5)
         self.manager.check_aisis_volume_recovery(self.hass.states.get(self.entity))
         self.assertNotIn(self.entity, self.manager.volume_recovery)
         self.assertEqual(len(self.calls), 4)
@@ -652,9 +827,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             ProviderNotReadyError, "^yandex_volume_recovery_pending$"
         ):
             await self.manager.announce("tv")
+        deadline_task = self.manager.pending_remutes[self.entity][1]
         self.hass.states.async_set(
             self.entity, "paused", {**state.attributes, "is_volume_muted": True}
         )
+        await asyncio.wait_for(deadline_task, 0.5)
         self.manager.check_aisis_volume_recovery(self.hass.states.get(self.entity))
         self.assertNotIn(self.entity, self.manager.volume_recovery)
 
@@ -662,12 +839,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         state = self.hass.states.get(self.entity)
         attrs = {**state.attributes, "volume_level": 0.8, "is_volume_muted": True}
         self.hass.states.async_set(self.entity, "paused", attrs)
-
-        async def delayed_volume(call) -> None:
-            if call.data["volume_level"] == 0.8:
-                self.calls.append((call.service, dict(call.data)))
-                return
-            await self.media(call)
 
         dispatch = self.manager.call
 
@@ -681,13 +852,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.hass.states.async_set(entity, "unavailable", {})
             return await dispatch(service, entity, **kwargs)
 
-        self.hass.services.async_register("media_player", "volume_set", delayed_volume)
         with (
             patch.object(self.manager, "call", change_at_dispatch),
+            patch.object(integration, "REMUTE_GRACE", 0.05),
             patch.object(integration, "ATTEMPT_BUDGET", 0.15),
             patch.object(integration, "RECOVERY_RESERVE", 0.08),
         ):
             await self.manager.announce("tv")
+            if pending := self.manager.pending_remutes.get(self.entity):
+                await asyncio.gather(pending[1], return_exceptions=True)
         self.assertEqual(
             [n for n, _ in self.calls], ["volume_set", "send_command", "volume_set"]
         )

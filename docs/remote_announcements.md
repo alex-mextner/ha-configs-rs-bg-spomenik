@@ -107,7 +107,16 @@ Unrelated state attributes do not release this guard. If HA has accepted the ori
 volume but the final mute was never dispatched, the controller still waits for the
 volume readback. When HA dispatches the mute, the original remembered level and
 muted state must both be observed unless the user chooses a distinct volume.
-A later ordinary request can proceed after the guard clears.
+The Yandex Mini remembers the last positive volume it reports. The controller
+waits for that report before sending mute. A late report has at most two extra
+seconds beyond the label’s two-second foreground budget. Losing ownership,
+shutdown or expiry ends the continuation. A later echo cannot trigger a write.
+
+A remote volume digit matching the observed label level adopts that level. If
+an earlier restore is already in flight, the explicit command waits for its
+readback before setting the requested level once. While the native write is
+unconfirmed, the previous level cannot become a new label’s baseline.
+Relative volume buttons continue adjusting the current audible level.
 
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,

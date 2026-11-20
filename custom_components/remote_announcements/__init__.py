@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -63,6 +64,7 @@ if TYPE_CHECKING:
 DOMAIN = "remote_announcements"
 ATTEMPT_BUDGET = 2.0
 RECOVERY_RESERVE = 0.6
+REMUTE_GRACE = 2.0
 COMPLETION_MARGIN = 0.2
 AISIS_MINIMUM_VOLUME = 0.0
 _LOGGER = logging.getLogger(__name__)
@@ -172,6 +174,7 @@ class VolumeRestore:
     original: float
     applied: float
     expect_mute: bool = False
+    explicit_selection: bool = False
 
 
 class SpeechPlayback:
@@ -198,6 +201,7 @@ class SpeechPlayback:
         self.budget = ATTEMPT_BUDGET if budget is None else budget
         self.recovery_deadline = self.started + self.budget
         self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
+        self.remute_lock = asyncio.Lock()
         self.recovery_failed = False
         self.recovery_reason: str | None = None
         self.speaking, self.ended = asyncio.Event(), asyncio.Event()
@@ -261,10 +265,15 @@ class Manager:
         self.services = ServiceCalls(hass)
         self.volume_recovery: dict[str, VolumeRestore] = {}
         self.active_label: SpeechPlayback | None = None
+        self.selecting_volume: set[str] = set()
+        self.volume_waiters: set[asyncio.Event] = set()
+        self.pending_remutes: dict[str, tuple[SpeechPlayback, asyncio.Task[None]]] = {}
 
     async def close(self) -> None:
         """Stop target listening while retaining unfinished provider ownership."""
         self.closing = True
+        for waiter in self.volume_waiters:
+            waiter.set()
         if self.unsubscribe:
             self.unsubscribe()
             self.unsubscribe = None
@@ -272,6 +281,12 @@ class Manager:
             self.queue.stop(grace_seconds=ATTEMPT_BUDGET),
             self.rejections.stop(grace_seconds=CUE_BUDGET),
         )
+        tasks = [task for _, task in self.pending_remutes.values()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.pending_remutes.clear()
         await self.services.close(0.05)
 
     @callback
@@ -517,6 +532,11 @@ class Manager:
         at_original = can_restore_volume(volume, pending.original, muted=False)
         at_override = can_restore_volume(volume, pending.applied, muted=False)
         muted = state.attributes.get("is_volume_muted") is True
+        if pending.explicit_selection:
+            # Ignore the old remembered level/mute until the later user write echoes.
+            return (at_original and (not muted or pending.original == 0)) or (
+                not at_original and not at_override
+            )
         if pending.expect_mute:
             # Yandex may report mute before its remembered volume echo.
             return (muted and at_original) or (not at_original and not at_override)
@@ -524,6 +544,13 @@ class Manager:
 
     def check_aisis_volume_recovery(self, state: State) -> None:
         """Check pending speech restores before either labels or quiet cues."""
+        if (
+            state.entity_id in self.pending_remutes
+            or state.entity_id in self.selecting_volume
+        ):
+            raise ProviderNotReadyError(
+                self.recovery_reason(state.entity_id, "pending")
+            )
         pending = self.volume_recovery.get(state.entity_id)
         if pending is None:
             return
@@ -690,6 +717,16 @@ class Manager:
                 entity, POLICY_CONTROL
             ):
                 return {"adopted": False}
+        if self.closing or call.data["volume_level"] <= 0:
+            return {"adopted": False}
+        if pending := self.volume_recovery.get(entity):
+            if entity in self.selecting_volume:
+                raise ProviderNotReadyError(self.recovery_reason(entity, "pending"))
+            self.selecting_volume.add(entity)
+            try:
+                return {"adopted": await self.handoff_volume(call, pending)}
+            finally:
+                self.selecting_volume.discard(entity)
         playback = self.active_label
         state = self.hass.states.get(entity)
         if (
@@ -709,32 +746,203 @@ class Manager:
         playback.user_changed_volume = True
         return {"adopted": True}
 
+    async def handoff_volume(self, call: ServiceCall, pending: VolumeRestore) -> bool:
+        """Order the remote choice after the prior acknowledged speaker write."""
+        entity, selected = call.data["entity_id"], call.data["volume_level"]
+        remute = self.pending_remutes.get(entity)
+        deadline = time.monotonic() + REMUTE_GRACE
+        if remute:
+            deadline = min(deadline, remute[0].recovery_deadline + REMUTE_GRACE)
+        lock = remute[0].remute_lock if remute else nullcontext()
+        async with asyncio.timeout(max(0, deadline - time.monotonic())):
+            async with lock:
+                # Mute admission could precede the lock. Wait for that newer write.
+                expected = self.volume_recovery.get(entity, pending)
+                state = await self.wait_volume_echo(entity, expected, deadline)
+                if (
+                    not can_restore_volume(
+                        state.attributes.get("volume_level"),
+                        expected.original,
+                        muted=False,
+                    )
+                    or self.closing
+                ):
+                    message = "speaker_volume_changed_during_remote_selection"
+                    raise ProviderNotReadyError(message)
+                if not self.hass.services.has_service("media_player", "volume_set"):
+                    message = "speaker_volume_service_unavailable"
+                    raise ProviderNotReadyError(message)
+                # From this dispatch onward a provider error or lost acknowledgement
+                # cannot prove that the user's command stayed on this host.
+                self.volume_recovery[entity] = VolumeRestore(
+                    selected, expected.original, explicit_selection=True
+                )
+                if remute:
+                    remute[0].user_changed_volume = True
+                    remute[1].cancel()
+                await self.hass.services.async_call(
+                    "media_player",
+                    "volume_set",
+                    {"entity_id": entity, "volume_level": selected},
+                    blocking=True,
+                    context=call.context,
+                )
+                return True
+
     async def confirm_restored_volume(self, playback: SpeechPlayback) -> None:
         """Wait for actual readback within the shared recovery deadline."""
+        await self.wait_volume_echo(
+            playback.entity,
+            self.volume_recovery[playback.entity],
+            playback.recovery_deadline,
+        )
+
+    async def wait_volume_echo(
+        self, entity: str, expected: VolumeRestore, deadline: float
+    ) -> State:
+        """Wait for one authoritative level or a distinct manual change."""
+        if self.closing:
+            message = "speaker_recovery_stopped"
+            raise ProviderNotReadyError(message)
         confirmed = asyncio.Event()
-        expected = self.volume_recovery[playback.entity]
+        self.volume_waiters.add(confirmed)
+        matched = None
 
         @callback
-        def observe(_event: Event[EventStateChangedData] | None = None) -> None:
-            state = self.hass.states.get(playback.entity)
-            if state and self.volume_recovered(state, expected):
+        def observe(event: Event[EventStateChangedData] | None = None) -> None:
+            nonlocal matched
+            state = event.data["new_state"] if event else self.hass.states.get(entity)
+            if (
+                matched is None
+                and state
+                and not state.attributes.get("restored")
+                and not state.attributes.get("assumed_state")
+                and self.volume_recovered(state, expected)
+            ):
+                matched = state
                 confirmed.set()
 
-        unsubscribe = async_track_state_change_event(
-            self.hass, [playback.entity], observe
-        )
+        unsubscribe = async_track_state_change_event(self.hass, [entity], observe)
         try:
             observe()
             if not confirmed.is_set():
                 await asyncio.wait_for(
                     confirmed.wait(),
-                    max(0.0, playback.recovery_deadline - time.monotonic()),
+                    max(0.0, deadline - time.monotonic()),
                 )
         except TimeoutError as error:
-            message = self.recovery_reason(playback.entity, "unconfirmed")
+            message = self.recovery_reason(entity, "unconfirmed")
             raise ProviderNotReadyError(message) from error
+        else:
+            if self.closing or matched is None:
+                message = "speaker_recovery_stopped"
+                raise ProviderNotReadyError(message)
+            return matched
         finally:
+            self.volume_waiters.discard(confirmed)
             unsubscribe()
+
+    def remembered_level_observed(self, playback: SpeechPlayback) -> bool:
+        """Only a live positive Yandex report updates its remembered unmute level."""
+        state = self.hass.states.get(playback.entity)
+        return bool(
+            not self.closing
+            and state
+            and state.state not in {"unknown", "unavailable"}
+            and state.attributes.get("alice_state")
+            and not state.attributes.get("assumed_state")
+            and not state.attributes.get("restored")
+            and playback.old_volume > 0
+            and self.volume_unchanged(playback, playback.old_volume)
+        )
+
+    async def restore_remembered_mute(self, playback: SpeechPlayback) -> None:
+        """Restore volume, then dispatch zero only after its positive local echo."""
+        entity = playback.entity
+        deadline = playback.recovery_deadline + REMUTE_GRACE
+        try:
+            async with playback.remute_lock:
+
+                def admit_level() -> bool:
+                    if self.closing or not self.volume_unchanged(
+                        playback, playback.applied
+                    ):
+                        return False
+                    self.volume_recovery[entity] = VolumeRestore(
+                        playback.old_volume, playback.applied
+                    )
+                    return True
+
+                if not await self.call(
+                    "volume_set",
+                    entity,
+                    volume_level=playback.old_volume,
+                    deadline=playback.recovery_deadline,
+                    guard=admit_level,
+                ):
+                    return
+            observed = await self.wait_volume_echo(
+                entity, self.volume_recovery[entity], deadline
+            )
+            if not can_restore_volume(
+                observed.attributes.get("volume_level"),
+                playback.old_volume,
+                muted=observed.attributes.get("is_volume_muted", False),
+            ):
+                self.volume_recovery.pop(entity, None)
+                return
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                async with playback.remute_lock:
+                    if self.closing or playback.user_changed_volume:
+                        return
+
+                    def admit_mute() -> bool:
+                        if not self.remembered_level_observed(playback):
+                            return False
+                        self.volume_recovery[entity] = VolumeRestore(
+                            playback.old_volume, playback.applied, expect_mute=True
+                        )
+                        return True
+
+                    if self.remembered_level_observed(playback):
+                        await self.call(
+                            "volume_mute",
+                            entity,
+                            is_volume_muted=True,
+                            deadline=deadline,
+                            guard=admit_mute,
+                        )
+            await self.wait_volume_echo(entity, self.volume_recovery[entity], deadline)
+            if not playback.user_changed_volume:
+                self.volume_recovery.pop(entity, None)
+        finally:
+            self.pending_remutes.pop(entity, None)
+
+    async def finish_remute(self, playback: SpeechPlayback) -> None:
+        """Retain one bounded late continuation without prolonging the label."""
+        task = self.hass.async_create_background_task(
+            self.restore_remembered_mute(playback),
+            "remote-announcements-remute",
+            eager_start=False,
+        )
+        self.pending_remutes[playback.entity] = (playback, task)
+
+        @callback
+        def consume(done: asyncio.Task[None]) -> None:
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(consume)
+        done, _ = await asyncio.wait(
+            {task}, timeout=max(0, playback.recovery_deadline - time.monotonic())
+        )
+        if task in done:
+            if not task.cancelled():
+                task.result()
+            return
+        raise ProviderNotReadyError(
+            self.recovery_reason(playback.entity, "unconfirmed")
+        )
 
     async def restore_volume(
         self, playback: SpeechPlayback, *, report_status: bool = True
@@ -746,8 +954,11 @@ class Manager:
             playback.verify_volume or playback.entity == self.config["yandex_entity"]
         )
         try:
+            if playback.muted_before:
+                await self.finish_remute(playback)
+                return
             if verify_volume:
-                self.volume_recovery[playback.entity] = VolumeRestore(
+                expected = self.volume_recovery[playback.entity] = VolumeRestore(
                     playback.old_volume,
                     playback.applied,
                 )
@@ -762,39 +973,10 @@ class Manager:
                 if verify_volume:
                     self.volume_recovery.pop(playback.entity, None)
                 return
-            if playback.muted_before:
-                # The remembered volume command has been accepted. Send the
-                # original mute in order even if the level echo is still in
-                # flight. Only our two known levels permit that command.
-                def remute_allowed() -> bool:
-                    return self.volume_unchanged(
-                        playback, playback.old_volume
-                    ) or self.volume_unchanged(playback, playback.applied)
-
-                def claim_remute() -> bool:
-                    if not remute_allowed():
-                        return False
-                    # ServiceCalls runs this guard immediately before HA dispatch.
-                    # An expired deadline or a refused guard leaves only the
-                    # already-dispatched volume restore awaiting its echo.
-                    self.volume_recovery[playback.entity] = VolumeRestore(
-                        playback.old_volume,
-                        playback.applied,
-                        expect_mute=True,
-                    )
-                    return True
-
-                if remute_allowed():
-                    await self.call(
-                        "volume_mute",
-                        playback.entity,
-                        is_volume_muted=True,
-                        deadline=playback.recovery_deadline,
-                        guard=claim_remute,
-                    )
             if verify_volume:
                 await self.confirm_restored_volume(playback)
-                self.volume_recovery.pop(playback.entity, None)
+                if self.volume_recovery.get(playback.entity) is expected:
+                    self.volume_recovery.pop(playback.entity, None)
         except Exception as error:
             _LOGGER.exception(
                 "Announcement volume recovery failed", exc_info=exception_info(error)

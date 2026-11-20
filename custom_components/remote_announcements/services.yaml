@@ -18,7 +18,7 @@ reject:
         text:
 adopt_label_volume:
   name: Keep the current label volume
-  description: Honor a music-remote selection that matches the active speaker's observed label volume.
+  description: Keep an explicitly selected speaker level during a label or order its volume command after a pending restore.
   fields:
     entity_id:
       name: Speaker

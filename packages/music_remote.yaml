@@ -388,9 +388,8 @@ script:
               - stop: "AISIS принимает громкость от 0.1; нулевой уровень не является поддерживаемым mute."
                 error: true
           - if: >-
-              {{ route.owner == 'speaker'
-                 and state_attr('sensor.remote_announcements', 'supports_label_volume_adoption') == true
-                 and (state_attr(target_entity, 'volume_level') | float(-2) - volume_level | float) | abs < 0.000001 }}
+              {{ route.owner == 'speaker' and volume_level | float > 0
+                 and state_attr('sensor.remote_announcements', 'supports_label_volume_adoption') == true }}
             then:
               - action: remote_announcements.adopt_label_volume
                 data:
