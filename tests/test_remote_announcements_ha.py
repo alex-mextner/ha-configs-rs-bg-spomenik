@@ -679,6 +679,52 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_lost_digit_ack_cannot_allow_stale_restore_or_remute(self) -> None:
         await self.check_digit_before_old_echo(muted=True, lost_ack=True)
 
+    async def test_digit_after_distinct_manual_level_reaches_native(self) -> None:
+        attrs = await self.start_delayed_restore(muted=False)
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.7}
+        )
+        self.hass.services.async_register("media_player", "volume_set", self.media)
+        script = self.music_script("speaker", self.entity)
+        await script.async_run(
+            {"command": "volume_set", "volume_level": 0.9}, context=Context()
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.9
+        )
+        self.assertFalse(self.manager.volume_recovery)
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.8, 0.9],
+        )
+
+    async def test_digit_after_unadmitted_plain_restore_reaches_native(self) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=False,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        dispatch = self.manager.call
+
+        async def expire_restore(service: str, entity: str, **kwargs: object) -> bool:
+            if service == "volume_set" and kwargs.get("volume_level") == 0.8:
+                kwargs["deadline"] = 0
+            return await dispatch(service, entity, **kwargs)
+
+        with patch.object(self.manager, "call", expire_restore):
+            await self.manager.announce("tv")
+        self.assertEqual([n for n, _ in self.calls], ["volume_set", "send_command"])
+        script = self.music_script("speaker", self.entity)
+        await script.async_run(
+            {"command": "volume_set", "volume_level": 0.7}, context=Context()
+        )
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.4, 0.7]
+        )
+        self.assertFalse(self.manager.volume_recovery)
+
     async def test_digit_protects_new_choice_after_unmuted_restore(self) -> None:
         await self.check_digit_before_old_echo(muted=False)
 

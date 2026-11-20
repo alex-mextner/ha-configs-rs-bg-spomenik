@@ -758,15 +758,22 @@ class Manager:
             async with lock:
                 # Mute admission could precede the lock. Wait for that newer write.
                 expected = self.volume_recovery.get(entity, pending)
+                initial = self.hass.states.get(entity)
                 state = await self.wait_volume_echo(entity, expected, deadline)
-                if (
-                    not can_restore_volume(
-                        state.attributes.get("volume_level"),
-                        expected.original,
-                        muted=False,
-                    )
-                    or self.closing
+                if self.closing:
+                    message = "speaker_recovery_stopped"
+                    raise ProviderNotReadyError(message)
+                if not can_restore_volume(
+                    state.attributes.get("volume_level"), expected.original, muted=False
                 ):
+                    if self.volume_recovery.get(entity) is expected:
+                        self.volume_recovery.pop(entity)
+                    if remute:
+                        remute[0].user_changed_volume = True
+                        remute[1].cancel()
+                    if state is initial:
+                        # This newer digit follows a previous manual change.
+                        return False
                     message = "speaker_volume_changed_during_remote_selection"
                     raise ProviderNotReadyError(message)
                 if not self.hass.services.has_service("media_player", "volume_set"):
@@ -957,21 +964,22 @@ class Manager:
             if playback.muted_before:
                 await self.finish_remute(playback)
                 return
-            if verify_volume:
-                expected = self.volume_recovery[playback.entity] = VolumeRestore(
-                    playback.old_volume,
-                    playback.applied,
-                )
-            sent = await self.call(
+            expected = VolumeRestore(playback.old_volume, playback.applied)
+
+            def admit_restore() -> bool:
+                if not self.volume_unchanged(playback, playback.applied):
+                    return False
+                if verify_volume:
+                    self.volume_recovery[playback.entity] = expected
+                return True
+
+            if not await self.call(
                 "volume_set",
                 playback.entity,
                 volume_level=playback.old_volume,
                 deadline=playback.recovery_deadline,
-                guard=lambda: self.volume_unchanged(playback, playback.applied),
-            )
-            if not sent:
-                if verify_volume:
-                    self.volume_recovery.pop(playback.entity, None)
+                guard=admit_restore,
+            ):
                 return
             if verify_volume:
                 await self.confirm_restored_volume(playback)
