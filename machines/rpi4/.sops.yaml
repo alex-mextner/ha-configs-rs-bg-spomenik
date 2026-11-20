@@ -1,0 +1,12 @@
+# sops: who can decrypt secrets/*.yaml (run sops from machines/rpi4, where this file is found)
+keys:
+  # Admin: public half of the key in ~/.config/sops/age/keys.txt (the private one stays with the owner)
+  - &admin age17a82sdcw2rwalp5vkhz24n66kv6y53qcz0dk23japt0pp390as7sq32ze0
+  # Raspberry Pi: ssh-to-age of /etc/ssh/ssh_host_ed25519_key.pub
+  - &rpi4 age123r0wnnngu999nvvy6zgmwcza3smhe4393fkekvkmsj8nlkzc54sejnxv7
+creation_rules:
+  - path_regex: secrets/[^/]+\.yaml$
+    key_groups:
+      - age:
+          - *admin
+          - *rpi4

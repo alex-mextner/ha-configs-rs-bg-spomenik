@@ -7,6 +7,8 @@
 #   packages.aarch64-linux.odroid-n2plus-uboot       - mainline U-Boot (bl33) for odroid-n2_defconfig
 #   packages.x86_64-linux.odroid-n2plus-ubootFip     - ODROID-N2+ signed boot blob (u-boot.bin.sd.bin)
 #   packages.x86_64-linux.odroid-n2plus-sdImage      - same image, built from an x86_64 host with aarch64 emulation
+#   nixosConfigurations.rpi4                         - Raspberry Pi 4 wall-display kiosk
+#   packages.aarch64-linux.rpi4-sdImage              - Raspberry Pi 4 SD image (rpi4-kiosk.img.zst)
 #
 # The ODROID signed boot blob is produced by Amlogic's x86_64-only `aml_encrypt_g12b`, so building the SD image needs
 # an x86_64-linux builder in addition to aarch64-linux (native or binfmt). `nixos-rebuild` of the running system does
@@ -25,10 +27,20 @@
       url = "github:LibreELEC/amlogic-boot-fip/b54e3bbbcf5613d451230d359d264844eeda7166";
       flake = false;
     };
+    # Secrets of rpi4 (Wi-Fi, Home Assistant login), decrypted on the host with its SSH host key.
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { nixpkgs, amlogic-boot-fip, ... }:
+    {
+      nixpkgs,
+      amlogic-boot-fip,
+      sops-nix,
+      ...
+    }:
     let
       pkgsArm = nixpkgs.legacyPackages.aarch64-linux;
       pkgsX86 = nixpkgs.legacyPackages.x86_64-linux;
@@ -53,6 +65,13 @@
           }
         ];
       };
+
+      rpi4 = nixpkgs.lib.nixosSystem {
+        modules = [
+          sops-nix.nixosModules.sops
+          ./rpi4/configuration.nix
+        ];
+      };
     in
     {
       nixosConfigurations.macmini = nixpkgs.lib.nixosSystem {
@@ -65,9 +84,12 @@
 
       nixosConfigurations.odroid-n2plus = odroid;
 
+      nixosConfigurations.rpi4 = rpi4;
+
       packages.aarch64-linux = {
         odroid-n2plus-uboot = odroidUboot;
         odroid-n2plus-sdImage = odroid.config.system.build.sdImage;
+        rpi4-sdImage = rpi4.config.system.build.sdImage;
       };
 
       packages.x86_64-linux = {

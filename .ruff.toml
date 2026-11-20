@@ -42,6 +42,10 @@ ignore = [
 "scripts/host/kodi/plugin.video.hayoutube/default.py" = ["INP001"]
 # Actual Home Assistant scene cases use pytest-rewritten assertions.
 "tests/evening_scene/test_*.py" = ["S101"]
+# machines/rpi4 runs these by path (systemd unit, pre-commit hook), not as a package; the
+# checker's tests are a standalone unittest suite like the maintained ones above.
+"machines/rpi4/**/*.py" = ["INP001", "N999"]
+"machines/rpi4/scripts/test-check-secrets-encrypted.py" = ["PT009"]
 
 [lint.isort]
 # The HACS-managed namespace may be absent in a source-only checkout.
