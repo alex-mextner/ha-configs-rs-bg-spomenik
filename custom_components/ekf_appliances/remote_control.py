@@ -357,7 +357,15 @@ class RemoteController:
             if key in self._captured_routes:
                 return
             self.refresh(physical_at=received_at)
-            self._captured_routes[key] = self._prepare_press(button, received_at)
+            route = self.mode.press(button, received_at)
+            if button == "ok_hold" and press_id is not None:
+                # Both events from one physical OK share the first event's owner
+                # even if focus changes between separate receiver frames.
+                for previous, identity in reversed(self._captured_press_ids.items()):
+                    if previous[0] == "ok" and identity == press_id:
+                        route = self._captured_routes[previous]
+                        break
+            self._captured_routes[key] = self._prepare_press(button, route=route)
             self._captured_press_ids[key] = press_id or f"{key[0]}:{key[1]:.3f}"
             if len(self._captured_routes) > _CAPTURED_ROUTE_LIMIT:
                 expired = next(iter(self._captured_routes))
@@ -476,7 +484,7 @@ class RemoteController:
                     asyncio.get_running_loop().time() + _POWER_CAPTURE_TIMEOUT,
                 )
                 return {**route, "power_request_id": request_id}
-        elif button in _MEDIA_BUTTONS and not self.mode.audio:
+        elif button in _MEDIA_BUTTONS and not route.get("speaker_ok", self.mode.audio):
             reason = self._ordinary_command_blocked(route["pair"])
         elif button in {"netflix", "youtube", "apple_tv"} and not self.mode.audio:
             reason = self._pair_transition("tv")

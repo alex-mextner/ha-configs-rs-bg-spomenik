@@ -689,13 +689,20 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([key for key, _ in mapper.event_times], ["ok", "ok_hold"])
         self.assertEqual(len(set(mapper.event_press_ids)), 1)
+        reasons = []
+
+        async def reject(call) -> None:
+            reasons.append(call.data["reason"])
+
+        self.hass.services.async_register("remote_announcements", "reject", reject)
         for (button, at), identity in zip(
             mapper.event_times, mapper.event_press_ids, strict=True
         ):
             self.controller.physical_press(button, at, press_id=str(identity))
-        # Both frames arrived while the speaker owned the key. A later mode
-        # selection must not redirect either queued automation to the TV.
-        self.hass.states.async_set("input_boolean.audio_mode", "off")
+            if button == "ok":
+                # Change focus and power between frames, before either YAML run.
+                self.hass.states.async_set("input_boolean.audio_mode", "off")
+                self.hass.states.async_set(TV, "off")
         for button, at in mapper.event_times:
             current = State(
                 "event.ekf_universal_remote",
@@ -722,6 +729,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.appliance_calls(),
             [("script.music_remote_command", {"command": "play_pause"})],
         )
+        self.assertEqual(reasons, [])
 
     async def test_speaker_display_key_keeps_receive_time_power_rejection(self) -> None:
         for button in ("home", "netflix"):
