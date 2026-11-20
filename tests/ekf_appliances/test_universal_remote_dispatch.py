@@ -646,6 +646,61 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     self.hass.states.get("input_boolean.audio_mode").state, "on"
                 )
 
+    async def test_non_speaker_keys_leave_lights_independent_and_restore_display_routing(
+        self,
+    ) -> None:
+        for button in ("red", "green", "yellow", "home", "netflix", "youtube"):
+            with self.subTest(button=button):
+                self.reset()
+                self.hass.states.async_set(TV, "on")
+                await self.run_automation("universal_remote_dispatcher", button)
+                expected = self.appliance_calls()
+                self.assertTrue(expected)
+                self.reset(("tv", "on", "off"))
+                self.hass.states.async_set(TV, "on")
+                await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(self.appliance_calls(), expected)
+                focus = self.hass.states.get("input_boolean.audio_mode")
+                self.assertEqual(
+                    focus.state, "on" if button in ("red", "green", "yellow") else "off"
+                )
+                self.assertEqual(
+                    self.hass.states.get("input_text.audio_last_press_ms").state, "0"
+                )
+
+    async def test_speaker_display_key_keeps_receive_time_power_rejection(self) -> None:
+        for button in ("home", "netflix"):
+            with self.subTest(button=button):
+                self.reset(("tv", "on", "off"))
+                self.hass.states.async_set(TV, "on", {"power_sync_target": False})
+                now = time.time()
+                self.controller.physical_press(button, now)
+                self.hass.states.async_set(TV, "on")
+                route = await self.controller.async_prepare(
+                    {"button": button, "received_ms": now * 1000}
+                )
+                self.assertTrue(route.get("blocked"))
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+                self.assertEqual(self.appliance_calls(), [])
+
+    async def test_unsupported_speaker_key_rejects_without_renewing_focus(self) -> None:
+        self.reset(("tv", "on", "off"))
+        reasons = []
+
+        async def reject(call) -> None:
+            reasons.append(call.data["reason"])
+
+        self.hass.services.async_register("remote_announcements", "reject", reject)
+        await self.run_automation("universal_remote_dispatcher", "unmapped_test_key")
+        self.assertEqual(reasons, ["unsupported_speaker_button"])
+        self.assertEqual(
+            self.hass.states.get("input_text.audio_last_press_ms").state, "0"
+        )
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "on")
+        self.assertEqual(self.appliance_calls(), [])
+
     async def test_audio_digit_then_up_both_control_speaker_until_back(self) -> None:
         self.reset(("tv", "on", "off"))
         for button in ("6", "up", "back"):

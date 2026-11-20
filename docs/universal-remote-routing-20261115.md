@@ -39,7 +39,10 @@ no current item. In cloud-only mode it requests resume, since
 the missing track information cannot establish whether the queue is empty.
 Double Audio selects speaker controls. Playback, track and volume buttons keep
 the speaker selected for sixty seconds after the latest press. Audio, Back and
-Exit dismiss speaker mode immediately.
+Exit dismiss speaker mode immediately. Colour lights work without extending
+speaker focus. Display navigation and app buttons leave speaker focus and use
+their normal power guards on the same press. Apple TV in speaker mode enables
+Bluetooth on the speaker.
 
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable
@@ -114,9 +117,11 @@ Install the following five runtime files together from the reviewed merged commi
 - `custom_components/remote_announcements/__init__.py`
 
 Compare the five live files with their expected originals and retain verified
-backups. Use the installed `scripts/ha_safe_reload.sh` to validate the combined
-Python and YAML changes and restart once. Verify the target sensor, speaker and
-climate entities, then observe the healthy process for 60 seconds. If rollback
+backups. Run the installed `scripts/ha_safe_reload.sh` configuration check and
+restart once. After startup, verify the playback entities attribute on
+`sensor.universal_remote_target`, the `input_text.audio_pending_tap_ms` helper,
+and the speaker and climate entities. Observe the healthy process for 60 seconds.
+If rollback
 is required, restore these five verified originals together after checking for
 intervening changes. Preserve unrelated files and the production Git index.
 

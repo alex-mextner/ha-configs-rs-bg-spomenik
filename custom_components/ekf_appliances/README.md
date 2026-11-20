@@ -188,6 +188,8 @@ Only a fresh explicit HDMI OFF report newer than the OFF request and reload can
 clear it. Cached/restored OFF, unknown, unavailable, command failure and timeouts
 cannot clear it. Double AUDIO selects `speaker` for up to sixty seconds after
 the last speaker control. AUDIO, Back and Exit dismiss speaker mode immediately.
+Colour lights keep their independent route. Display navigation and app buttons
+return to the display and apply its normal guards on the same press.
 
 
 Queued INPUT wakes call `ekf_appliances.wake_if_current` on the canonical media

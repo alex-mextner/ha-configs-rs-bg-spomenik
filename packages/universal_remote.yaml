@@ -989,6 +989,13 @@ script:
             down: volume_down
             info: info
             apple_tv: bluetooth_enable
+      - if: >-
+          {{ button not in music_commands and button not in ['back', 'exit']
+             and not 0 <= digit_num <= 9 }}
+        then:
+          - action: ekf_appliances.remote_reject
+            data: { reason: unsupported_speaker_button }
+          - stop: Unsupported speaker control
       - action: input_text.set_value
         target: { entity_id: input_text.audio_last_press_ms }
         data:
@@ -1094,6 +1101,15 @@ automation:
               {{ button in ['prime','prime_hold','disney','disney_hold'] or (button | string).startswith('samsung_ir_') }}
             sequence:
               - stop: Handled by a dedicated appliance automation or direct physical remote
+          - conditions: "{{ button in ['red','green','yellow'] }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: light.rgbw_lamp_rgbw
+                data:
+                  rgbw_color: >-
+                    {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
+                  brightness: 255
           - conditions: >-
               {{ is_state('input_boolean.audio_mode', 'on') and button != 'audio' }}
             sequence:
@@ -1163,15 +1179,6 @@ automation:
                   action: >-
                     {{ {'play':'play_pause','prev':'previous','next':'next'}[button] }}
                   pair: "{{ route.pair }}"
-          - conditions: "{{ button in ['red','green','yellow'] }}"
-            sequence:
-              - action: light.turn_on
-                target:
-                  entity_id: light.rgbw_lamp_rgbw
-                data:
-                  rgbw_color: >-
-                    {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
-                  brightness: 255
           - conditions: "{{ button in ['netflix','youtube','apple_tv'] }}"
             sequence:
               - action: script.app_launch_on_chromecast

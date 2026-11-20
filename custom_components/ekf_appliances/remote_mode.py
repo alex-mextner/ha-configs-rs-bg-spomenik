@@ -15,6 +15,7 @@ INPUT_MIN_GAP = 0.150
 INPUT_MAX_GAP = 1.000
 CAPTURE_EPSILON = 0.000001  # UTC epoch float resolution; never a debounce window.
 INTERNAL_KEYS = {"input_timeout", "projector_timeout", "power_state", "wake_done"}
+DISPLAY_ONLY_KEYS = {"menu", "home", "guide", "ok_hold", "dash", "netflix", "youtube"}
 
 
 class RemoteRoute(TypedDict):
@@ -291,6 +292,10 @@ class RemoteMode:
             return self._input_press(at)
         if self.pending:
             self._single()
+        if self.audio and button in DISPLAY_ONLY_KEYS:
+            # The display owns this press, including guards at physical reception.
+            self.audio = False
+            self._publish()
         if self.expires_at:
             self.expires_at = max(self.expires_at, at + LEASE_SECONDS)
             self._arm_lease()
