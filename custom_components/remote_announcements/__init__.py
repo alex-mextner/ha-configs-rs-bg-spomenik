@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from aiohttp import web
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.tts import async_get_media_source_audio
 from homeassistant.components.tts.media_source import generate_media_source_id
@@ -129,6 +130,21 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
+    hass.services.async_register(
+        DOMAIN,
+        "adopt_label_volume",
+        manager.adopt_label_volume,
+        schema=vol.Schema(
+            {
+                vol.Required("entity_id"): cv.entity_id,
+                vol.Required("volume_level"): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=1)
+                ),
+            }
+        ),
+        supports_response=SupportsResponse.ONLY,
+    )
+
     async def start(_event: Event | None = None) -> None:
         """Seed the initial target before enabling change announcements."""
         manager.gate.changed(manager.current_target())
@@ -233,13 +249,18 @@ class Manager:
         )
         self.prepare_lock = asyncio.Lock()
         self.status = "starting"
-        self.public_status = {"voice": "Брачо", "physical_latency_verified": False}
+        self.public_status = {
+            "voice": "Брачо",
+            "physical_latency_verified": False,
+            "supports_label_volume_adoption": True,
+        }
         self.listeners = set()
         self.unsubscribe = None
         self.generation = 0
         self.closing = False
         self.services = ServiceCalls(hass)
         self.volume_recovery: dict[str, VolumeRestore] = {}
+        self.active_label: SpeechPlayback | None = None
 
     async def close(self) -> None:
         """Stop target listening while retaining unfinished provider ownership."""
@@ -660,6 +681,34 @@ class Manager:
             )
         )
 
+    async def adopt_label_volume(self, call: ServiceCall) -> dict[str, bool]:
+        """Transfer an observed temporary label level to the matching remote digit."""
+        entity = call.data["entity_id"]
+        if call.context.user_id:
+            user = await self.hass.auth.async_get_user(call.context.user_id)
+            if user is None or not user.permissions.check_entity(
+                entity, POLICY_CONTROL
+            ):
+                return {"adopted": False}
+        playback = self.active_label
+        state = self.hass.states.get(entity)
+        if (
+            state is None
+            or state.state in {"unknown", "unavailable"}
+            or state.attributes.get("restored")
+            or state.attributes.get("assumed_state")
+            or "volume_level" not in state.attributes
+            or not isinstance(state.attributes["volume_level"], (int, float))
+            or playback is None
+            or playback.entity != call.data["entity_id"]
+            or playback.applied != call.data["volume_level"]
+            or playback.entity in self.volume_recovery
+            or not self.volume_unchanged(playback, playback.applied)
+        ):
+            return {"adopted": False}
+        playback.user_changed_volume = True
+        return {"adopted": True}
+
     async def confirm_restored_volume(self, playback: SpeechPlayback) -> None:
         """Wait for actual readback within the shared recovery deadline."""
         confirmed = asyncio.Event()
@@ -861,6 +910,7 @@ class Manager:
         unsubscribe = async_track_state_change_event(
             self.hass, [entity], playback.observe
         )
+        self.active_label = playback
         try:
             await self.prepare_playback(playback)
             if not self.is_current(target, generation):
@@ -893,7 +943,10 @@ class Manager:
             await self.wait_for_completion(backend, playback, clip, target, dispatch_ms)
         finally:
             unsubscribe()
-            await self.restore_playback(playback)
+            try:
+                await self.restore_playback(playback)
+            finally:
+                self.active_label = None
 
 
 class ManifestView(HomeAssistantView):

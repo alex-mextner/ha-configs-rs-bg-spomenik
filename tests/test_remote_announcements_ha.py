@@ -15,16 +15,19 @@ from homeassistant.components.input_select import InputSelect
 from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import (
     EVENT_STATE_CHANGED,
+    Context,
     Event,
     HomeAssistant,
     State,
     SupportsResponse,
 )
 from homeassistant.core_config import async_process_ha_core_config
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame, restore_state
 from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.script import Script
 from homeassistant.setup import async_setup_component
 
 from custom_components import remote_announcements as integration
@@ -201,6 +204,102 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.queue.stop()
         await self.hass.async_stop(force=True)
         self.temp.cleanup()
+
+    async def check_absolute_digit_during_label(
+        self, *, playing: bool, owner: str = "speaker", other_output: bool = False
+    ) -> None:
+        desired = 0.6 if playing else 0.4
+        output = "media_player.other_output" if other_output else self.entity
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            supported_features=4,
+        )
+        self.hass.states.async_set(
+            self.entity, "playing" if playing else "paused", attrs
+        )
+        if other_output:
+            self.hass.states.async_set(
+                output, "idle", dict(attrs, volume_level=desired)
+            )
+        self.hass.states.async_set(
+            "sensor.remote_announcements", "ready", self.manager.public_status
+        )
+
+        async def route(_call) -> dict:
+            return {
+                "entity_id": output,
+                "speaker_entity_id": output,
+                "owner": owner,
+                "speaker_backend": "yandex",
+            }
+
+        async def no_op(_call) -> None:
+            pass
+
+        self.hass.services.async_register(
+            "script",
+            "music_remote_resolve",
+            route,
+            supports_response=SupportsResponse.ONLY,
+        )
+        self.hass.services.async_register("input_text", "set_value", no_op)
+        self.hass.services.async_register(
+            integration.DOMAIN,
+            "adopt_label_volume",
+            self.manager.adopt_label_volume,
+            supports_response=SupportsResponse.ONLY,
+        )
+        music = yaml.safe_load((ROOT / "packages/music_remote.yaml").read_text())
+        script = Script(
+            self.hass,
+            cv.SCRIPT_SCHEMA(music["script"]["music_remote_command"]["sequence"]),
+            "Music command fixture",
+            "script",
+        )
+
+        async def digit_during_native(call) -> dict[str, str]:
+            await script.async_run(
+                {"command": "volume_set", "volume_level": desired}, context=Context()
+            )
+            return await self.native(call)
+
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            digit_during_native,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+        await self.manager.announce("tv")
+        speaker_levels = [
+            d["volume_level"]
+            for n, d in self.calls
+            if n == "volume_set" and d["entity_id"] == self.entity
+        ]
+        self.assertEqual(speaker_levels, [desired, 0.8] if other_output else [desired])
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"],
+            0.8 if other_output else desired,
+        )
+        if other_output:
+            self.assertIn(
+                ("volume_set", {"entity_id": output, "volume_level": desired}),
+                self.calls,
+            )
+
+    async def test_digit_four_adopts_current_idle_label_level(self) -> None:
+        await self.check_absolute_digit_during_label(playing=False)
+
+    async def test_digit_six_adopts_current_playing_label_level(self) -> None:
+        await self.check_absolute_digit_during_label(playing=True)
+
+    async def test_digit_to_ma_output_preserves_speaker_restore(self) -> None:
+        await self.check_absolute_digit_during_label(
+            playing=False, owner="ma", other_output=True
+        )
+
+    async def test_digit_to_other_speaker_preserves_label_restore(self) -> None:
+        await self.check_absolute_digit_during_label(playing=False, other_output=True)
 
     async def test_local_native_clip_preserves_queue_and_restores_volume(self) -> None:
         await self.manager.announce("tv")
@@ -1044,6 +1143,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.manager.target_changed(
             Event(
                 EVENT_STATE_CHANGED,
+                Context,
                 {
                     "old_state": State(
                         CONFIG["target_entity"], "chromecast", {"initialized": False}

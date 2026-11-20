@@ -16,3 +16,21 @@ reject:
       description: Reuse this identity across nested guards to produce one cue per rejected press.
       selector:
         text:
+adopt_label_volume:
+  name: Keep the current label volume
+  description: Honor a music-remote selection that matches the active speaker's observed label volume.
+  fields:
+    entity_id:
+      name: Speaker
+      required: true
+      selector:
+        entity:
+          domain: media_player
+    volume_level:
+      name: Selected volume
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.1
