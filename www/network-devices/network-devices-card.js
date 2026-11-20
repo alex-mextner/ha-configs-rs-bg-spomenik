@@ -538,20 +538,20 @@ class NetworkDevicesCard extends HTMLElement {
   _pin(d) {
     const dry = !!this._config.dry_run;
     this._act(d.mac, () => this._service('network_pin', {mac: d.mac, ip: d.ip, name: this._leaseName(d), dry_run: dry}),
-      dry ? `Тест (dry-run): ${d.ip} был бы закреплён за ${d.mac}` : `${d.ip} закреплён за ${this._name(d)}`,
+      dry ? `Проверка: ${d.ip} был бы закреплён за ${d.mac}` : `${d.ip} закреплён за ${this._name(d)}`,
       dry ? null : {[d.mac]: {reserved_ip: d.ip}});
   }
   _unpin(d) {
     const dry = !!this._config.dry_run;
     this._act(d.mac, () => this._service('network_unpin', {mac: d.mac, dry_run: dry}),
-      dry ? `Тест (dry-run): резервирование ${d.mac} было бы снято` : `Резервирование для ${this._name(d)} снято`,
+      dry ? `Проверка: резервирование ${d.mac} было бы снято` : `Резервирование для ${this._name(d)} снято`,
       dry ? null : {[d.mac]: {reserved_ip: null}});
   }
   _pinReplace(d, old) {
     const dry = !!this._config.dry_run;
     this._act(d.mac, () => this._service('network_pin_replace',
       {replace_mac: old.mac, mac: d.mac, ip: d.ip, name: this._leaseName(d), dry_run: dry}),
-      dry ? `Тест (dry-run): ${old.reserved_ip} освободился бы, ${d.ip} закрепился бы за ${d.mac}`
+      dry ? `Проверка: ${old.reserved_ip} освободился бы, ${d.ip} закрепился бы за ${d.mac}`
         : `${d.ip} закреплён за ${this._name(d)} вместо ${this._name(old)}`,
       dry ? null : {[old.mac]: {reserved_ip: null}, [d.mac]: {reserved_ip: d.ip}});
   }
@@ -1145,7 +1145,7 @@ class NetworkDevicesCard extends HTMLElement {
           this._node('span', null, wb, 'wf').style.width = `${Math.max(4, Math.min(100, (w <= 1 ? w * 100 : w)))}%`;
         }
       }
-    } else if (d.category) this._node('div', 'router-cli не прислал доказательств.', body, 'muted');
+    } else if (d.category) this._node('div', 'Причина определения категории неизвестна.', body, 'muted');
     const alts = (Array.isArray(d.alternatives) ? d.alternatives : []).filter(a => a && a.category);
     if (alts.length) {
       this._node('div', `Другие варианты: ${alts.map(a => `${this._catLabel(a.category)}${this._conf(a) !== null ? ` ${this._conf(a)}%` : ''}`).join(', ')}.`, body, 'muted');
@@ -1162,7 +1162,7 @@ class NetworkDevicesCard extends HTMLElement {
     if (this._confirm.action === 'replace') { this._replacePanel(d, row, busy); return; }
     const p = this._node('div', null, row, 'panel');
     const pin = this._confirm.action === 'pin';
-    const dry = this._config.dry_run ? ' (тест, --dry-run)' : '';
+    const dry = this._config.dry_run ? ' (проверка)' : '';
     this._node('span', pin
       ? `Закрепить ${d.ip} за ${d.mac} (${this._name(d)})${d.reserved_ip ? `, заменив ${d.reserved_ip}` : ''}?${dry}`
       : `Снять резервирование ${d.reserved_ip} для ${d.mac}?${dry}`, p);
@@ -1193,7 +1193,7 @@ class NetworkDevicesCard extends HTMLElement {
     const all = this._reserved().filter(r => r.mac !== d.mac);
     const cap = this._confirm.capacity || all.length;
     const choice = all.find(r => r.mac === this._confirm.choice);
-    const dry = this._config.dry_run ? ' (тест, --dry-run)' : '';
+    const dry = this._config.dry_run ? ' (проверка)' : '';
     if (choice) {
       // Step 2: confirm the swap.
       this._node('div', `Снять резервирование ${choice.reserved_ip} с «${this._name(choice)}» (${choice.mac}) и закрепить ${d.ip} за «${this._name(d)}» (${d.mac})?${dry}`, p, 'grow');
