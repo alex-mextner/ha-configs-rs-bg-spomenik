@@ -223,11 +223,13 @@ class RemoteMapper:
         self.digit_at = 0.0
         self.cycle = 0
         self.event_times: list[tuple[str, float]] = []
+        self.event_press_ids: list[str] = []
 
     def feed(self, frames: list[IrFrame], received_at: float) -> list[str]:
         """Map accepted NEC frames to semantic events with physical timestamps."""
         result = []
         self.event_times = []
+        self.event_press_ids = []
         # Each decoded frame's relative position preserves bundled NEC repeats.
         base = received_at - (frames[-1]["offset"] if frames else 0)
         for frame in frames:
@@ -240,6 +242,12 @@ class RemoteMapper:
             if name is not None:
                 result.append(name)
                 self.event_times.append((name, now))
+                # Repeat/hold events retain the initial physical press. Full
+                # navigation frames and T9 taps keep their distinct identities.
+                started = self.initial if self.last is not None else now
+                self.event_press_ids.append(
+                    f"{name.removesuffix('_hold')}:{started:.9f}"
+                )
         return result
 
     def _repeat_event(self, now: float) -> str | None:

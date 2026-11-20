@@ -249,6 +249,7 @@ class RemoteServiceContextTests(unittest.IsolatedAsyncioTestCase):
             entry=SimpleNamespace(data={}),
             projector_power_state=False,
             projector_shutting_down=False,
+            shutdown=SimpleNamespace(requested_at=0.0),
             tv_power_pair=None,
             projector_power_pair=None,
             projector_power_entity_id="binary_sensor.projector_hdmi_connected",

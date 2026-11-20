@@ -67,12 +67,27 @@ remote_resolve:
 
 remote_power:
   name: Universal remote power
-  description: Dispatch power through the current guard and establish projector shutdown before yielding.
+  description: Reject repeated Power while either pair is starting or stopping; retain accepted lifecycle confirmation.
   fields:
     pair:
       selector: {select: {options: [tv, projector]}}
     native:
       selector: {boolean: {}}
+
+    power_request_id:
+      description: Admission token returned for a physical Power press by remote_prepare.
+      selector: {text: {}}
+
+remote_reject:
+  name: Signal a rejected remote command
+  description: Play the quiet error cue for one recognized logical press.
+  fields:
+    reason:
+      required: true
+      selector: {text: {}}
+    press_id:
+      description: Stable physical press identity. When omitted, uses the physical press that remote_prepare bound to the caller context, else the caller context ID.
+      selector: {text: {}}
 
 remote_dispatch:
   name: Dispatch guarded remote command

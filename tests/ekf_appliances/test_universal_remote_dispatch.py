@@ -39,6 +39,8 @@ from homeassistant.helpers.template import Template
 from homeassistant.util import dt as dt_util
 
 from custom_components import remote_announcements
+from custom_components.ekf_appliances.ir_decode import RemoteMapper
+from custom_components.remote_announcements.rejection import CueResult, RejectionQueue
 
 PACKAGE = Path(__file__).resolve().parents[2] / "packages/universal_remote.yaml"
 MODES = list(product(("tv", "projector"), ("off", "on"), ("off", "on")))
@@ -49,11 +51,12 @@ TV = "media_player.ue48j5500_ue48j5500"
 PROJECTOR = "media_player.projector"
 
 # Load the real controller and services without booting unrelated integrations.
-# Only the runtime's transport ContextVar is supplied by this test boundary.
+# The boundary models runtime observations and the native shutdown timebase.
 PREFIX = "universal_remote_dispatch_test"
 package = ModuleType(PREFIX)
 package.__path__ = [str(PACKAGE.parents[1] / "custom_components/ekf_appliances")]
 runtime_module = ModuleType(PREFIX + ".runtime")
+runtime_module.PROJECTOR_SHUTDOWN_TIMEOUT = 75.0
 runtime_module.UNIVERSAL_PROJECTOR_COMMAND = ContextVar(
     "test_remote_dispatch", default=False
 )
@@ -72,6 +75,7 @@ class RuntimeBoundary:
     def __init__(self, hass) -> None:
         self.hass = hass
         self.entry = SimpleNamespace(data={"tv_kodi_entity_id": "media_player.home"})
+        self.shutdown = SimpleNamespace(requested_at=0.0)
 
     @property
     def projector_power_state(self) -> Any:
@@ -81,7 +85,8 @@ class RuntimeBoundary:
         return state.state != "off"
 
     def note_projector_off_requested(self) -> None:
-        if self.projector_power_state is True:
+        if self.projector_power_state is True and not self.projector_shutting_down:
+            self.shutdown.requested_at = time.time()
             self.projector_shutting_down = True
             self.controller.refresh()
 
@@ -101,6 +106,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.automation_scripts = {}
         actions = {
             "ekf_appliances.wake_if_current",
+            "remote_announcements.reject",
             "rest_command.host_kodi_text_input",
             "media_player.turn_on",
             "media_player.turn_off",
@@ -180,7 +186,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 if stack := script_stack_cv.get():
                     script_stack_cv.set(stack.copy())
                 result = await script.async_run(dict(call.data), context=call.context)
-                return result.service_response if result else None
+                return (result.service_response if result else None) or {}
 
             self.hass.services.async_register(
                 "script", name, run_script, supports_response=SupportsResponse.OPTIONAL
@@ -284,7 +290,12 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.controller._clear_audio = False
         self.controller._captured_routes.clear()
+        self.controller._captured_press_ids.clear()
+        self.controller._context_press_ids.clear()
+        self.controller._settled_projector_shutdown_at = None
+        self.controller._pending_power = None
         self.runtime.projector_shutting_down = False
+        self.runtime.shutdown.requested_at = 0.0
         self.kodi_responses = {}
         self.calls.clear()
         for entity, state in (
@@ -378,7 +389,9 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         }
         override = variables.pop("trigger_override", None)
         if override is None:
-            self.controller.physical_press(button, now.timestamp())
+            self.controller.physical_press(
+                button, now.timestamp(), press_id=variables.pop("press_id", None)
+            )
         else:
             trigger = override
         sequence = []
@@ -722,7 +735,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     any(x[0] == "script.music_remote_command" for x in self.calls)
                 )
                 calls = self.appliance_calls()
-                if pair == "tv" and state == "off":
+                if state == "off":
                     self.assertEqual(calls, [])
                     continue
                 self.assertEqual(len(calls), 1)
@@ -793,6 +806,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.reset()
+        self.set_power_pair("on", "on")
         await self.scripts["remote_modes_prepare"].async_run(
             {"button": "input"}, context=Context()
         )
@@ -901,7 +915,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(pair=pair, native=native):
                 self.reset()
-                self.hass.states.async_set(TV, "on")
+                self.set_power_pair("on", "on")
                 await self.scripts["remote_nav"].async_run(
                     {"direction": direction, "pair": pair, "native": native},
                     context=Context(),
@@ -1180,6 +1194,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_t9_cycles_are_serialized_text_edit_not_back_navigation(self) -> None:
         self.reset()
+        self.set_power_pair("on", "off")
         await self.scripts["t9_send_char"].async_run(
             {"char": "b", "mode": "cycle", "pair": "tv", "native": False},
             context=Context(),
@@ -1352,9 +1367,10 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 await self.prepare_mode("input")
                 route = await self.prepare_mode("up")
                 await self.hass.async_block_till_done()
+                selected = "projector" if tv == "on" else "tv"
                 self.assertEqual(
                     route,
-                    {"pair": "projector" if tv == "on" else "tv", "native": False},
+                    {"pair": selected, "native": False, "blocked": f"{selected}_off"},
                 )
                 self.assertEqual(
                     self.appliance_calls(),
@@ -1381,6 +1397,385 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             await self.prepare_mode("power_state"), {"pair": "tv", "native": False}
         )
         self.assertEqual(self.appliance_calls(), [])
+
+    async def test_logical_press_rejections_cue_once_and_preserve_fast_taps(
+        self,
+    ) -> None:
+        self.reset()
+        played = []
+
+        async def play(item) -> CueResult:
+            played.append(item.press_id)
+            return CueResult("completed")
+
+        queue = RejectionQueue(play, report=lambda *_: None)
+
+        async def reject(call) -> None:
+            queue.submit(call.data["reason"], call.data.get("press_id"))
+
+        self.hass.services.async_register("remote_announcements", "reject", reject)
+        mapper = RemoteMapper()
+        now = time.time()
+        try:
+            for command, offset, repeat in [
+                (0xEA15, 0.0, False),
+                (0xEA15, 0.108, True),
+                (0xEA15, 0.216, True),
+                (0xE916, 1.0, False),
+                (0xE916, 1.220, True),
+                (0xE916, 1.300, False),
+            ]:
+                mapper.feed(
+                    [
+                        {
+                            "address": 0xBF00,
+                            "command": command,
+                            "repeat": repeat,
+                            "offset": 0,
+                        }
+                    ],
+                    now + offset,
+                )
+                for (button, captured_at), identity in zip(
+                    mapper.event_times, mapper.event_press_ids, strict=True
+                ):
+                    self.controller.physical_press(
+                        button, captured_at, press_id=f"Odroid:{identity}"
+                    )
+                    route = await self.controller.async_prepare(
+                        {"button": button, "received_ms": captured_at * 1000}
+                    )
+                    self.assertEqual(route["blocked"], "tv_off")
+            await queue.drain()
+            self.assertEqual(len(played), 3)
+            self.assertEqual(queue.counts["duplicates"], 2)
+            self.assertEqual(self.appliance_calls(), [])
+        finally:
+            await queue.stop(0.1)
+
+    async def test_nested_ac_t9_and_failed_dispatch_share_logical_press_feedback(
+        self,
+    ) -> None:
+        for scenario, button, reason in (
+            ("ac", "channel_up", "ac_setpoint_limit"),
+            ("text", "dash", "text_edit_requires_player"),
+            ("failure", "volume_up", "command_failed"),
+        ):
+            with self.subTest(scenario=scenario):
+                self.reset(("tv", "off", "on"), target=30)
+                self.hass.states.async_set(TV, "on")
+                played, feedback = [], []
+
+                async def play(item, played=played) -> CueResult:
+                    played.append(item.press_id)
+                    return CueResult("completed")
+
+                queue = RejectionQueue(play, report=lambda *_: None)
+
+                async def reject(call, feedback=feedback, queue=queue) -> None:
+                    feedback.append(dict(call.data))
+                    queue.submit(call.data["reason"], call.data.get("press_id"))
+
+                async def fail_volume(_call) -> None:
+                    message = "native volume unavailable"
+                    raise HomeAssistantError(message)
+
+                self.hass.services.async_register(
+                    "remote_announcements", "reject", reject
+                )
+                if scenario == "failure":
+                    self.hass.services.async_register(
+                        "remote", "send_command", fail_volume
+                    )
+                identities = [
+                    f"Odroid:{scenario}:held",
+                    f"Odroid:{scenario}:held",
+                    f"Odroid:{scenario}:tap",
+                ]
+                try:
+                    for identity in identities:
+                        operation = self.run_automation(
+                            "universal_remote_dispatcher", button, press_id=identity
+                        )
+                        if scenario == "failure":
+                            with self.assertRaisesRegex(
+                                HomeAssistantError, "native volume unavailable"
+                            ):
+                                await operation
+                        else:
+                            await operation
+                    await queue.drain()
+                    self.assertEqual(
+                        [item["reason"] for item in feedback], [reason] * 3
+                    )
+                    self.assertEqual(
+                        [item["press_id"] for item in feedback], identities
+                    )
+                    self.assertEqual(played, [identities[0], identities[2]])
+                    self.assertEqual(queue.counts["duplicates"], 1)
+                finally:
+                    await queue.stop(0.1)
+
+    async def test_disney_capture_is_shared_by_both_automations_without_cue_spam(
+        self,
+    ) -> None:
+        self.reset()
+        self.hass.states.async_set(PROJECTOR, "off", {"power_sync_target": True})
+        now = dt_util.utcnow()
+        current = State(
+            "event.ekf_universal_remote",
+            now.isoformat(),
+            {
+                "event_type": "disney_hold",
+                "last_received": now.timestamp(),
+                "receiver_enabled": True,
+            },
+        )
+        trigger = {
+            "platform": "state",
+            "entity_id": current.entity_id,
+            "from_state": State(current.entity_id, "previous", {"event_type": "info"}),
+            "to_state": current,
+        }
+        self.controller.physical_press(
+            "disney_hold", now.timestamp(), press_id="Odroid:disney"
+        )
+        played = []
+
+        async def play(item) -> CueResult:
+            played.append(item.press_id)
+            return CueResult("completed")
+
+        queue = RejectionQueue(play, report=lambda *_: None)
+
+        async def reject(call) -> None:
+            queue.submit(call.data["reason"], call.data.get("press_id"))
+
+        self.hass.services.async_register("remote_announcements", "reject", reject)
+        try:
+            for automation in (
+                "universal_remote_dispatcher",
+                "universal_remote_disney",
+            ):
+                await self.run_automation(
+                    automation, "disney_hold", trigger_override=trigger
+                )
+            await queue.drain()
+            self.assertEqual(played, ["Odroid:disney"])
+            self.assertEqual(queue.counts["duplicates"], 1)
+            self.assertEqual(self.appliance_calls(), [])
+        finally:
+            await queue.stop(0.1)
+
+    async def test_single_mode_source_decline_after_power_settles_cues_once(
+        self,
+    ) -> None:
+        for button in ("disney", "disney_hold"):
+            with self.subTest(button=button):
+                self.reset(("projector", "off", "off"))
+                completed, release = asyncio.Event(), asyncio.Event()
+
+                async def source_finishing(
+                    call, completed=completed, release=release
+                ) -> Any:
+                    if stack := script_stack_cv.get():
+                        script_stack_cv.set(stack.copy())
+                    result = await self.scripts["source_to_projector"].async_run(
+                        dict(call.data), context=call.context
+                    )
+                    self.hass.states.async_set(PROJECTOR, "on")
+                    completed.set()
+                    # Hold the named service response after its owned power
+                    # operation settled, while the outer single-mode script runs.
+                    await release.wait()
+                    return (result.service_response if result else None) or {}
+
+                self.hass.services.async_register(
+                    "script",
+                    "source_to_projector",
+                    source_finishing,
+                    supports_response=SupportsResponse.OPTIONAL,
+                )
+                first = asyncio.create_task(
+                    self.scripts["source_to_pc"].async_run({}, context=Context())
+                )
+                try:
+                    await asyncio.wait_for(completed.wait(), 0.5)
+                    self.assertEqual(self.controller._power_operations, {})
+                    before = list(self.appliance_calls())
+                    await self.run_automation("universal_remote_disney", button)
+                    cues = [
+                        data
+                        for name, data in self.calls
+                        if name == "remote_announcements.reject"
+                    ]
+                    self.assertEqual(
+                        [data["reason"] for data in cues], ["projector_source_rejected"]
+                    )
+                    self.assertEqual(self.appliance_calls(), before)
+                finally:
+                    release.set()
+                    await first
+
+    async def test_reported_disney_source_rejection_is_not_cued_twice(self) -> None:
+        async def rejected_source(call) -> Any:
+            return await self.hass.services.async_call(
+                "ekf_appliances",
+                "remote_reject",
+                {"reason": "projector_power_transition"},
+                blocking=True,
+                return_response=True,
+                context=call.context,
+            )
+
+        self.hass.services.async_register(
+            "script",
+            "source_to_pc",
+            rejected_source,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+        for button in ("disney", "disney_hold"):
+            with self.subTest(button=button):
+                self.reset()
+                await self.run_automation("universal_remote_disney", button)
+                cues = [
+                    data
+                    for name, data in self.calls
+                    if name == "remote_announcements.reject"
+                ]
+                self.assertEqual(
+                    [data["reason"] for data in cues], ["projector_power_transition"]
+                )
+                self.assertEqual(self.appliance_calls(), [])
+
+    async def test_tokenless_compatibility_prepare_then_power_still_dispatches(
+        self,
+    ) -> None:
+        self.reset()
+        prepared = await self.scripts["remote_modes_prepare"].async_run(
+            {"button": "power"}, context=Context()
+        )
+        route = prepared.service_response
+        self.assertNotIn("power_request_id", route)
+        result = await self.hass.services.async_call(
+            "ekf_appliances",
+            "remote_power",
+            route,
+            blocking=True,
+            return_response=True,
+            context=Context(),
+        )
+        self.assertEqual(result, {"sent": True})
+        self.assertEqual(
+            self.appliance_calls(),
+            [("media_player.toggle", {"entity_id": TV})],
+        )
+
+    async def test_voice_search_rejects_off_unknown_and_transitioning_pairs_once(
+        self,
+    ) -> None:
+        for pair, state, target in product(
+            ("tv", "projector"),
+            ("off", "unknown", "on"),
+            (None, True, False),
+        ):
+            if state == "on" and target is None:
+                continue
+            with self.subTest(pair=pair, state=state, target=target):
+                self.reset((pair, "off", "off"))
+                self.hass.states.async_set(
+                    TV if pair == "tv" else PROJECTOR,
+                    state,
+                    {"power_sync_target": target},
+                )
+                result = await self.scripts["tv_search"].async_run(
+                    {"pair": pair, "query": "Interstellar"}, context=Context()
+                )
+                self.assertIn("blocked", result.service_response)
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(
+                    len(
+                        [
+                            call
+                            for call in self.calls
+                            if call[0] == "remote_announcements.reject"
+                        ]
+                    ),
+                    1,
+                )
+
+    async def test_voice_search_stops_if_power_changes_after_opening_search(
+        self,
+    ) -> None:
+        self.reset()
+        self.set_power_pair("on", "off")
+
+        async def turn_off_after_search(call) -> None:
+            await self.capture(call)
+            self.hass.states.async_set(TV, "on", {"power_sync_target": False})
+
+        self.hass.services.async_register(
+            "remote", "send_command", turn_off_after_search
+        )
+        result = await self.scripts["tv_search"].async_run(
+            {"query": "Interstellar"}, context=Context()
+        )
+        self.assertEqual(result.service_response["blocked"], "tv_power_transition")
+        self.assertEqual(
+            [data["command"] for _, data in self.appliance_calls()],
+            ["KEYCODE_SEARCH"],
+        )
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in self.calls
+                    if call[0] == "remote_announcements.reject"
+                ]
+            ),
+            1,
+        )
+
+    async def test_voice_search_preserves_the_three_native_keys_when_tv_is_ready(
+        self,
+    ) -> None:
+        self.reset()
+        self.set_power_pair("on", "off")
+        await self.scripts["tv_search"].async_run(
+            {"query": "Interstellar"}, context=Context()
+        )
+        self.assertEqual(
+            [data["command"] for _, data in self.appliance_calls()],
+            ["KEYCODE_SEARCH", "text:Interstellar", "KEYCODE_ENTER"],
+        )
+        self.assertFalse(
+            any(call[0] == "remote_announcements.reject" for call in self.calls)
+        )
+
+    async def test_native_shutdown_window_blocks_physical_power_until_aged(
+        self,
+    ) -> None:
+        self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
+        self.runtime.note_projector_off_requested()
+        await self.run_automation("universal_remote_dispatcher", "power")
+        self.assertEqual(self.appliance_calls(), [])
+        cues = [call for call in self.calls if call[0] == "remote_announcements.reject"]
+        self.assertEqual(len(cues), 1, cues)
+        self.assertEqual(cues[0][1]["reason"], "projector_shutting_down")
+
+        # Only the recent native window expires. The persisted projector latch
+        # still guards its own target, while fallback TV is available again.
+        self.runtime.shutdown.requested_at = (
+            time.time() - runtime_module.PROJECTOR_SHUTDOWN_TIMEOUT - 1
+        )
+        self.calls.clear()
+        await self.run_automation("universal_remote_dispatcher", "power")
+        self.assertEqual(
+            self.appliance_calls(),
+            [("media_player.toggle", {"entity_id": TV})],
+        )
+        self.assertTrue(self.runtime.projector_shutting_down)
 
     async def test_shutdown_blocks_disney_and_legacy_projector_entry_paths(
         self,
@@ -1412,6 +1807,44 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 await self.run_automation("universal_remote_dispatcher", button)
                 self.assertEqual(self.appliance_calls(), [])
                 self.assertEqual(self.controller.mode.target, "chromecast")
+
+    async def test_native_kodi_unsupported_response_keeps_error_and_one_cue(
+        self,
+    ) -> None:
+        self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
+        # Installed HA 2026.9.3 registers Kodi call_method with the default
+        # SupportsResponse.NONE. Its event result is not a service response.
+        self.hass.services.async_register("kodi", "call_method", self.capture)
+        with self.assertRaises(HomeAssistantError) as raised:
+            await self.scripts["kodi_play_next_episode"].async_run(
+                {}, context=Context()
+            )
+        self.assertIn("response", str(raised.exception).lower())
+        self.assertEqual(self.appliance_calls(), [])
+        cues = [call for call in self.calls if call[0] == "remote_announcements.reject"]
+        self.assertEqual(len(cues), 1, cues)
+        self.assertEqual(cues[0][1]["reason"], "command_failed")
+
+    async def test_captured_projector_text_edit_never_crosses_to_on_tv_fallback(
+        self,
+    ) -> None:
+        for name in ("t9_backspace", "t9_commit"):
+            with self.subTest(script=name):
+                self.reset(("projector", "off", "off"))
+                self.set_power_pair("on", "on")
+                self.runtime.note_projector_off_requested()
+                await self.scripts[name].async_run(
+                    {"pair": "projector", "native": False}, context=Context()
+                )
+                self.assertEqual(self.appliance_calls(), [])
+                cues = [
+                    call
+                    for call in self.calls
+                    if call[0] == "remote_announcements.reject"
+                ]
+                self.assertEqual(len(cues), 1, cues)
+                self.assertEqual(cues[0][1]["reason"], "projector_shutting_down")
 
     async def test_shutdown_between_resolve_and_dispatch_drops_the_actual_command(
         self,
@@ -1498,6 +1931,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
         self.kodi_responses = {
             "VideoLibrary.GetInProgressTVShows": {"tvshows": [{"tvshowid": 3}]},
             "VideoLibrary.GetEpisodes": {
@@ -1518,6 +1952,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_kodi_text_bridge_response_round_trips_to_the_caller(self) -> None:
         self.reset(("projector", "off", "off"))
+        self.set_power_pair("off", "on")
         result = await self.scripts["t9_kodi_text"].async_run(
             {"mode": "cycle", "char": "b"}, context=Context()
         )
@@ -1680,6 +2115,118 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("script.music_remote_command", {"command": "play_pause"}),
             ],
+        )
+
+    async def test_repeated_power_is_rejected_during_each_display_transition(
+        self,
+    ) -> None:
+        for pair, initial in product(("tv", "projector"), ("off", "on")):
+            with self.subTest(pair=pair, initial=initial):
+                self.reset((pair, "off", "off"))
+                self.set_power_pair(
+                    initial if pair == "tv" else "off",
+                    initial if pair == "projector" else "off",
+                )
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def pending_power(call, entered=entered, release=release) -> None:
+                    self.calls.append((f"media_player.{call.service}", dict(call.data)))
+                    entered.set()
+                    await release.wait()
+
+                service = (
+                    "toggle"
+                    if pair == "tv"
+                    else "turn_off"
+                    if initial == "on"
+                    else "turn_on"
+                )
+                self.hass.services.async_register(
+                    "media_player", service, pending_power
+                )
+                first = asyncio.create_task(
+                    self.run_automation("universal_remote_dispatcher", "power")
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), 0.5)
+                    await self.run_automation("universal_remote_dispatcher", "power")
+                    self.assertEqual(len(self.appliance_calls()), 1)
+                    cues = [
+                        call
+                        for call in self.calls
+                        if call[0] == "remote_announcements.reject"
+                    ]
+                    self.assertEqual(len(cues), 1)
+                    self.assertFalse(first.done())
+                    if pair == "projector" and initial == "on":
+                        self.assertEqual(self.controller.mode.target, "chromecast")
+                        self.assertEqual(self.hass.states.get(TV).state, "off")
+                finally:
+                    release.set()
+                    await first
+                    self.hass.services.async_register(
+                        "media_player", service, self.capture
+                    )
+
+    async def test_off_display_text_is_rejected_once_before_native_dispatch(
+        self,
+    ) -> None:
+        for pair in ("tv", "projector"):
+            with self.subTest(pair=pair):
+                self.reset((pair, "off", "off"))
+                await self.scripts["t9_send_char"].async_run(
+                    {
+                        "pair": pair,
+                        "native": False,
+                        "mode": "add",
+                        "char": "a",
+                        "digit": "2",
+                    },
+                    context=Context(),
+                )
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(
+                    len(
+                        [
+                            call
+                            for call in self.calls
+                            if call[0] == "remote_announcements.reject"
+                        ]
+                    ),
+                    1,
+                )
+
+    async def test_rejected_kodi_library_request_does_not_fall_back_to_play(
+        self,
+    ) -> None:
+        self.reset(("projector", "off", "off"))
+        await self.scripts["kodi_play_next_episode"].async_run({}, context=Context())
+        self.assertEqual(self.appliance_calls(), [])
+        cues = [call for call in self.calls if call[0] == "remote_announcements.reject"]
+        self.assertEqual(len(cues), 1, cues)
+
+    async def test_disney_hold_stops_after_one_busy_source_rejection(self) -> None:
+        self.reset(("projector", "off", "off"))
+        self.hass.states.async_set(
+            PROJECTOR,
+            "off",
+            {
+                "power_intent_revision": "projector:1",
+                "last_power_intent": True,
+                "power_sync_target": True,
+            },
+        )
+        await self.run_automation("universal_remote_disney", "disney_hold")
+        self.assertEqual(self.appliance_calls(), [])
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in self.calls
+                    if call[0] == "remote_announcements.reject"
+                ]
+            ),
+            1,
         )
 
     async def test_pending_power_does_not_block_smart_ac_or_input(self) -> None:

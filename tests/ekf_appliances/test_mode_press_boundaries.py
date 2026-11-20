@@ -82,6 +82,34 @@ class ModePressBoundaries(unittest.TestCase):
                     mapper.feed([frame(command)], 10 + 11 * 0.110 + 0.150), [name]
                 )
 
+    def test_feedback_identity_follows_logical_presses_without_merging_fast_taps(
+        self,
+    ) -> None:
+        mapper = decoder.RemoteMapper()
+        events = mapper.feed(
+            [
+                frame(0xEA15),
+                frame(repeat=True, offset=0.110),
+                frame(repeat=True, offset=0.220),
+                frame(0xE718, offset=0.370),
+                frame(0xE718, offset=0.450),
+                frame(repeat=True, offset=0.670),
+                frame(0xFD02, offset=0.800),
+                frame(0xFD02, offset=0.880),
+            ],
+            10.880,
+        )
+        self.assertEqual(
+            events,
+            ["ok", "ok_hold", "right", "right", "right", "t9_add_2_a", "t9_cycle_2_b"],
+        )
+        identities = mapper.event_press_ids
+        self.assertEqual(identities[0], identities[1])
+        self.assertNotEqual(identities[2], identities[3])
+        self.assertEqual(identities[3], identities[4])
+        self.assertNotEqual(identities[5], identities[6])
+        self.assertEqual(len(set(identities)), 5)
+
     def test_fast_navigation_and_t9_keep_existing_behavior(self) -> None:
         mapper = decoder.RemoteMapper()
         self.assertEqual(mapper.feed([frame(0xE718)], 10), ["right"])

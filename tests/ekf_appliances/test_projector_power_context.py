@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from homeassistant.auth import auth_manager_from_config
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service import entity_service_call
@@ -172,17 +173,17 @@ class ProjectorPowerContextTests(unittest.IsolatedAsyncioTestCase):
         )
         self.pair.observe()
 
-    def start_call(self, service, data) -> asyncio.Task:
+    def start_call(self, service, data, *, domain=DOMAIN) -> asyncio.Task:
         async def call() -> dict:
             token = _TRACE.set(self.trace)
             try:
                 return await self.hass.services.async_call(
-                    DOMAIN,
+                    domain,
                     service,
                     data,
                     context=self.context,
                     blocking=True,
-                    return_response=True,
+                    return_response=domain == DOMAIN,
                 )
             finally:
                 _TRACE.reset(token)
@@ -202,21 +203,23 @@ class ProjectorPowerContextTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_off_reuses_remote_on_worker_without_losing_confirmation_frames(
+    async def test_repeat_power_does_not_cancel_on_then_settled_off_keeps_confirmation_frames(
         self,
     ) -> None:
         on = self.start_on()
         await asyncio.wait_for(self.on_started.wait(), 2)
-        worker = self.pair._worker
-        off = self.start_call("remote_power", {"pair": "projector"})
-        await asyncio.wait_for(self.shutdown_seen.wait(), 2)
-        self.assertTrue(self.runtime.projector_shutting_down)
-        self.assertIs(self.pair._worker, worker)
-        self.on_finish_release.set()
-        self.assertEqual(await asyncio.wait_for(off, 2), {"sent": True})
+        worker, revision = self.pair._worker, self.pair.intent_revision
+        repeat = await self.start_call("remote_power", {"pair": "projector"})
         self.assertEqual(
-            await on, {"sent": False, "blocked": "projector_shutting_down"}
+            repeat, {"sent": False, "blocked": "projector_power_transition"}
         )
+        self.assertFalse(self.runtime.projector_shutting_down)
+        self.assertIs(self.pair._worker, worker)
+        self.assertEqual(self.pair.intent_revision, revision)
+        self.on_finish_release.set()
+        self.assertEqual(await asyncio.wait_for(on, 2), {"sent": True})
+        off = self.start_call("remote_power", {"pair": "projector"})
+        self.assertEqual(await asyncio.wait_for(off, 2), {"sent": True})
         power = encode_pulses(projector_pulses("power"))
         self.assertEqual([entry[0] for entry in self.writes], [power] * 3)
         self.assertEqual([entry[1] for entry in self.writes], [True, False, False])
@@ -226,7 +229,7 @@ class ProjectorPowerContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(trace, self.trace)
         self.assertFalse(UNIVERSAL_PROJECTOR_COMMAND.get())
 
-    async def test_queued_on_keeps_its_final_guard_while_accepted_off_completes(
+    async def test_queued_remote_on_keeps_final_guard_while_native_off_completes(
         self,
     ) -> None:
         self.on_send_release.clear()
@@ -234,14 +237,16 @@ class ProjectorPowerContextTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.on_entered.wait(), 2)
         self.hass.states.async_set(self.runtime.projector_power_entity_id, "on")
         self.pair.observe()
-        off = self.start_call("remote_power", {"pair": "projector"})
+        # A genuine native/OEM request remains independent of remote admission.
+        off = self.start_call(
+            "turn_off", {"entity_id": PROJECTOR}, domain="media_player"
+        )
         await asyncio.wait_for(self.shutdown_seen.wait(), 2)
         self.on_send_release.set()
         self.on_finish_release.set()
-        self.assertEqual(await asyncio.wait_for(off, 2), {"sent": True})
-        self.assertEqual(
-            await on, {"sent": False, "blocked": "projector_shutting_down"}
-        )
+        self.assertIsNone(await asyncio.wait_for(off, 2))
+        with self.assertRaisesRegex(HomeAssistantError, "superseded"):
+            await on
         self.assertEqual(len(self.writes), 2)
         self.assertTrue(all(not entry[1] for entry in self.writes))
         self.assertEqual(self.lifecycle_contexts, [(False, self.context, self.trace)])

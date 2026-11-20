@@ -314,6 +314,22 @@ class TestReceiver(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.receiver.validated)
         self.assertEqual(self.device.commands, ["study_exit", "study"])
 
+    async def test_bundled_ok_hold_carries_one_logical_feedback_identity(self) -> None:
+        await self.receiver.async_set_enabled(enabled=True)
+        await asyncio.sleep(0.01)
+        captures = []
+        self.receiver.add_callback(
+            lambda name: (
+                captures.append((name, self.receiver.last_press_id)) if name else None
+            )
+        )
+        self.receiver.on_receive(
+            {"202": code(command=0xEA15, repeats=4)}, full_poll=False
+        )
+        self.assertEqual([name for name, _ in captures], ["ok", "ok_hold"])
+        self.assertIsNotNone(captures[0][1])
+        self.assertEqual(captures[0][1], captures[1][1])
+
     async def test_first_known_press_validates_and_saves_existing_mapping(self) -> None:
         await self.receiver.async_set_enabled(enabled=True)
         await asyncio.sleep(0.01)

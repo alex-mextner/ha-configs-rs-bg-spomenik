@@ -82,6 +82,8 @@ script:
           {{ states('climate.kondei_1') in ['unknown', 'unavailable']
              or not is_number(current_target) }}
         then:
+          - action: ekf_appliances.remote_reject
+            data: { reason: ac_setpoint_unavailable }
           - stop: "AC setpoint is unavailable; temperature command was not sent"
             error: true
       - variables:
@@ -95,6 +97,9 @@ script:
           - action: climate.set_temperature
             target: { entity_id: climate.kondei_1 }
             data: { temperature: "{{ next_target }}" }
+        else:
+          - action: ekf_appliances.remote_reject
+            data: { reason: ac_setpoint_limit }
 
   # One Amazon press sends one complete state. The outdoor weather temperature
   # selects heat below 24 C and cool at/above 24 C; indoor readings are not a fallback.
@@ -116,6 +121,8 @@ script:
                     data:
                       level: error
                       message: "Remote AC: weather.forecast_home_assistant has no valid outdoor temperature in Celsius; no power command sent"
+                  - action: ekf_appliances.remote_reject
+                    data: { reason: ac_weather_unavailable }
                   - stop: "Outdoor temperature from weather.forecast_home_assistant is unavailable in Celsius; AC remains off"
                     error: true
               - action: climate.set_temperature
@@ -125,6 +132,8 @@ script:
                   hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
           - conditions: "{{ states('climate.kondei_1') in ['unknown', 'unavailable'] }}"
             sequence:
+              - action: ekf_appliances.remote_reject
+                data: { reason: ac_state_unavailable }
               - stop: "AC state is unavailable; power command was not sent"
                 error: true
         default:
@@ -238,8 +247,8 @@ script:
           {{ request }}
         response_variable: route
       - variables:
-          selected_pair: "{{ route.pair }}"
-          selected_native: "{{ route.native }}"
+          selected_pair: "{{ pair | default(route.pair) }}"
+          selected_native: "{{ native | default(route.native) }}"
           kodi_map:
             up: Input.Up
             down: Input.Down
@@ -290,6 +299,8 @@ script:
             sequence:
               - if: "{{ direction not in projector_map }}"
                 then:
+                  - action: ekf_appliances.remote_reject
+                    data: { reason: unsupported_projector_key }
                   - stop: This projector has no verified command for that key
                     error: true
               - action: ekf_appliances.remote_dispatch
@@ -365,8 +376,8 @@ script:
           {{ request }}
         response_variable: route
       - variables:
-          selected_pair: "{{ route.pair }}"
-          selected_native: "{{ route.native }}"
+          selected_pair: "{{ pair | default(route.pair) }}"
+          selected_native: "{{ native | default(route.native) }}"
           projector_buttons:
             volume_up: button.projector_vol_up
             volume_down: button.projector_vol_down
@@ -401,6 +412,8 @@ script:
             sequence:
               - if: "{{ state_attr(target_player, 'is_volume_muted') is not boolean }}"
                 then:
+                  - action: ekf_appliances.remote_reject
+                    data: { reason: unknown_mute_state }
                   - stop: Player mute state is unknown; no toggle was guessed
                     error: true
               - action: ekf_appliances.remote_dispatch
@@ -440,7 +453,7 @@ script:
           {{ request }}
         response_variable: route
       - variables:
-          selected_pair: "{{ route.pair }}"
+          selected_pair: "{{ pair | default(route.pair) }}"
           media_actions:
             play_pause: media_play_pause
             previous: media_previous_track
@@ -475,6 +488,9 @@ script:
               order: descending
               method: lastplayed
         response_variable: shows_resp
+      - if: "{{ shows_resp.blocked | default('') != '' }}"
+        then:
+          - stop: Library request was rejected before dispatch
       - choose:
           - conditions: "{{ (shows_resp.tvshows | default([])) | length > 0 }}"
             sequence:
@@ -501,6 +517,9 @@ script:
                       order: ascending
                       method: episode
                 response_variable: eps_resp
+              - if: "{{ eps_resp.blocked | default('') != '' }}"
+                then:
+                  - stop: Episode request was rejected before dispatch
               - variables:
                   # First episode with playcount == 0 or a non-zero resume position.
                   next_ep: >-
@@ -539,13 +558,24 @@ script:
     sequence:
       - action: script.remote_mode_select_pair
         data: { pair: tv }
-      - action: media_player.turn_on
-        target: { entity_id: media_player.ue48j5500_ue48j5500 }
+      - action: ekf_appliances.remote_dispatch
+        data:
+          domain: media_player
+          service: turn_on
+          pair: tv
+          service_data:
+            entity_id: [media_player.ue48j5500_ue48j5500]
+        response_variable: result
+      - stop: Return the source power admission
+        response_variable: result
   source_to_pc:
     alias: Source → Kodi and projector
     mode: single
     sequence:
       - action: script.source_to_projector
+        response_variable: result
+      - stop: Return the named projector source admission
+        response_variable: result
   source_to_projector:
     alias: Source → projector
     mode: single
@@ -560,6 +590,9 @@ script:
           service_data:
             entity_id:
             - media_player.projector
+        response_variable: result
+      - stop: Return the source power admission
+        response_variable: result
   app_launch_on_chromecast:
     alias: Launch app on Chromecast
     mode: single
@@ -568,14 +601,21 @@ script:
         description: Android package or deep-link URL
     sequence:
       - action: script.source_to_chromecast
-      - action: remote.turn_on
-        target: { entity_id: remote.televizor }
-        # Google Play no longer reliably launches these package IDs.
-        # Preserve every other activity, including direct content URLs.
+        response_variable: source_result
+      - if: "{{ source_result.sent | default(false) is not sameas true }}"
+        then:
+          - stop: Source power request was rejected
+      - action: ekf_appliances.remote_dispatch
         data:
-          activity: >-
-            {{ {'com.netflix.ninja': 'netflix://',
-                'com.google.android.youtube.tv': 'https://www.youtube.com'}.get(activity, activity) }}
+          domain: remote
+          service: turn_on
+          pair: tv
+          service_data:
+            entity_id: [remote.televizor]
+            # Preserve direct content URLs and the supported app links.
+            activity: >-
+              {{ {'com.netflix.ninja': 'netflix://',
+                  'com.google.android.youtube.tv': 'https://www.youtube.com'}.get(activity, activity) }}
   guide_toggle:
     alias: Guide (compatibility)
     mode: single
@@ -601,8 +641,8 @@ script:
       - action: script.t9_send_char
         data:
           mode: commit
-          pair: "{{ route.pair }}"
-          native: "{{ route.native }}"
+          pair: "{{ pair | default(route.pair) }}"
+          native: "{{ native | default(route.native) }}"
 
   # Enter the native FIFO immediately so queued keys capture its current app
   # generation. Kodi HTTP operations use their own shared queue below.
@@ -624,19 +664,25 @@ script:
           {{ request }}
         response_variable: route
       - variables:
-          source: "{{ 'projector' if route.pair == 'projector' else 'chromecast' }}"
+          source: "{{ 'projector' if (pair | default(route.pair)) == 'projector' else 'chromecast' }}"
       - if: "{{ mode not in ['add', 'cycle', 'backspace', 'commit'] }}"
         then:
+          - action: ekf_appliances.remote_reject
+            data: { reason: unsupported_text_operation }
           - stop: Unsupported T9 text operation
             error: true
       - choose:
-          - conditions: "{{ route.native }}"
+          - conditions: "{{ native | default(route.native) }}"
             sequence:
               - if: "{{ mode in ['backspace', 'commit'] }}"
                 then:
+                  - action: ekf_appliances.remote_reject
+                    data: { reason: text_edit_requires_player }
                   - stop: Text editing is available only in the player target
               - if: "{{ source == 'projector' }}"
                 then:
+                  - action: ekf_appliances.remote_reject
+                    data: { reason: unsupported_projector_digit }
                   - stop: This projector has no verified numeric keypad
                     error: true
               - action: ekf_appliances.remote_dispatch
@@ -652,14 +698,22 @@ script:
             sequence:
               # One ordered relative input batch per physical operation. Keeping text
               # in a dictionary preserves literal space and the string digit "1".
-              - action: androidtv_remote.send_text
-                target: { entity_id: remote.televizor }
-                data: >-
-                  {{ {'operation': {'add': 'insert', 'cycle': 'replace_previous',
-                                    'backspace': 'delete_backward', 'commit': 'submit'}[mode],
-                      'text': (' ' if (char | default('') | string) == 'space'
-                               else (char | default('') | string))} }}
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: androidtv_remote
+                  service: send_text
+                  pair: tv
+                  return_response: true
+                  service_data: >-
+                    {{ {'entity_id': ['remote.televizor'],
+                        'operation': {'add': 'insert', 'cycle': 'replace_previous',
+                                      'backspace': 'delete_backward', 'commit': 'submit'}[mode],
+                        'text': (' ' if (char | default('') | string) == 'space'
+                                 else (char | default('') | string))} }}
                 response_variable: chromecast_text_result
+              - if: "{{ chromecast_text_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Text command was rejected before native dispatch
               - if: >-
                   {% set response = chromecast_text_result | default({}) %}
                   {% set body = response.get('remote.televizor', {})
@@ -667,6 +721,8 @@ script:
                   {{ body is not mapping or body.get('sent') is not sameas true
                      or body.get('verified') is not sameas false }}
                 then:
+                  - action: ekf_appliances.remote_reject
+                    data: { reason: native_text_rejected }
                   - stop: Chromecast physical text input was not sent by the native integration
                     error: true
           - conditions: "{{ source in ['pc', 'projector'] }}"
@@ -678,6 +734,9 @@ script:
                   mode: "{{ mode }}"
                   char: "{{ char | default('') | string }}"
                 response_variable: kodi_text_result
+              - if: "{{ kodi_text_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Text command was rejected before native dispatch
               - if: >-
                   {% set body = kodi_text_result.content | default({}) %}
                   {{ kodi_text_result.status | default(0) != 200
@@ -685,6 +744,8 @@ script:
                      or body.get('ok') is not sameas true
                      or body.get('verified') is not sameas true }}
                 then:
+                  - action: ekf_appliances.remote_reject
+                    data: { reason: kodi_text_rejected }
                   - stop: Kodi text edit was not confirmed by the host
                     error: true
 
@@ -725,26 +786,50 @@ script:
           {{ request }}
         response_variable: route
       - variables:
-          source: "{{ 'projector' if route.pair == 'projector' else 'chromecast' }}"
+          source: "{{ 'projector' if pair | default(route.pair) == 'projector' else 'chromecast' }}"
       - choose:
           - conditions: "{{ source == 'chromecast' }}"
             sequence:
-              # KEYCODE_SEARCH opens search in YouTube/Netflix/Google TV.
-              # text: uses IME commitText on the focused search field.
-              # ENTER submits.
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: KEYCODE_SEARCH, delay_secs: 0 }
-              - delay: "00:00:00.8"
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
+              # Search edits the active app; it never implicitly wakes a display.
+              - action: ekf_appliances.remote_dispatch
                 data:
-                  command: "text:{{ query }}"
-                  delay_secs: 0
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: remote.televizor
+                    command: KEYCODE_SEARCH
+                    delay_secs: 0
+                response_variable: search_result
+              - if: "{{ search_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Search was rejected before opening the field
+                    response_variable: search_result
+              - delay: "00:00:00.8"
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: remote.televizor
+                    command: "text:{{ query }}"
+                    delay_secs: 0
+                response_variable: search_result
+              - if: "{{ search_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Search text was rejected
+                    response_variable: search_result
               - delay: "00:00:00.3"
-              - action: remote.send_command
-                target: { entity_id: remote.televizor }
-                data: { command: KEYCODE_ENTER, delay_secs: 0 }
+              - action: ekf_appliances.remote_dispatch
+                data:
+                  domain: remote
+                  service: send_command
+                  pair: tv
+                  service_data:
+                    entity_id: remote.televizor
+                    command: KEYCODE_ENTER
+                    delay_secs: 0
           - conditions: "{{ source in ['pc', 'projector'] }}"
             sequence:
               # Kodi: open the Search window, type the query, submit.
@@ -757,6 +842,11 @@ script:
                     entity_id: media_player.home
                     method: GUI.ActivateWindow
                     window: search
+                response_variable: search_result
+              - if: "{{ search_result.blocked | default('') != '' }}"
+                then:
+                  - stop: Search was rejected before opening the field
+                    response_variable: search_result
               - delay: "00:00:00.5"
               - action: ekf_appliances.remote_dispatch
                 data:
@@ -784,8 +874,8 @@ script:
       - action: script.t9_send_char
         data:
           mode: backspace
-          pair: "{{ route.pair }}"
-          native: "{{ route.native }}"
+          pair: "{{ pair | default(route.pair) }}"
+          native: "{{ native | default(route.native) }}"
 
   # ========== Audio mode (selected music backend) ==========
   # Explicit legacy beeps remain available to existing callers. Mode changes
@@ -971,6 +1061,9 @@ automation:
           received_ms: >-
             {{ trigger.to_state.attributes.last_received | float * 1000 }}
         response_variable: route
+      - if: "{{ route.blocked | default('') != '' }}"
+        then:
+          - stop: Remote command was rejected when received
       - choose:
           - conditions: "{{ button == 'input' }}"
             sequence:
@@ -991,6 +1084,7 @@ automation:
                 data:
                   pair: "{{ route.pair }}"
                   native: "{{ route.native }}"
+                  power_request_id: "{{ route.power_request_id }}"
           - conditions: >-
               {{ button in ['prime','prime_hold','disney','disney_hold'] or (button | string).startswith('samsung_ir_') }}
             sequence:
@@ -1186,12 +1280,20 @@ automation:
     action:
       - variables:
           ev: "{{ trigger.to_state.attributes.event_type }}"
+      - action: script.remote_modes_prepare
+        data:
+          button: "{{ ev }}"
+          received_ms: >-
+            {{ trigger.to_state.attributes.last_received | float * 1000 }}
+        response_variable: route
+      - if: "{{ route.blocked | default('') != '' }}"
+        then:
+          - stop: Projector command was rejected when received
       - choose:
           - conditions: "{{ ev == 'disney_hold' }}"
             sequence:
               - action: script.source_to_pc
-              - delay: "00:00:02"
-              - action: script.kodi_play_next_episode
+                response_variable: source_result
           - conditions: "{{ ev == 'disney' }}"
             sequence:
               # Wait 300ms for a possible disney_hold. If it arrives we abort.
@@ -1206,6 +1308,19 @@ automation:
                 then:
                   - stop: "hold detected, disney short suppressed"
               - action: script.source_to_pc
+                response_variable: source_result
+      - if: "{{ source_result.sent | default(false) is not sameas true }}"
+        then:
+          - if: "{{ source_result.blocked | default('') == '' }}"
+            then:
+              - action: ekf_appliances.remote_reject
+                data:
+                  reason: projector_source_rejected
+          - stop: Projector source request was rejected
+      - if: "{{ ev == 'disney_hold' }}"
+        then:
+          - delay: "00:00:02"
+          - action: script.kodi_play_next_episode
 
   # ===== Yandex voice search → TV =====
   # Triggered by "Алиса, спроси Умный дом найди в телеке <фраза>".

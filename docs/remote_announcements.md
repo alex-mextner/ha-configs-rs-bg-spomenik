@@ -173,6 +173,69 @@ python3 /home/ultra/homeassistant/scripts/provision_remote_announcements.py aisi
 The receipt must match all five HA clip keys. The explicitly selected speaker must
 be connected. AISIS needs no stock Mini OAuth token.
 
+## Rejected remote commands
+
+`remote_announcements.reject` accepts a fixed `reason` and an optional logical
+`press_id`. Remote guards pass the same identity through nested operations so a
+single rejected command produces one cue. This service does not synthesize speech
+or require an additional Dialogs upload or AISIS cache generation.
+
+The selected announcement speaker receives its native short sound:
+
+- Yandex uses the documented `alice-sounds-game-ping-1.opus` tag through the
+  response-bearing native speech command. Its official public preview lasts about
+  1.03 seconds.
+- AISIS uses its existing `smart_speaker_play_iot_sound` directive with
+  `isPowerOn: false`. Its physical duration has not been measured. The controller's
+  1.25-second settle interval is a bounded wait, not a duration claim.
+
+A cue temporarily lowers a valid nonzero speaker volume to
+`min(current volume, 0.1)`, verifies the resulting HA state before sending audio,
+and restores the prior level only while its ownership checks still hold. A human
+volume or mute change wins. An unavailable, restored, muted or zero-volume speaker
+is left alone and produces a nondelivery diagnostic. Native sounds preserve the
+selected music queue; the cue sends no generic audio URL, pause, play or power
+command. The speakers' firmware may briefly duck music on their native sound
+channel.
+
+Cues and existing spoken announcements share one playback lock through recovery.
+The cue controller has a three-second attempt budget, including a 0.6-second
+recovery reserve. Native acknowledgement must finish before the separately
+reserved 1.25-second quiet completion interval. Even an ambiguous acknowledgement
+failure retains that interval before restoration, unless an observed Yandex
+speech-completion event proves the sound has ended. Cancelled provider calls remain
+tracked by the existing service-call owner. Bounded shutdown retains the cue task
+while its recovery settles.
+
+Distinct rejections enter a FIFO with at most eight waiting cues. Identities are
+deduplicated for 30 seconds with a bounded 256-entry history. Rejections waiting
+more than three seconds before playback, or beyond the queue limit, are dropped
+with an explicit reason. This age starts when the rejection is reported; an
+operation's later confirmation failure is a new result, not an old queued cue.
+
+`sensor.remote_announcements` exposes `rejection_status`, `rejection_reason`,
+`rejection_drop_reason`, `rejection_recovery_reason` and cumulative
+`rejection_accepted`, `rejection_sent`, `rejection_dropped`, and
+`rejection_duplicates` counters. Each update clears inapplicable reason and timing
+fields, so a later successful cue does not retain an earlier failure. Cue timing
+uses `rejection_controller_elapsed_ms`, `rejection_controller_budget_seconds`,
+`rejection_controller_deadline_missed`, and `rejection_pending_service_count`.
+Failed cue recovery remains `recovery_unconfirmed` with its safe recovery reason,
+including after a delivery failure. That delivery failure retains its
+`rejection_drop_reason` and increments the dropped counter, not the sent counter.
+Shutdown uses the explicit drop reason `closed`. Cue reporting does not replace
+the spoken-label readiness or controller diagnostics. Shared
+recovery ownership and guards still prevent another unsafe attempt.
+
+A queued service response does not prove playback. `completed` means a native
+Yandex completion event was observed; `sent_unconfirmed` means dispatch completed
+without that event. Neither
+is acoustic proof of audibility. Physical cue level, duration and continuity of
+ongoing music require separate acceptance evidence.
+
+These cue rules preserve the existing spoken-label texts, cache identities and
+volume behavior.
+
 ## Silent preparation and checks
 
 ```sh
@@ -186,6 +249,7 @@ repository suites belong in CI or RunPod under the host policy.
 
 Primary references:
 
+- https://yandex.ru/dev/dialogs/alice/doc/ru/sounds/games
 - https://github.com/AlexxIT/YandexStation#text-to-speech
 - https://yandex.ru/dev/dialogs/alice/doc/ru/resource-sounds-upload
 - https://www.home-assistant.io/integrations/tts/

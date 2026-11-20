@@ -61,6 +61,7 @@ class IrReceiver:
         self.callbacks = []
         self.mapper = RemoteMapper()
         self.last_received = None
+        self.last_press_id = None
         self.last_error = None
         self.status = "disabled"
         self.study_sessions = self.capture_count = self.event_count = 0
@@ -417,8 +418,11 @@ class IrReceiver:
             self.validated = True
             self.validated_hub = self.device.unique_id
             self.store.async_delay_save(self._storage_data, 1)
-        for name, captured_at in self.mapper.event_times:
+        for (name, captured_at), press_id in zip(
+            self.mapper.event_times, self.mapper.event_press_ids, strict=True
+        ):
             self.last_received = received_wall - (now - captured_at)
+            self.last_press_id = press_id
             self._notify(name)
 
     async def async_before_send(self) -> None:

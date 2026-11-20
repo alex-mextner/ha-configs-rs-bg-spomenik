@@ -41,6 +41,7 @@ from .providers import (
     prepare_dialogs,
     validate_native_response,
 )
+from .rejection import CUE_BUDGET, RejectionQueue, play_rejection
 from .service_calls import ServiceCalls
 
 if TYPE_CHECKING:
@@ -107,6 +108,25 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     hass.services.async_register(DOMAIN, "prepare", prepare_service)
 
+    async def reject_service(call: ServiceCall) -> dict[str, str]:
+        """Queue one quiet cue for a rejected logical command."""
+        return manager.rejections.submit(
+            call.data["reason"], call.data.get("press_id") or call.context.id
+        )
+
+    hass.services.async_register(
+        DOMAIN,
+        "reject",
+        reject_service,
+        schema=vol.Schema(
+            {
+                vol.Required("reason"): vol.All(cv.string, vol.Length(min=1, max=128)),
+                vol.Optional("press_id"): vol.All(cv.string, vol.Length(max=256)),
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
     async def start(_event: Event | None = None) -> None:
         """Seed the initial target before enabling change announcements."""
         manager.gate.changed(manager.current_target())
@@ -131,7 +151,13 @@ class SpeechPlayback:
     """State observed during one announcement, including temporary volume changes."""
 
     def __init__(
-        self, before: State, applied: float, *, pause: bool, verify_volume: bool
+        self,
+        before: State,
+        applied: float,
+        *,
+        pause: bool,
+        verify_volume: bool,
+        budget: float | None = None,
     ) -> None:
         """Snapshot original music and volume with one controller deadline."""
         self.entity = before.entity_id
@@ -142,10 +168,11 @@ class SpeechPlayback:
         self.verify_volume = verify_volume
         self.paused, self.raised = False, False
         self.started = time.monotonic()
-        self.budget = ATTEMPT_BUDGET
+        self.budget = ATTEMPT_BUDGET if budget is None else budget
         self.recovery_deadline = self.started + self.budget
         self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
         self.recovery_failed = False
+        self.recovery_reason: str | None = None
         self.speaking, self.ended = asyncio.Event(), asyncio.Event()
         self.override_observed, self.user_changed_volume = False, False
 
@@ -188,6 +215,11 @@ class Manager:
         self.settings = {}
         self.gate = TargetGate()
         self.queue = LatestAnnouncement(self.announce, on_error=self.failed)
+        self.playback_lock = asyncio.Lock()
+        self.rejections = RejectionQueue(
+            lambda item: play_rejection(self, item, SpeechPlayback),
+            report=self.feedback_status,
+        )
         self.prepare_lock = asyncio.Lock()
         self.status = "starting"
         self.public_status = {"voice": "Брачо", "physical_latency_verified": False}
@@ -204,7 +236,10 @@ class Manager:
         if self.unsubscribe:
             self.unsubscribe()
             self.unsubscribe = None
-        await self.queue.stop(grace_seconds=ATTEMPT_BUDGET)
+        await asyncio.gather(
+            self.queue.stop(grace_seconds=ATTEMPT_BUDGET),
+            self.rejections.stop(grace_seconds=CUE_BUDGET),
+        )
         await self.services.close(0.05)
 
     @callback
@@ -216,13 +251,27 @@ class Manager:
             listener()
 
     @callback
-    def failed(self, error: Exception) -> None:
-        """Report fixed provider reasons or a sanitized exception type."""
-        reason = (
+    def feedback_status(self, status: str, values: dict[str, Any]) -> None:
+        """Publish cue outcomes without changing spoken-label readiness."""
+        self.update(
+            self.status,
+            rejection_status=status,
+            **{f"rejection_{key}": value for key, value in values.items()},
+        )
+
+    @staticmethod
+    def failure_reason(error: Exception) -> str:
+        """Expose only fixed provider reasons or a sanitized exception type."""
+        return (
             str(error)
             if isinstance(error, ProviderNotReadyError)
             else type(error).__name__
         )
+
+    @callback
+    def failed(self, error: Exception) -> None:
+        """Report fixed provider reasons or a sanitized exception type."""
+        reason = self.failure_reason(error)
         self.update(
             reason if isinstance(error, ProviderNotReadyError) else "error",
             reason=reason,
@@ -574,7 +623,9 @@ class Manager:
         finally:
             unsubscribe()
 
-    async def restore_volume(self, playback: SpeechPlayback) -> None:
+    async def restore_volume(
+        self, playback: SpeechPlayback, *, report_status: bool = True
+    ) -> None:
         """Restore volume and mute only while the original guards hold."""
         if not self.volume_unchanged(playback, playback.applied):
             return
@@ -622,7 +673,9 @@ class Manager:
                 "Announcement volume recovery failed", exc_info=exception_info(error)
             )
             playback.recovery_failed = True
-            self.failed(error)
+            playback.recovery_reason = self.failure_reason(error)
+            if report_status:
+                self.failed(error)
 
     def music_unchanged(self, playback: SpeechPlayback) -> bool:
         """Resume only our pause of the original selected content."""
@@ -637,7 +690,9 @@ class Manager:
             )
         )
 
-    async def resume_music(self, playback: SpeechPlayback) -> None:
+    async def resume_music(
+        self, playback: SpeechPlayback, *, report_status: bool = True
+    ) -> None:
         """Recover music without waiting for volume acknowledgement."""
         if self.music_unchanged(playback):
             try:
@@ -652,22 +707,34 @@ class Manager:
                     "Announcement music recovery failed", exc_info=exception_info(error)
                 )
                 playback.recovery_failed = True
-                self.failed(error)
+                playback.recovery_reason = self.failure_reason(error)
+                if report_status:
+                    self.failed(error)
 
-    async def restore_playback(self, playback: SpeechPlayback) -> None:
-        """Recover independent controls and report controller elapsed time."""
+    async def restore_playback(
+        self, playback: SpeechPlayback, *, report_status: bool = True
+    ) -> dict[str, Any]:
+        """Recover controls; optionally leave reporting to the cue's own result."""
         # A lost volume acknowledgement must not postpone the original music.
-        await asyncio.gather(self.restore_volume(playback), self.resume_music(playback))
-        elapsed = time.monotonic() - playback.started
-        self.update(
-            "recovery_unconfirmed"
-            if playback.recovery_failed or self.services.pending
-            else self.status,
-            controller_elapsed_ms=round(elapsed * 1000),
-            controller_budget_seconds=playback.budget,
-            controller_deadline_missed=elapsed > playback.budget,
-            pending_service_count=len(self.services.pending),
+        await asyncio.gather(
+            self.restore_volume(playback, report_status=report_status),
+            self.resume_music(playback, report_status=report_status),
         )
+        elapsed = time.monotonic() - playback.started
+        values = {
+            "controller_elapsed_ms": round(elapsed * 1000),
+            "controller_budget_seconds": playback.budget,
+            "controller_deadline_missed": elapsed > playback.budget,
+            "pending_service_count": len(self.services.pending),
+        }
+        if report_status:
+            self.update(
+                "recovery_unconfirmed"
+                if playback.recovery_failed or self.services.pending
+                else self.status,
+                **values,
+            )
+        return {**values, "recovery_reason": playback.recovery_reason}
 
     def is_current(self, target: str, generation: int) -> bool:
         """Reject closed or superseded announcement attempts."""
@@ -689,6 +756,11 @@ class Manager:
         return dialogs_command(self.settings, clip.key)
 
     async def announce(self, target: str) -> None:
+        """Serialize spoken labels with quiet cues and their volume recovery."""
+        async with self.playback_lock:
+            await self._announce(target)
+
+    async def _announce(self, target: str) -> None:
         """Dispatch the latest cached label and always attempt guarded recovery."""
         # Never queue stale speech after a later confirmed target has superseded it.
         generation = self.generation
