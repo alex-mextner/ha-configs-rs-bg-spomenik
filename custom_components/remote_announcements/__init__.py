@@ -722,22 +722,27 @@ class Manager:
                         playback, playback.old_volume
                     ) or self.volume_unchanged(playback, playback.applied)
 
-                if remute_allowed():
+                def claim_remute() -> bool:
+                    if not remute_allowed():
+                        return False
+                    # ServiceCalls runs this guard immediately before HA dispatch.
+                    # An expired deadline or a refused guard leaves only the
+                    # already-dispatched volume restore awaiting its echo.
                     self.volume_recovery[playback.entity] = VolumeRestore(
                         playback.old_volume,
                         playback.applied,
                         expect_mute=True,
                     )
-                    sent = await self.call(
+                    return True
+
+                if remute_allowed():
+                    await self.call(
                         "volume_mute",
                         playback.entity,
                         is_volume_muted=True,
                         deadline=playback.recovery_deadline,
-                        guard=remute_allowed,
+                        guard=claim_remute,
                     )
-                    if not sent:
-                        self.volume_recovery.pop(playback.entity, None)
-                        return
             if verify_volume:
                 await self.confirm_restored_volume(playback)
                 self.volume_recovery.pop(playback.entity, None)

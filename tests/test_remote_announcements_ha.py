@@ -559,6 +559,93 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.manager.check_aisis_volume_recovery(self.hass.states.get(self.entity))
         self.assertNotIn(self.entity, self.manager.volume_recovery)
 
+    async def check_unsent_remute(self, *, expired: bool) -> None:
+        state = self.hass.states.get(self.entity)
+        attrs = {**state.attributes, "volume_level": 0.8, "is_volume_muted": True}
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def delayed_volume(call) -> None:
+            if call.data["volume_level"] == 0.8:
+                self.calls.append((call.service, dict(call.data)))
+                return
+            await self.media(call)
+
+        dispatch = self.manager.call
+
+        async def change_at_dispatch(
+            service: str, entity: str, **kwargs: object
+        ) -> bool:
+            if service == "volume_mute":
+                if expired:
+                    kwargs["deadline"] = 0
+                else:
+                    self.hass.states.async_set(entity, "unavailable", {})
+            return await dispatch(service, entity, **kwargs)
+
+        self.hass.services.async_register("media_player", "volume_set", delayed_volume)
+        with (
+            patch.object(self.manager, "call", change_at_dispatch),
+            patch.object(integration, "ATTEMPT_BUDGET", 0.15),
+            patch.object(integration, "RECOVERY_RESERVE", 0.08),
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(
+            [n for n, _ in self.calls], ["volume_set", "send_command", "volume_set"]
+        )
+        self.hass.services.async_register("media_player", "volume_set", self.media)
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.4, "is_volume_muted": False},
+        )
+        with self.assertRaisesRegex(
+            ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(len(self.calls), 3)
+        # Only the accepted volume command can echo. No mute was dispatched.
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "is_volume_muted": False}
+        )
+        await self.manager.announce("tv")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.8, 0.4, 0.8],
+        )
+        self.assertFalse(
+            self.hass.states.get(self.entity).attributes["is_volume_muted"]
+        )
+
+    async def test_deadline_before_remute_does_not_wait_for_unsent_mute(self) -> None:
+        await self.check_unsent_remute(expired=True)
+
+    async def test_refused_remute_preserves_already_sent_volume_restore(self) -> None:
+        await self.check_unsent_remute(expired=False)
+
+    async def test_timeout_after_remute_dispatch_still_requires_mute_echo(self) -> None:
+        state = self.hass.states.get(self.entity)
+        attrs = {**state.attributes, "volume_level": 0.8, "is_volume_muted": True}
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def lost_ack(call) -> None:
+            self.calls.append((call.service, dict(call.data)))
+            await asyncio.Event().wait()
+
+        self.hass.services.async_register("media_player", "volume_mute", lost_ack)
+        with patch.object(self.manager.services, "limit", 0.05):
+            await self.manager.announce("tv")
+        calls_after = list(self.calls)
+        self.assertEqual(calls_after[-1][0], "volume_mute")
+        with self.assertRaisesRegex(
+            ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(self.calls, calls_after)
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        self.hass.services.async_register("media_player", "volume_mute", self.media)
+        await self.manager.announce("tv")
+        self.assertTrue(self.hass.states.get(self.entity).attributes["is_volume_muted"])
+
     async def test_titled_music_without_id_during_alice_is_active(self) -> None:
         self.hass.states.async_set(
             self.entity,
