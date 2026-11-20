@@ -10,6 +10,15 @@ input_select:
       - Яндекс
       - AISIS
 
+# The route sensor republishes these room sources on each state update.
+homeassistant:
+  customize:
+    sensor.universal_remote_target:
+      remote_announcement_playback_entities:
+        - media_player.ue48j5500_ue48j5500
+        - media_player.projector
+        - media_player.yandex_station_m0011hm00z86hg
+
 remote_announcements:
   target_entity: sensor.universal_remote_target
   backend_entity: input_select.remote_announcement_backend
@@ -18,11 +27,5 @@ remote_announcements:
   aisis_connected_entity: sensor.aisis_speaker_m00zrw3008rajg_connected
   area: gostinaia
   tts_entity: tts.bracho_bracho
-  # The TV reports playback from its active Cast, Android TV, or MA session.
-  playback_entities:
-    - media_player.ue48j5500_ue48j5500
-    # The projector reports media_player.home playback only while HDMI is on.
-    - media_player.projector
-    - media_player.yandex_station_m0011hm00z86hg
   tempo: 1.25
   music_mode: native

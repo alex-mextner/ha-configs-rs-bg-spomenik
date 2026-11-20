@@ -1,10 +1,12 @@
 """Bounded HA runtime tests; services and cloud synthesis are external boundaries."""
 
 import asyncio
+import logging
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import yaml
@@ -18,17 +20,24 @@ from homeassistant.core import (
     State,
     SupportsResponse,
 )
+from homeassistant.core_config import async_process_ha_core_config
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame, restore_state
+from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.setup import async_setup_component
 
 from custom_components import remote_announcements as integration
+from custom_components.ekf_appliances.sensor import UniversalRemoteTarget
 from custom_components.remote_announcements.providers import ProviderNotReadyError
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = yaml.safe_load((ROOT / "packages/remote_announcements.yaml").read_text())
 CONFIG = integration.CONFIG_SCHEMA(PACKAGE)[integration.DOMAIN]
+ROUTE_ATTRIBUTES = {
+    "initialized": True,
+    **PACKAGE["homeassistant"]["customize"][CONFIG["target_entity"]],
+}
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -61,7 +70,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.ignore_cancellation = False
         self.speech_gate = None
         self.entity = CONFIG["yandex_entity"]
-        self.hass.states.async_set(CONFIG["target_entity"], "tv", {"initialized": True})
+        self.hass.states.async_set(CONFIG["target_entity"], "tv", ROUTE_ATTRIBUTES)
         self.hass.states.async_set(CONFIG["backend_entity"], "Яндекс")
         registry = er.async_get(self.hass)
         entry = registry.async_get_or_create(
@@ -272,6 +281,54 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.manager.label_volume(0.8), 0.6)
                 self.hass.states.async_set(display, "off")
 
+    async def test_real_route_publishes_customized_sources_on_each_update(self) -> None:
+        self.hass.states.async_remove(CONFIG["target_entity"])
+        await async_process_ha_core_config(self.hass, PACKAGE["homeassistant"])
+        mode = SimpleNamespace(
+            target="tv", pair="tv", native=False, expires_at=None, shutting_down=False
+        )
+        controller = SimpleNamespace(
+            mode=mode, initialized=True, subscribe=lambda _listener: lambda: None
+        )
+        entry = SimpleNamespace(
+            entry_id="fixture",
+            runtime_data=SimpleNamespace(remote_controller=controller),
+        )
+        route = UniversalRemoteTarget(entry)
+        component = EntityComponent(logging.getLogger(__name__), "sensor", self.hass)
+        await component.async_add_entities([route])
+        for target in ("tv", "kodi"):
+            mode.target = target
+            route.async_write_ha_state()
+            state = self.hass.states.get(CONFIG["target_entity"])
+            self.assertEqual(state.state, target)
+            self.assertEqual(
+                state.attributes["remote_announcement_playback_entities"],
+                ROUTE_ATTRIBUTES["remote_announcement_playback_entities"],
+            )
+            self.assertEqual(self.manager.label_volume(0.8), 0.6)
+
+    async def test_unconfigured_legacy_package_keeps_its_speech_floor(self) -> None:
+        self.hass.states.async_set(CONFIG["target_entity"], "tv", {"initialized": True})
+        self.assertEqual(self.manager.label_volume(0.2), 0.5)
+        self.assertEqual(self.manager.label_volume(0.8), 0.8)
+
+    async def test_malformed_playback_sources_use_quiet_level(self) -> None:
+        for sources in (
+            None,
+            "playing",
+            {},
+            [10],
+            ["light.kitchen"],
+            ["media_player.bad id"],
+        ):
+            self.hass.states.async_set(
+                CONFIG["target_entity"],
+                "tv",
+                {"remote_announcement_playback_entities": sources},
+            )
+            self.assertEqual(self.manager.label_volume(0.8), 0.4)
+
     async def test_restored_playback_cannot_raise_idle_label(self) -> None:
         self.hass.states.async_set(
             "media_player.projector", "playing", {"restored": True}
@@ -289,7 +346,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(track=track):
                 self.calls.clear()
                 self.hass.states.async_set(
-                    CONFIG["target_entity"], "tv", {"initialized": True}
+                    CONFIG["target_entity"], "tv", ROUTE_ATTRIBUTES
                 )
                 self.hass.states.async_set(
                     self.entity,
@@ -304,7 +361,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     result = await self.native(call)
                     if self.manager.current_target() == "tv":
                         self.hass.states.async_set(
-                            CONFIG["target_entity"], "kodi", {"initialized": True}
+                            CONFIG["target_entity"], "kodi", ROUTE_ATTRIBUTES
                         )
                         self.manager.queue.submit("kodi")
                         state = self.hass.states.get(self.entity)
@@ -497,9 +554,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         started = self.ack_started["volume_set"] = asyncio.Event()
         attempt = asyncio.create_task(self.manager.announce("tv"))
         await asyncio.wait_for(started.wait(), 0.2)
-        self.hass.states.async_set(
-            CONFIG["target_entity"], "kodi", {"initialized": True}
-        )
+        self.hass.states.async_set(CONFIG["target_entity"], "kodi", ROUTE_ATTRIBUTES)
         hold.set()
         await attempt
         self.assertEqual(self.speech_started, [])
@@ -522,7 +577,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(self.manager.announce("tv"), 0.3)
             self.assertEqual(len(self.manager.services.pending), 1)
             self.hass.states.async_set(
-                CONFIG["target_entity"], "kodi", {"initialized": True}
+                CONFIG["target_entity"], "kodi", ROUTE_ATTRIBUTES
             )
             with self.assertRaisesRegex(
                 ProviderNotReadyError, "speaker_service_recovery_pending"
@@ -572,9 +627,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertRaises(TimeoutError),
         ):
             await asyncio.wait_for(self.manager.announce("tv"), 0.3)
-        self.hass.states.async_set(
-            CONFIG["target_entity"], "kodi", {"initialized": True}
-        )
+        self.hass.states.async_set(CONFIG["target_entity"], "kodi", ROUTE_ATTRIBUTES)
         self.speech_gate.set()
         await asyncio.sleep(0)
         self.assertEqual(self.speech_started, [])
@@ -758,7 +811,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                         CONFIG["target_entity"], "chromecast", {"initialized": False}
                     ),
                     "new_state": State(
-                        CONFIG["target_entity"], "kodi", {"initialized": True}
+                        CONFIG["target_entity"], "kodi", ROUTE_ATTRIBUTES
                     ),
                 },
             )

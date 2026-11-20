@@ -77,8 +77,9 @@ and restored states do not count as playing. The display’s selected player mus
 also report observed playback. An assumed cloud-only speaker state after a
 disconnect does not raise the volume. The same rule applies when the
 studio speaker is selected for announcements. A louder speaker is temporarily
-turned down. Older configurations without `playback_entities` keep their
-configured minimum speech volume.
+turned down. The package configures the three source IDs on the target sensor through
+`homeassistant.customize`. Older configurations without a source list keep their configured minimum
+speech volume (default 5/10).
 
 Restore the old volume only while the
 current level still equals our temporary level and the

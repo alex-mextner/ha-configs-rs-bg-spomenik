@@ -14,7 +14,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.tts import async_get_media_source_audio
 from homeassistant.components.tts.media_source import generate_media_source_id
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import SupportsResponse, callback
+from homeassistant.core import SupportsResponse, callback, valid_entity_id
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry, discovery, entity_registry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -503,9 +503,22 @@ class Manager:
 
     def label_volume(self, old_volume: float) -> float:
         """Sample room playback before a label changes music or speaker volume."""
-        if "playback_entities" not in self.config:
-            return speech_volume(old_volume, self.config["volume_floor"])
-        for entity_id in self.config["playback_entities"]:
+        entities = self.config.get("playback_entities")
+        if entities is None:
+            target = self.hass.states.get(self.config["target_entity"])
+            attributes = target.attributes if target is not None else {}
+            if "remote_announcement_playback_entities" in attributes:
+                entities = attributes["remote_announcement_playback_entities"]
+            else:
+                return speech_volume(old_volume, self.config["volume_floor"])
+        if not isinstance(entities, (list, tuple)) or not all(
+            isinstance(entity, str)
+            and entity.startswith("media_player.")
+            and valid_entity_id(entity)
+            for entity in entities
+        ):
+            return 0.4
+        for entity_id in entities:
             state = self.hass.states.get(entity_id)
             if state is None or not self.observed_playback(state):
                 continue
