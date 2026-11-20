@@ -10,12 +10,14 @@ import json
 import logging
 import os
 import shlex
+import sys
 import tempfile
 import time
 from datetime import datetime
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 MAX_SUMMARY_LENGTH = 255
@@ -33,6 +35,10 @@ LOG = logging.getLogger("ha-core-update-notice")
 
 class ProvisionError(RuntimeError):
     """Sanitized error, without response bodies or credentials."""
+
+
+class APIUnavailableError(ProvisionError):
+    """A transient read failure that readiness loops may retry."""
 
 
 def fail(message: str) -> NoReturn:
@@ -71,9 +77,17 @@ class API:
             with self.opener.open(request, timeout=15) as response:
                 return json.load(response)
         except HTTPError as error:
-            fail(f"HA {method} {path}: HTTP {error.code}")
-        except (URLError, TimeoutError, ValueError):
-            fail(f"HA {method} {path}: unavailable or invalid JSON")
+            message = f"HA {method} {path}: HTTP {error.code}"
+            if method == "GET" and (error.code in {404, 408, 429, 500, 502, 503, 504}):
+                raise APIUnavailableError(message) from None
+            fail(message)
+        except (OSError, HTTPException):
+            message = f"HA {method} {path}: temporarily unavailable"
+            if method == "GET":
+                raise APIUnavailableError(message) from None
+            fail(message)
+        except ValueError:
+            fail(f"HA {method} {path}: invalid JSON")
 
 
 def read_token(path: Path) -> str:
@@ -133,7 +147,7 @@ def snapshot(
             after = entry_fingerprint(api.request("GET", ENTRIES))
             if before == entry_fingerprint(entries) == after:
                 return entries, registry
-        except (OSError, ValueError, KeyError, ProvisionError):
+        except (OSError, ValueError, KeyError, APIUnavailableError):
             pass
         if time.monotonic() >= deadline:
             fail("HA metadata and runtime stores are not ready/in sync")
@@ -181,6 +195,20 @@ def entity_for(
     ]
     row = single(rows, f"{domain} entity for {entry['entry_id']}")
     return row["entity_id"] if row else None
+
+
+def source_entities(
+    entries: list[dict[str, Any]], registry: list[dict[str, Any]]
+) -> dict[str, str] | None:
+    """Resolve both enabled sources and their current registry IDs from one snapshot."""
+    sensors: dict[str, str] = {}
+    for source in ("local", "supervisor"):
+        entry = version_entry(entries, source)
+        sensor = entity_for(registry, entry, "sensor") if entry else None
+        if sensor is None:
+            return None
+        sensors[source] = sensor
+    return sensors
 
 
 def notice_entry(
@@ -243,13 +271,10 @@ def desired_options(current: str, latest: str) -> dict[str, Any]:
     }
 
 
-def ensure_sources(
-    api: API, config: Path, sources: dict[str, Any], *, check: bool, wait: float
-) -> tuple[dict[str, str], bool]:
+def ensure_sources(api: API, config: Path, *, check: bool, wait: float) -> bool:
     """Create missing Version entries and wait for registry records."""
     changed = False
-    sensors: dict[str, str] = {}
-    for source in sources:
+    for source in ("local", "supervisor"):
         # A previous source's setup can take time; never create from the old snapshot.
         entries, _registry = snapshot(api, config, wait)
         if version_entry(entries, source) is None:
@@ -268,19 +293,23 @@ def ensure_sources(
             changed = True
         deadline = time.monotonic() + wait
         while True:
-            entries, registry = snapshot(api, config, wait)
+            entries, registry = snapshot(
+                api, config, max(0, deadline - time.monotonic())
+            )
             entry = version_entry(entries, source)
             sensor = entity_for(registry, entry, "sensor") if entry else None
             if sensor:
-                # Refuse a stale registry instead of using a missing/renamed entity.
-                api.request("GET", f"states/{sensor}")
-                sensors[source] = sensor
-                break
+                try:
+                    api.request("GET", f"states/{sensor}")
+                except APIUnavailableError:
+                    pass
+                else:
+                    break
             if time.monotonic() >= deadline:
                 fail(f"Version {source} entity is not yet saved; retry later")
             time.sleep(1)
 
-    return sensors, changed
+    return changed
 
 
 def reconcile(
@@ -290,13 +319,16 @@ def reconcile(
     entries, registry = snapshot(api, config, wait)
     helper = notice_entry(entries, registry)
     # Find ambiguities in both sources before the first write.
-    sources = {
-        source: version_entry(entries, source) for source in ("local", "supervisor")
-    }
+    for source in ("local", "supervisor"):
+        version_entry(entries, source)
     if helper and helper["options"].get("install"):
         fail("Existing helper installs updates; leaving it unchanged")
-    sensors, changed = ensure_sources(api, config, sources, check=check, wait=wait)
+    changed = ensure_sources(api, config, check=check, wait=wait)
     entries, registry = snapshot(api, config, wait)
+    # Either source may have been renamed while the other one was loading.
+    sensors = source_entities(entries, registry)
+    if sensors is None:
+        fail("Version sources or entity IDs changed during setup; retry later")
 
     helper = notice_entry(entries, registry)
     desired = desired_options(sensors["local"], sensors["supervisor"])
@@ -333,58 +365,66 @@ def reconcile(
                 + "); leaving existing options unchanged"
             )
 
-    result = verify_notice(api, config, desired, sensors, wait=wait)
+    result = verify_notice(api, config, wait=wait)
     return {"changed": changed, **result}
 
 
-def verify_notice(
-    api: API,
-    config: Path,
-    desired: dict[str, Any],
-    sensors: dict[str, str],
-    *,
-    wait: float,
-) -> dict[str, Any]:
-    """Confirm available, current rendered versions and a notice with no installer."""
+def verify_notice(api: API, config: Path, *, wait: float) -> dict[str, Any]:
+    """Confirm current source identities, available versions and no installer."""
     deadline = time.monotonic() + wait
     while True:
-        entries, registry = snapshot(api, config, wait)
+        entries, registry = snapshot(api, config, max(0, deadline - time.monotonic()))
+        sensors = source_entities(entries, registry)
         helper = notice_entry(entries, registry)
         entity = entity_for(registry, helper, "update") if helper else None
-        saved = helper and all(
-            helper["options"].get(k) == v for k, v in desired.items()
-        )
-        if entity and saved:
-            state = api.request("GET", f"states/{entity}")
-            attrs = state["attributes"]
-            versions = {
-                source: api.request("GET", f"states/{sensor}").get("state")
-                for source, sensor in sensors.items()
+        if helper and sensors and entity:
+            desired = desired_options(sensors["local"], sensors["supervisor"])
+            desired["additional_options"] = {
+                **helper["options"].get("additional_options", {}),
+                **desired["additional_options"],
             }
-            valid_versions = all(
-                isinstance(value, str) and value not in {"", "unknown", "unavailable"}
-                for value in versions.values()
+            saved = not helper["options"].get("install") and all(
+                helper["options"].get(k) == v for k, v in desired.items()
             )
-            release_url = "https://github.com/home-assistant/core/releases/tag/" + str(
-                versions["supervisor"]
-            )
-            if (
-                state["state"] in {"on", "off"}
-                and valid_versions
-                and attrs.get("installed_version") == versions["local"]
-                and attrs.get("latest_version") == versions["supervisor"]
-                and attrs.get("release_url") == release_url
-                and attrs.get("release_summary") == SUMMARY
-                and not attrs.get("supported_features", 0) & 1
-                and not attrs.get("auto_update", False)
-            ):
-                return {
-                    "entity_id": entity,
-                    "state": state["state"],
-                }
+            try:
+                if saved:
+                    state = rendered_notice(api, entity, sensors)
+                    if state is not None:
+                        return {"entity_id": entity, "state": state}
+            except APIUnavailableError:
+                pass
         if time.monotonic() >= deadline:
-            fail("Core helper has not finished saving/loading; retry later")
+            fail("Core helper or Version sources are not ready/current; retry later")
         time.sleep(1)
+
+
+def rendered_notice(api: API, entity: str, sensors: dict[str, str]) -> str | None:
+    """Check the rendered notice against the currently configured Version sensors."""
+    state = api.request("GET", f"states/{entity}")
+    attrs = state["attributes"]
+    versions = {
+        source: api.request("GET", f"states/{sensor}").get("state")
+        for source, sensor in sensors.items()
+    }
+    valid_versions = all(
+        isinstance(value, str) and value not in {"", "unknown", "unavailable"}
+        for value in versions.values()
+    )
+    release_url = "https://github.com/home-assistant/core/releases/tag/" + str(
+        versions["supervisor"]
+    )
+    if (
+        state["state"] in {"on", "off"}
+        and valid_versions
+        and attrs.get("installed_version") == versions["local"]
+        and attrs.get("latest_version") == versions["supervisor"]
+        and attrs.get("release_url") == release_url
+        and attrs.get("release_summary") == SUMMARY
+        and not attrs.get("supported_features", 0) & 1
+        and not attrs.get("auto_update", False)
+    ):
+        return state["state"]
+    return None
 
 
 def main() -> int:
@@ -401,15 +441,29 @@ def main() -> int:
         "--lock-file", type=Path, default=Path("/run/ha-core-update-notice/lock")
     )
     args = parser.parse_args()
-    descriptor, log_path = tempfile.mkstemp(
-        prefix="ha-core-update-notice-", suffix=".log", dir="/tmp"
-    )
-    os.close(descriptor)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
-    )
+    try:
+        log_dir = Path(tempfile.gettempdir()) / "ha-core-update-notice"
+        log_dir.mkdir(mode=0o700, exist_ok=True)
+        metadata = log_dir.lstat()
+        if (
+            log_dir.is_symlink()
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+        ):
+            fail("Private log directory has an unexpected owner or permissions")
+        descriptor, log_path = tempfile.mkstemp(
+            prefix="run-", suffix=".log", dir=log_dir
+        )
+        os.close(descriptor)
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
+        )
+    except (ProvisionError, OSError) as error:
+        # An unsafe log directory must not be opened, even to report its own failure.
+        sys.stderr.write(f"Provisioning failed: {error}\n")
+        return 1
     LOG.info("Started; log: %s", log_path)
     started = time.monotonic()
     try:

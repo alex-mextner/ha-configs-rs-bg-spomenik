@@ -91,6 +91,9 @@ in
     HA_COMPOSE_OVERLAYS=${overlay}
   '';
 
+  # Bound per-attempt diagnostic logs during repeated cold-start failures.
+  systemd.tmpfiles.rules = [ "d /tmp/ha-core-update-notice 0700 ultra ultra 7d" ];
+
   systemd.services.ha-compose = {
     description = "Home Assistant Docker Compose stack";
     wantedBy = [ "multi-user.target" ];

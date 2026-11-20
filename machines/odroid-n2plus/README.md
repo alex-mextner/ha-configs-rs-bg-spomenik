@@ -95,15 +95,17 @@ active and subsequent timer ticks do no work.
 The existing admin `HA_TOKEN` is read from `/home/ultra/.env`, as for the watchdogs.
 It stays outside git and the Nix store. On a fresh install, finish HA onboarding and
 provide that runtime credential before starting `ha-core-update-notice.service`.
-Each invocation prints a private `/tmp/ha-core-update-notice-*.log` path.
+Each invocation prints a private `/tmp/ha-core-update-notice/run-*.log` path.
+NixOS tmpfiles cleans logs older than seven days within that directory.
 A read-only verification is available with
 `python3 scripts/provision_ha_core_update.py --check` from the HA checkout.
 
 To update HA on this host, first make and check a backup outside the eMMC and review
-all intervening incompatible changes. Change the `homeassistant` image pin in
-`ha/compose.odroid.yaml` in this NixOS configuration, then apply the reviewed rebuild.
-The declared `ha-compose` reload applies that overlay. Check the running version,
-HA logs/repairs and the household's important integrations afterwards. Keep the backup:
+all intervening incompatible changes. Update both HA image pins (`homeassistant` and
+`u1-camera-proxy`) in `ha/compose.odroid.yaml` to the same reviewed version; sharing
+that image avoids retaining two versions for these services on the eMMC. Apply the
+reviewed rebuild. The declared `ha-compose` reload applies that overlay. Check the
+running version, HA logs/repairs and the household's important integrations afterwards. Keep the backup:
 an older container alone does not undo database migrations.
 
 ## Memory
