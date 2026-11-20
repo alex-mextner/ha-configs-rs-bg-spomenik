@@ -593,7 +593,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.state, "playing")
         self.assertEqual(state.attributes["media_content_id"], "aisis-track")
         self.assertEqual(state.attributes["volume_level"], 0.4)
-        self.assertFalse(self.manager.aisis_volume_recovery)
+        self.assertFalse(self.manager.volume_recovery)
 
 
 if __name__ == "__main__":
