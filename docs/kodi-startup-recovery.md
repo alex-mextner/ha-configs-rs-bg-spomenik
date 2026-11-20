@@ -28,7 +28,7 @@ existing `kodi-session`. It does not turn on the projector or start Kodi.
 An unsupported board or a disconnected display skips recovery, leaving the
 existing session's behavior in force.
 
-If free CMA is below 96 MiB, it runs the fixed `/usr/bin/sync` with a requested
+If free CMA is below 96 MiB, it runs `sync` from the unit's PATH with a requested
 ten-second subprocess timeout, rechecks HDMI and free CMA, then writes **1** to
 `/proc/sys/vm/drop_caches` at most once. That operation drops clean page-cache
 entries; it does not request slab-cache eviction. There is no periodic job,

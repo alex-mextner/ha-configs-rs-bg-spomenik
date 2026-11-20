@@ -2,7 +2,7 @@
 #
 # Outputs:
 #   nixosConfigurations.macmini                      - Mac mini Mid 2010
-#   nixosConfigurations.odroid-n2plus                - ODROID-N2+ (hostname odroidn2-nixos)
+#   nixosConfigurations.odroid-n2plus                - ODROID-N2+ (hostname odroidn2)
 #   packages.aarch64-linux.odroid-n2plus-sdImage     - ODROID-N2+ SD/eMMC image (.img.zst), U-Boot at sector 1
 #   packages.aarch64-linux.odroid-n2plus-uboot       - mainline U-Boot (bl33) for odroid-n2_defconfig
 #   packages.x86_64-linux.odroid-n2plus-ubootFip     - ODROID-N2+ signed boot blob (u-boot.bin.sd.bin)
@@ -27,7 +27,8 @@
       url = "github:LibreELEC/amlogic-boot-fip/b54e3bbbcf5613d451230d359d264844eeda7166";
       flake = false;
     };
-    # Secrets of rpi4 (Wi-Fi, Home Assistant login), decrypted on the host with its SSH host key.
+    # Secrets of rpi4 (Wi-Fi, Home Assistant login) and odroid-n2plus (Cloudflare Tunnel token, Transmission RPC
+    # whitelist), decrypted on each host with its SSH host key.
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -55,12 +56,14 @@
         specialArgs.ubootFip = odroidUbootFip;
         modules = [
           ./odroid-n2plus/hardware/odroid-n2plus.nix
+          sops-nix.nixosModules.sops
           ./odroid-n2plus/configuration.nix
           ./backup/nixos.nix
           {
             homelab.backup = {
               enable = true;
-              host = "odroidn2"; # backup/hosts/odroidn2.toml, shared with the Armbian install
+              # backup/hosts/odroidn2-nixos.toml: the Armbian install's repository (host "odroidn2"), without the bots
+              host = "odroidn2-nixos";
             };
           }
         ];

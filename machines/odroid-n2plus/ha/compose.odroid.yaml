@@ -1,0 +1,119 @@
+# ODROID-N2+ (arm64, 4 GB RAM) overlay for /home/ultra/homeassistant/ha.docker-compose.yaml.
+# Installed by NixOS as /etc/ha-compose/compose.odroid.yaml (machines/odroid-n2plus/modules/home-assistant.nix),
+# named in /etc/default/ha-compose, and applied by scripts/ha_compose.sh of the HA config checkout; the base file
+# stays unchanged. Until the NixOS move this file lived as /home/ultra/odroid-overlay/compose.odroid.yaml.
+# Every service that runs here has a memory limit (the ones not set below come from the base file).
+
+services:
+  homeassistant:
+    # Same HA version as on MSI (config .HA_VERSION 2026.9.3): no surprise upgrade during the move.
+    image: ghcr.io/home-assistant/home-assistant:2026.9.3
+    # No swap for HA. Past zram the kernel swaps to the swapfile on the USB HDD (sdc), and when
+    # Python touched those pages the event loop stalled for minutes while they were read back
+    # one 4 KB page at a time (2026-10-10: freezes at 10:41 and 21:17, each ended by the fail-safe
+    # cron restart). Other services can swap instead. 2g is the cap used for other services here.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    memswap_limit: 2g
+
+  u1-camera-proxy:
+    # Same image as homeassistant as on MSI (config .HA_VERSION 2026.9.3): no surprise upgrade during the move.
+    image: ghcr.io/home-assistant/home-assistant:2026.9.3
+    # The overlay font in u1_mjpeg_proxy.py defaults to DejaVuSans, which the ODROID host does not
+    # have (fonts-dejavu-core not installed): every frame failed and the camera went dark.
+    environment:
+      - U1_INSPECTOR_FONT=/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf
+    # MJPEG proxy + print inspector, ~50 MB
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  esphome:
+    # dashboard ~20 MB; compiling a firmware (PlatformIO) peaks at several hundred MB
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  ssh-server:
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+
+  printer-proxy:
+    deploy:
+      resources:
+        limits:
+          memory: 32m
+
+  wyoming-satellite:
+    # lunyaadev/rhasspy-wyoming-satellite has no arm64 image: the same wyoming-satellite 1.4.1,
+    # built locally (Dockerfile next to this file).
+    image: wyoming-satellite:1.4.1-arm64
+    build: /home/ultra/odroid-overlay/wyoming-satellite
+    # Satellite name in HA is «Брачо»; the CLI gets the ASCII form. Wake word stays ey_milosh
+    # until the «Брачо» model is trained. Same argv as the base file otherwise.
+    command:
+      [
+        "--name", "Bracho",
+        "--uri", "tcp://0.0.0.0:10700",
+        "--mic-command", "/app/sounds/wakeword_capture_ch0_record.sh",
+        "--snd-command", "aplay -D plughw:CARD=ArrayUAC10,DEV=0 -r 22050 -c 1 -f S16_LE -t raw",
+        "--wake-uri", "tcp://wyoming-openwakeword:10400",
+        "--wake-word-name", "ey_milosh",
+        "--awake-wav", "/app/sounds/awake.wav",
+        "--tts-played-command", "aplay -D plughw:CARD=ArrayUAC10,DEV=0 /app/sounds/done.wav",
+        "--mic-noise-suppression", "3",
+        "--mic-auto-gain", "15",
+        "--mic-seconds-to-mute-after-awake-wav", "1.5",
+        "--no-zeroconf", "--debug", "--debug-recording-dir", "/tmp/debug",
+      ]
+    # ReSpeaker 4-mic array (USB 2886:0018) is not attached yet (needs a stronger power adapter).
+    # Re-enable both voice-hw services once it is plugged in:
+    #   docker compose -f .../ha.docker-compose.yaml -f .../compose.odroid.yaml --profile voice-hw up -d
+    # and set `export COMPOSE_PROFILES=voice-hw` in /etc/default/ha-compose (modules/home-assistant.nix).
+    profiles: [voice-hw]
+  respeaker-tuning:         # reads the ReSpeaker over USB; restart-looped every 10 s without it
+    profiles: [voice-hw]
+
+  go2rtc:
+    # WebRTC candidates must name this host: 192.168.0.39 (LAN) and its tailnet name (in go2rtc.yaml, not in git).
+    volumes:
+      - /home/ultra/odroid-overlay/go2rtc.yaml:/config/go2rtc.yaml:ro
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+  # --- not on ODROID: x86-only, needs an NVIDIA GPU, does not fit into 4 GB, or is a laptop device.
+  wyoming-faster-whisper:   # CUDA + large-v3-turbo. STT: see README-ODROID.md, «Голос»
+    profiles: [msi-only]
+  ollama:                   # NVIDIA GPU, 5 GB limit
+    profiles: [msi-only]
+  ollama-embed:             # 2 GB limit, HGA embeddings
+    profiles: [msi-only]
+  openclaw:                 # ~0.8-1 GB idle, depends on chatgpt-web
+    profiles: [msi-only]
+  chatgpt-web:              # Google Chrome: no linux/arm64 build
+    profiles: [msi-only]
+  code-server:              # convenience editor; enable with --profile msi-only if RAM allows
+    profiles: [msi-only]
+  ma-local-audio:           # the laptop's own speakers (ALSA card sofhdadsp)
+    profiles: [msi-only]
+
+networks:
+  ha-net:
+    ipam:
+      config:
+        # Same subnet as on MSI: HA config and host bridges use 172.20.0.1 (gateway = host).
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+          # Dynamic addresses come from the upper half only, so a container that starts before
+          # homeassistant can never take its fixed 172.20.0.5 ("Address already in use").
+          ip_range: 172.20.128.0/17
+  lan:
+    driver_opts:
+      parent: "end0"

@@ -27,11 +27,12 @@ mapfile -d '' -t STAGED_FILES < <(
     git diff --cached --name-only -z --diff-filter=ACMR
 )
 
-# sops files of machines/rpi4 are public too: every value must be a sops ciphertext (a file
+# sops files of the NixOS hosts are public too: every value must be a sops ciphertext (a file
 # saved after a plain `sops -d` would otherwise be committed in clear text).
 for file in "${STAGED_FILES[@]}"; do
     case "$file" in
-        machines/rpi4/secrets/*)
+        machines/*/secrets/*)
+            host_dir=${file%%/secrets/*}
             PYTHON="${HA_YAML_PYTHON:-python3}"
             if ! "$PYTHON" -c 'import yaml' >/dev/null 2>&1; then
                 echo "COMMIT ABORTED: checking $file needs Python with PyYAML (set HA_YAML_PYTHON)."
@@ -39,7 +40,7 @@ for file in "${STAGED_FILES[@]}"; do
             fi
             if ! "$PYTHON" machines/rpi4/scripts/check-secrets-encrypted.py <(git show ":$file"); then
                 echo ""
-                echo "COMMIT ABORTED: $file is not fully sops-encrypted (edit it with: cd machines/rpi4 && sops ${file#machines/rpi4/})."
+                echo "COMMIT ABORTED: $file is not fully sops-encrypted (edit it with: cd $host_dir && sops ${file#"$host_dir"/})."
                 exit 1
             fi
             ;;

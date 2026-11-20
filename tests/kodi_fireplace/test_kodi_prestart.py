@@ -77,13 +77,13 @@ class PrestartTests(unittest.TestCase):
         self.assertEqual(prestart.prepare(), "reclaim_attempted")
         self.assertEqual(events, ["hdmi", "sync", "drop"])
         self.sync.assert_called_once_with(
-            ["/usr/bin/sync"], check=True, timeout=prestart.SYNC_TIMEOUT
+            ["sync"], check=True, timeout=prestart.SYNC_TIMEOUT
         )
         self.drop.assert_called_once_with()
         self.assertEqual(self.read_memory.call_count, 3)
 
     def test_sync_failure_never_drops_dirty_pages(self) -> None:
-        self.sync.side_effect = subprocess.TimeoutExpired("/usr/bin/sync", 10)
+        self.sync.side_effect = subprocess.TimeoutExpired("sync", 10)
         with self.assertRaises(subprocess.TimeoutExpired):
             prestart.prepare()
         self.drop.assert_not_called()

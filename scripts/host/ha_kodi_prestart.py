@@ -94,8 +94,9 @@ def prepare() -> str:
     if before["CmaFree"] >= MIN_CMA_KIB:
         return "reclaim_unneeded"
     started = time.monotonic()
-    # Fixed system executable, no shell or caller-provided arguments.
-    subprocess.run(["/usr/bin/sync"], check=True, timeout=SYNC_TIMEOUT)
+    # `sync` from the unit's PATH (NixOS has no /usr/bin/sync); both units set a
+    # root-only PATH. No shell, no caller-provided arguments.
+    subprocess.run(["sync"], check=True, timeout=SYNC_TIMEOUT)  # noqa: S607
     if not hdmi_connected():
         return "hdmi_disconnected"
     if read_memory()["CmaFree"] >= MIN_CMA_KIB:

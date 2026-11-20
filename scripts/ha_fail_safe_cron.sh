@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Wrapper for cron - runs check and auto-fixes if needed
 # Anti-flap: skip restart if HA container started < 10 minutes ago
 LOG=/tmp/ha_check.log

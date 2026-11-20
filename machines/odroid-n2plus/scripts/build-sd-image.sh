@@ -19,7 +19,7 @@ extra-platforms = aarch64-linux
 system-features = nixos-test benchmark big-parallel
 max-jobs = 1
 cores = 4"
-  tools=$(nix build --no-link --print-out-paths --inputs-from /flake \
+  tools=$(nix build --no-link --print-out-paths --inputs-from 'path:/repo?dir=machines' \
     nixpkgs#qemu-user nixpkgs#util-linux.bin)
   qemu=$(echo "$tools" | grep qemu-user)/bin/qemu-aarch64
   utilbin=$(echo "$tools" | grep util-linux)/bin
@@ -30,7 +30,7 @@ cores = 4"
     # aarch64 ELF magic/mask as in qemu scripts/qemu-binfmt-conf.sh; F = open interpreter now.
     printf "%s" ":qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:$0:F" > /run/binfmt/register
     out=$(nice -n 10 "$1/ionice" -c3 nix build --no-link --print-out-paths --print-build-logs \
-      /flake#packages.x86_64-linux.odroid-n2plus-sdImage)
+      "path:/repo?dir=machines#packages.x86_64-linux.odroid-n2plus-sdImage")
     img=$(ls "$out"/sd-image/*.img.zst)
     cp -f "$img" /out/
     cd /out && sha256sum "$(basename "$img")" > "$(basename "$img").sha256"
@@ -40,8 +40,9 @@ cores = 4"
   ' "$qemu" "$utilbin"
 fi
 
-# The machines/ flake (two levels up from this script) is mounted read-only as /flake.
-here=$(cd "$(dirname "$0")/../.." && pwd)
+# The whole repository (three levels up from this script) is mounted read-only as /repo: the odroid modules use
+# scripts from outside machines/, so the flake source must be the repository root (path:/repo?dir=machines).
+here=$(cd "$(dirname "$0")/../../.." && pwd)
 default_out="${XDG_CACHE_HOME:-$HOME/.cache}/odroid-n2plus-image"
 outdir=$(mkdir -p "${1:-$default_out}" && cd "${1:-$default_out}" && pwd)
 
@@ -50,7 +51,7 @@ outdir=$(mkdir -p "${1:-$default_out}" && cd "${1:-$default_out}" && pwd)
 docker run --rm --privileged \
   --memory 8g --memory-swap 8g --cpus 4 \
   -v nix-odroid-n2plus:/nix \
-  -v "$here":/flake:ro \
+  -v "$here":/repo:ro \
   -v "$outdir":/out \
   nixos/nix@sha256:b49cb33f3a7e5cf3933ad8774529de0e3807ec5cf54987aa7ccdfb49f2fc55ed \
-  bash /flake/odroid-n2plus/scripts/build-sd-image.sh --inside-container
+  bash /repo/machines/odroid-n2plus/scripts/build-sd-image.sh --inside-container
