@@ -247,6 +247,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.calls[-1][1]["volume_level"], 0.8)
                 self.assertEqual(self.hass.states.get(self.entity).state, speaker_state)
 
+    async def test_stale_backing_player_and_assumed_yandex_are_not_playback(
+        self,
+    ) -> None:
+        tv = "media_player.ue48j5500_ue48j5500"
+        projector = "media_player.projector"
+        for display, owner_key, owner in (
+            (tv, "media_control_entity_id", "media_player.gostinaia_2"),
+            (projector, "paired_player_entity_id", "media_player.home"),
+        ):
+            with self.subTest(display=display):
+                self.hass.states.async_set(
+                    self.entity, "playing", {"assumed_state": True}
+                )
+                self.hass.states.async_set(display, "playing", {owner_key: owner})
+                for state, attrs in (
+                    ("playing", {"restored": True}),
+                    ("paused", {}),
+                    ("off", {}),
+                ):
+                    self.hass.states.async_set(owner, state, attrs)
+                    self.assertEqual(self.manager.label_volume(0.8), 0.4)
+                self.hass.states.async_set(owner, "playing")
+                self.assertEqual(self.manager.label_volume(0.8), 0.6)
+                self.hass.states.async_set(display, "off")
+
     async def test_restored_playback_cannot_raise_idle_label(self) -> None:
         self.hass.states.async_set(
             "media_player.projector", "playing", {"restored": True}

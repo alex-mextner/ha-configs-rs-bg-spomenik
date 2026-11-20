@@ -491,24 +491,40 @@ class Manager:
         message = "aisis_volume_recovery_pending"
         raise ProviderNotReadyError(message)
 
+    @staticmethod
+    def observed_playback(state: State | None) -> bool:
+        """Ignore cached startup states and optimistic cloud-only reports."""
+        return bool(
+            state
+            and state.state == "playing"
+            and not state.attributes.get("restored")
+            and not state.attributes.get("assumed_state")
+        )
+
     def label_volume(self, old_volume: float) -> float:
         """Sample room playback before a label changes music or speaker volume."""
         if "playback_entities" not in self.config:
             return speech_volume(old_volume, self.config["volume_floor"])
         for entity_id in self.config["playback_entities"]:
             state = self.hass.states.get(entity_id)
-            if (
-                not state
-                or state.state != "playing"
-                or state.attributes.get("restored")
-            ):
+            if state is None or not self.observed_playback(state):
                 continue
+            attrs = state.attributes
+            # Samsung publishes its selected Cast/Android/MA owner. The
+            # projector publishes Kodi. Check the actual source as well as
+            # display power because the facade does not forward restored flags.
+            if "media_control_entity_id" in attrs or "paired_player_entity_id" in attrs:
+                owner = attrs.get(
+                    "media_control_entity_id", attrs.get("paired_player_entity_id")
+                )
+                if not owner or not self.observed_playback(self.hass.states.get(owner)):
+                    continue
             # Yandex native speech and cues use Alice, independently of the
             # media player. A speech-only echo has no underlying player content.
             if (
                 entity_id == self.config["yandex_entity"]
-                and state.attributes.get("alice_state") in ("SPEAKING", "NONE")
-                and not state.attributes.get("media_content_id")
+                and attrs.get("alice_state") in ("SPEAKING", "NONE")
+                and not attrs.get("media_content_id")
             ):
                 continue
             return 0.6

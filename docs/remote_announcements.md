@@ -73,7 +73,9 @@ and the living-room Yandex Mini. Both displays report their routed player only
 while the display is powered. Native Alice speech without underlying media does
 not count. Each queued label reads current playback after the preceding label or
 quiet cue completes. Paused, idle, powered-on, buffering, unavailable
-and restored states do not count as playing. The same rule applies when the
+and restored states do not count as playing. The display’s selected player must
+also report observed playback. An assumed cloud-only speaker state after a
+disconnect does not raise the volume. The same rule applies when the
 studio speaker is selected for announcements. A louder speaker is temporarily
 turned down. Older configurations without `playback_entities` keep their
 configured minimum speech volume.
