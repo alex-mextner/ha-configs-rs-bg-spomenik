@@ -76,7 +76,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(self.config["backend_entity"], "AISIS")
         self.hass.states.async_set(self.config["aisis_connected_entity"], "on")
         self.hass.states.async_set(entity, "idle", {"volume_level": 0.1})
-        self.manager.volume_recovery[entity] = (0.4, 0.1)
+        self.manager.volume_recovery[entity] = integration.VolumeRestore(0.4, 0.1)
         await self.reject("pending-recovery")
         self.assertEqual(
             self.manager.public_status["rejection_drop_reason"],
@@ -240,7 +240,9 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.reject("unconfirmed-restore")
         self.assertEqual(self.spoken_status(), before)
-        self.assertEqual(self.manager.volume_recovery[entity], (0.4, 0.1))
+        self.assertEqual(
+            self.manager.volume_recovery[entity], integration.VolumeRestore(0.4, 0.1)
+        )
         self.assertEqual(
             self.manager.public_status["rejection_status"], "recovery_unconfirmed"
         )

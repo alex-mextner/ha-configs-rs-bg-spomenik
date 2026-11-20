@@ -488,6 +488,50 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.get(self.entity).attributes["volume_level"], 0.2
         )
 
+    async def test_delayed_volume_echo_cannot_skip_original_mute(self) -> None:
+        state = self.hass.states.get(self.entity)
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**state.attributes, "volume_level": 0.8, "is_volume_muted": True},
+        )
+
+        async def echo_later(call) -> None:
+            if call.service == "volume_mute" or call.data["volume_level"] == 0.8:
+                self.calls.append((call.service, dict(call.data)))
+                return
+            await self.media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", echo_later)
+        self.hass.services.async_register("media_player", "volume_mute", echo_later)
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.15),
+            patch.object(integration, "RECOVERY_RESERVE", 0.08),
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(
+            [name for name, _ in self.calls],
+            ["volume_set", "send_command", "volume_set", "volume_mute"],
+        )
+        for level, muted in ((0.4, False), (0.8, False), (0.4, True)):
+            self.hass.states.async_set(
+                self.entity,
+                "paused",
+                {**state.attributes, "volume_level": level, "is_volume_muted": muted},
+            )
+            with self.assertRaisesRegex(
+                ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+            ):
+                await self.manager.announce("tv")
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**state.attributes, "volume_level": 0.8, "is_volume_muted": True},
+        )
+        self.manager.check_aisis_volume_recovery(self.hass.states.get(self.entity))
+        self.assertNotIn(self.entity, self.manager.volume_recovery)
+        self.assertEqual(len(self.calls), 4)
+
     async def test_unconfirmed_final_mute_keeps_next_label_off_stale_state(
         self,
     ) -> None:

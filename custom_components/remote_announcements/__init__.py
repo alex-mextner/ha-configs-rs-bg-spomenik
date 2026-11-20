@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -148,6 +149,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class VolumeRestore:
+    """Describe the remembered level and the transient level until readback."""
+
+    original: float
+    applied: float
+    expect_mute: bool = False
+
+
 class SpeechPlayback:
     """State observed during one announcement, including temporary volume changes."""
 
@@ -229,8 +239,7 @@ class Manager:
         self.generation = 0
         self.closing = False
         self.services = ServiceCalls(hass)
-        # A missing expected level denotes an outstanding final mute.
-        self.volume_recovery: dict[str, tuple[float | None, float]] = {}
+        self.volume_recovery: dict[str, VolumeRestore] = {}
 
     async def close(self) -> None:
         """Stop target listening while retaining unfinished provider ownership."""
@@ -475,30 +484,29 @@ class Manager:
         return f"{backend}_volume_recovery_{status}"
 
     @staticmethod
-    def volume_recovered(state: State, original: float | None, applied: float) -> bool:
-        """Accept a valid original level or a user's different level or mute."""
+    def volume_recovered(state: State, pending: VolumeRestore) -> bool:
+        """Accept a confirmed restore or a user's distinct level or mute."""
         volume = state.attributes.get("volume_level")
-        valid_volume = (
-            state.state not in ("unknown", "unavailable")
-            and isinstance(volume, (int, float))
-            and not isinstance(volume, bool)
-            and 0.0 <= volume <= 1.0
-        )
-        return valid_volume and (
-            state.attributes.get("is_volume_muted") is True
-            or (
-                original is not None
-                and can_restore_volume(volume, original, muted=False)
-            )
-            or not can_restore_volume(volume, applied, muted=False)
-        )
+        if (
+            state.state in ("unknown", "unavailable")
+            or type(volume) not in (int, float)
+            or not 0.0 <= volume <= 1.0
+        ):
+            return False
+        at_original = can_restore_volume(volume, pending.original, muted=False)
+        at_override = can_restore_volume(volume, pending.applied, muted=False)
+        muted = state.attributes.get("is_volume_muted") is True
+        if pending.expect_mute:
+            # Yandex may report mute before its remembered volume echo.
+            return (muted and at_original) or (not at_original and not at_override)
+        return muted or at_original or not at_override
 
     def check_aisis_volume_recovery(self, state: State) -> None:
         """Check pending speech restores before either labels or quiet cues."""
         pending = self.volume_recovery.get(state.entity_id)
         if pending is None:
             return
-        if self.volume_recovered(state, *pending):
+        if self.volume_recovered(state, pending):
             self.volume_recovery.pop(state.entity_id)
             return
         raise ProviderNotReadyError(self.recovery_reason(state.entity_id, "pending"))
@@ -660,7 +668,7 @@ class Manager:
         @callback
         def observe(_event: Event[EventStateChangedData] | None = None) -> None:
             state = self.hass.states.get(playback.entity)
-            if state and self.volume_recovered(state, *expected):
+            if state and self.volume_recovered(state, expected):
                 confirmed.set()
 
         unsubscribe = async_track_state_change_event(
@@ -690,7 +698,7 @@ class Manager:
         )
         try:
             if verify_volume:
-                self.volume_recovery[playback.entity] = (
+                self.volume_recovery[playback.entity] = VolumeRestore(
                     playback.old_volume,
                     playback.applied,
                 )
@@ -705,34 +713,34 @@ class Manager:
                 if verify_volume:
                     self.volume_recovery.pop(playback.entity, None)
                 return
+            if playback.muted_before:
+                # The remembered volume command has been accepted. Send the
+                # original mute in order even if the level echo is still in
+                # flight. Only our two known levels permit that command.
+                def remute_allowed() -> bool:
+                    return self.volume_unchanged(
+                        playback, playback.old_volume
+                    ) or self.volume_unchanged(playback, playback.applied)
+
+                if remute_allowed():
+                    self.volume_recovery[playback.entity] = VolumeRestore(
+                        playback.old_volume,
+                        playback.applied,
+                        expect_mute=True,
+                    )
+                    sent = await self.call(
+                        "volume_mute",
+                        playback.entity,
+                        is_volume_muted=True,
+                        deadline=playback.recovery_deadline,
+                        guard=remute_allowed,
+                    )
+                    if not sent:
+                        self.volume_recovery.pop(playback.entity, None)
+                        return
             if verify_volume:
                 await self.confirm_restored_volume(playback)
                 self.volume_recovery.pop(playback.entity, None)
-            # A human can change volume/mute while the restore service is awaited.
-            # Check again immediately before restoring mute.
-            restored = self.hass.states.get(playback.entity)
-            if (
-                playback.muted_before
-                and restored
-                and can_restore_volume(
-                    restored.attributes.get("volume_level"),
-                    playback.old_volume,
-                    muted=restored.attributes.get("is_volume_muted", False),
-                )
-            ):
-                if verify_volume:
-                    self.volume_recovery[playback.entity] = (None, playback.old_volume)
-                sent = await self.call(
-                    "volume_mute",
-                    playback.entity,
-                    is_volume_muted=True,
-                    deadline=playback.recovery_deadline,
-                    guard=lambda: self.volume_unchanged(playback, playback.old_volume),
-                )
-                if verify_volume:
-                    if sent:
-                        await self.confirm_restored_volume(playback)
-                    self.volume_recovery.pop(playback.entity, None)
         except Exception as error:
             _LOGGER.exception(
                 "Announcement volume recovery failed", exc_info=exception_info(error)
