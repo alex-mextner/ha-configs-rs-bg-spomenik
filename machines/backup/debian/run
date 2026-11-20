@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# backup: nightly restic backup to Google Drive for a Debian/Ubuntu host (debian-tweaks module, verbs check|plan|install).
+#   [modules.backup] host = "<name>"   reads machines/backup/hosts/<name>.toml (default: this machine's hostname)
+# Installs the pinned static restic and rclone, lib/homelab-backup + lib/tasks_offsite.py, the rendered config.json,
+# and the systemd units/timers (policy.toml: schedule, retention); enables the timers.
+# scope = "system" (root): /usr/local, /etc/homelab-backup, system units.
+# scope = "user": run as that user, no root: ~/.local, ~/.config/homelab-backup, user units.
+# The secrets (restic password, rclone.conf) are never written here: README.md, Secrets.
+self=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+# shellcheck source=/dev/null # debian-tweaks helpers: machines/bananapi-m4/lib/common.sh (DT_DIR is set by the engine / install.sh)
+source "${DT_DIR:?run through the debian-tweaks engine or machines/backup/debian/install.sh}/lib/common.sh" "$@"
+backup_dir=$(dirname "$self")
+
+host=$(opt '.host // empty')
+host=${host:-$(hostname)}
+host_file=$backup_dir/hosts/$host.toml
+[[ -f $host_file ]] || { echo "  no $host_file" >&2; exit 2; }
+toml() { python3 -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb"))))' "$1"; }
+host_json=$(toml "$host_file")
+policy_json=$(toml "$backup_dir/policy.toml")
+scope=$(jq -r '.scope // "system"' <<<"$host_json")
+# without paths the nightly run would back up only the dumps and still report ok; an early copy of the shape check at
+# the top of lib/homelab-backup's do_run, which also fails a run when none of the paths exist
+jq -e '.paths | type == "array" and length > 0' <<<"$host_json" >/dev/null ||
+	{ echo "  $host_file: paths must be a non-empty list" >&2; exit 2; }
+
+if [[ $scope == user ]]; then
+	((EUID != 0)) || { echo "  $host has scope = \"user\": run install.sh as that user, not root" >&2; exit 2; }
+	owner="$(id -un):$(id -gn)"
+	bindir=$HOME/.local/bin
+	libdir=$HOME/.local/lib/homelab-backup
+	confdir=$HOME/.config/homelab-backup
+	unitdir=$HOME/.config/systemd/user
+	statedir=$HOME/.local/state/homelab-backup
+	cachedir=$HOME/.cache/homelab-backup
+	ctl=(systemctl --user)
+	path=$bindir:/usr/local/bin:/usr/bin:/bin
+else
+	# without root /etc/homelab-backup (0700) reads as missing: false drift in check, a half install in --commit
+	((EUID == 0)) || { echo "  $host has scope = \"system\": run install.sh with sudo" >&2; exit 6; }
+	owner=root:root
+	bindir=/usr/local/bin
+	libdir=/usr/local/lib/homelab-backup
+	confdir=/etc/homelab-backup
+	unitdir=/etc/systemd/system
+	statedir=/var/lib/homelab-backup
+	cachedir=/var/cache/homelab-backup
+	ctl=(systemctl)
+	path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+# homelab-backup is linked into $bindir below; refused here, before anything is written, so neither --commit nor plan
+# stops halfway. ln would replace a file without the backup ensure_file makes, or link inside a directory and never
+# converge
+link=$bindir/homelab-backup
+[[ -L $link || ! -e $link ]] || { echo "  $link exists and is not a symlink: move it away" >&2; exit 1; }
+rclone_config=$(jq -r --arg d "$confdir/rclone.conf" '.rclone_config // $d' <<<"$host_json")
+password_file=$confdir/restic-password
+pol() { jq -r "$1" <<<"$policy_json"; }
+
+# --- packages: sqlite3 for the SQLite dumps and the drill ---------------------------------------------------
+if ! command -v sqlite3 >/dev/null; then
+	if [[ $scope == user ]]; then
+		echo "  sqlite3 missing and scope = \"user\" cannot install it: sudo apt-get install -y sqlite3" >&2
+		exit 1
+	fi
+	if drift "apt-get install sqlite3"; then
+		apt-get update -q
+		DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sqlite3
+	fi
+fi
+
+# --- restic and rclone: static builds, pinned in policy.toml, sha256-verified ---------------------------------
+# Not the distribution's restic: homelab-backup needs 0.17+ (--retry-lock, exit code 10), Debian 12 ships 0.14.
+arch=$(dpkg --print-architecture)
+for tool in restic rclone; do
+	[[ -n $(pol ".$tool.sha256.$arch // empty") ]] || { echo "  policy.toml has no $tool sha256 for $arch" >&2; exit 2; }
+done
+# install_pinned TOOL URL: download URL, check it against policy.toml's TOOL sha256 for this arch, and install the
+# TOOL binary from it (a .bz2 of the binary, or a .zip holding */TOOL) to $bindir
+install_pinned() (
+	tool=$1 url=$2
+	tmp=$(mktemp -d)
+	trap 'rm -rf "$tmp"' EXIT
+	curl -fsSL -o "$tmp/download" "$url"
+	echo "$(pol ".$tool.sha256.$arch")  $tmp/download" | sha256sum --check --quiet
+	case $url in
+	*.bz2)
+		python3 -c 'import bz2, shutil, sys
+with bz2.open(sys.argv[1]) as src, open(sys.argv[2], "wb") as dst:
+    shutil.copyfileobj(src, dst)' "$tmp/download" "$tmp/$tool"
+		;;
+	*.zip)
+		python3 -m zipfile -e "$tmp/download" "$tmp/unzipped"
+		mv "$tmp"/unzipped/*/"$tool" "$tmp/$tool"
+		;;
+	esac
+	install -D -m 755 "$tmp/$tool" "$bindir/$tool"
+)
+version=$(pol .restic.version)
+if [[ $("$bindir/restic" version 2>/dev/null | cut -d' ' -f1-2) != "restic $version" ]]; then
+	if drift "install restic v$version ($arch) to $bindir/restic"; then
+		install_pinned restic "https://github.com/restic/restic/releases/download/v$version/restic_${version}_linux_$arch.bz2"
+	fi
+fi
+version=$(pol .rclone.version)
+if [[ $("$bindir/rclone" version 2>/dev/null | head -1) != "rclone v$version" ]]; then
+	if drift "install rclone v$version ($arch) to $bindir/rclone"; then
+		install_pinned rclone "https://downloads.rclone.org/v$version/rclone-v$version-linux-$arch.zip"
+	fi
+fi
+
+# --- scripts and config ---------------------------------------------------------------------------------------
+# with_marker FILE: the file with the debian-tweaks marker as its second line (after the shebang)
+with_marker() { sed "1a $MARKER" "$1"; }
+if [[ $MODE == install ]]; then
+	install -d -m 700 -o "${owner%%:*}" -g "${owner##*:}" "$confdir" "$statedir" "$cachedir"
+fi
+# ensure_file reads stdin and counts drift in this shell: feed it with `< <(...)`, never through a pipe (subshell)
+ensure_file "$libdir/homelab-backup" 755 "$owner" < <(with_marker "$backup_dir/lib/homelab-backup") || true
+ensure_file "$libdir/tasks_offsite.py" 644 "$owner" < <(with_marker "$backup_dir/lib/tasks_offsite.py") || true
+# on PATH, as the README's commands expect; do_tasks finds tasks_offsite.py through readlink -f "$0"
+if [[ $(readlink "$link" 2>/dev/null) != "$libdir/homelab-backup" ]]; then
+	if drift "link $link -> $libdir/homelab-backup"; then
+		mkdir -p "$bindir"
+		ln -sfn "$libdir/homelab-backup" "$link"
+	fi
+fi
+
+render_config() {
+	jq -n --arg marker "$MARKER Source: machines/backup/hosts/$host.toml + policy.toml." \
+	--argjson h "$host_json" --argjson p "$policy_json" \
+	--arg password_file "$password_file" --arg rclone_config "$rclone_config" --arg rclone "$bindir/rclone" \
+	--arg restic "$bindir/restic" --arg state "$statedir" --arg cache "$cachedir" '
+	def folder(host): "\($p.remote):\($p.folder_prefix)-\(host)";
+	{
+		_comment: $marker,
+		host: $h.host,
+		drive_folder: folder($h.host),
+		repository: "rclone:\(folder($h.host))/restic",
+		password_file: $password_file,
+		rclone_config: $rclone_config,
+		rclone_program: $rclone,
+		restic_program: $restic,
+		state_dir: $state,
+		cache_dir: $cache,
+		paths: $h.paths,
+		exclude: ($h.exclude // []),
+		dumps: ($h.dumps // []),
+		drill_file: ($h.drill_file // ""),
+		notify: ($h.notify // []),
+		tasks_offsite: ($h.tasks_offsite // null),
+		watch: [($h.watch // [])[] | {host: ., folder: folder(.)}],
+		policy: $p
+	}'
+}
+ensure_file "$confdir/config.json" 644 "$owner" < <(render_config) || true
+
+# --- systemd units --------------------------------------------------------------------------------------------
+# service DESCRIPTION VERB [EXTRA_UNIT_LINE]: a oneshot that runs `homelab-backup VERB`
+service() {
+	printf '%s\n' "$MARKER" "[Unit]" "Description=$1"
+	# the user manager has no network-online.target
+	[[ $scope == user ]] || printf '%s\n' "Wants=network-online.target" "After=network-online.target"
+	[[ -z ${3:-} ]] || printf '%s\n' "$3"
+	cat <<EOF
+
+[Service]
+Type=oneshot
+Environment=HOMELAB_BACKUP_CONFIG=$confdir/config.json
+Environment=PATH=$path
+ExecStart=$libdir/homelab-backup $2
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=12h
+EOF
+}
+# timer DESCRIPTION ONCALENDAR [RANDOMIZED_DELAY]
+timer() {
+	cat <<EOF
+$MARKER
+[Unit]
+Description=$1
+
+[Timer]
+OnCalendar=$2
+RandomizedDelaySec=${3:-5min}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+reload=0
+unit() { if ensure_file "$unitdir/$1" 644 "$owner"; then reload=1; fi; }
+unit homelab-backup.service < <(service "homelab-backup: database dumps + restic backup to Google Drive" run)
+unit homelab-backup.timer < <(timer "homelab-backup: nightly backup" "$(pol .schedule.backup)" "$(pol .schedule.backup_randomized_delay)")
+unit homelab-backup-check.service < <(service "homelab-backup: restic check --read-data-subset=$(pol .check.read_data_subset)" check)
+unit homelab-backup-check.timer < <(timer "homelab-backup: weekly repository check" "$(pol .schedule.check)")
+unit homelab-backup-drill.service < <(service "homelab-backup: monthly restore drill" drill)
+unit homelab-backup-drill.timer < <(timer "homelab-backup: monthly restore drill" "$(pol .schedule.drill)")
+timers=(homelab-backup.timer homelab-backup-check.timer homelab-backup-drill.timer)
+# retire NAME: the optional NAME.service/.timer pair the host file no longer asks for: disable the timer, remove both
+retire() {
+	if "${ctl[@]}" is-enabled -q "$1.timer" 2>/dev/null; then
+		drift "disable --now $1.timer" && "${ctl[@]}" disable --now "$1.timer"
+	fi
+	if absent "$unitdir/$1.service"; then reload=1; fi
+	if absent "$unitdir/$1.timer"; then reload=1; fi
+}
+if jq -e .tasks_offsite <<<"$host_json" >/dev/null; then
+	unit homelab-backup-tasks.service < <(service "homelab-backup: copy the encrypted Tasks backups to Google Drive" tasks \
+		"After=tasks-backup-pull.service")
+	unit homelab-backup-tasks.timer < <(timer "homelab-backup: hourly off-site copy of the Tasks backups" "$(pol .schedule.tasks)" 2min)
+	timers+=(homelab-backup-tasks.timer)
+else
+	retire homelab-backup-tasks
+fi
+if jq -e '.watch // [] | length > 0' <<<"$host_json" >/dev/null; then
+	unit homelab-backup-watch.service < <(service "homelab-backup: alert when a watched host's backups are stale or failing" watch)
+	unit homelab-backup-watch.timer < <(timer "homelab-backup: daily look at the other hosts' backups" "$(pol .schedule.watch)")
+	timers+=(homelab-backup-watch.timer)
+else
+	retire homelab-backup-watch
+fi
+if [[ $MODE == install && $reload == 1 ]]; then "${ctl[@]}" daemon-reload; fi
+
+for t in "${timers[@]}"; do
+	if ! "${ctl[@]}" is-enabled -q "$t" 2>/dev/null || ! "${ctl[@]}" is-active -q "$t" 2>/dev/null; then
+		drift "enable --now $t" && "${ctl[@]}" enable --now "$t"
+	fi
+done
+
+# --- secrets: provisioned once by the owner, never by this module ---------------------------------------------
+for secret in "$password_file" "$rclone_config"; do
+	[[ -s $secret ]] || say "! $secret is missing: the timers will fail until it exists (README.md, Secrets)"
+done
+finish

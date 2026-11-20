@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+# homelab-backup: nightly restic backup of one host to its own repository (rclone -> Google Drive), plus the
+# consistent database dumps it needs, the weekly check, the monthly restore drill and the Tasks off-site copy.
+#
+#   homelab-backup run            dump databases, back up, apply retention (the nightly timer)
+#   homelab-backup dump           only the dumps into <state_dir>/staging
+#   homelab-backup check          restic check --read-data-subset=<policy>
+#   homelab-backup drill          restore the dumps + drill_file from the latest nightly snapshot into a temp dir, verify
+#   homelab-backup tasks          copy the Tasks puller's encrypted sets off-site (lib/tasks_offsite.py)
+#   homelab-backup watch          fail when a watched host's backups in the Drive are stale or failing
+#   homelab-backup init           create the repository; the only verb that ever does
+#   homelab-backup snapshots|restic ARGS...   inspect: `restic snapshots` / any restic command with this host's env
+#   homelab-backup status         print the last status of every verb
+#
+# Everything host-specific comes from one JSON file ($HOMELAB_BACKUP_CONFIG, default /etc/homelab-backup/config.json
+# for root, ~/.config/homelab-backup/config.json otherwise), rendered from machines/backup/hosts/<host>.toml and
+# policy.toml by debian/run or nixos.nix. Secrets are never in it, only the paths of the files that hold them.
+# Each verb writes <state_dir>/status-<verb>.json; the verbs the timers run also copy it to <drive_folder>/status/
+# for the watch (only into a folder that exists). A failure also runs the configured notify command (if any).
+set -euo pipefail
+
+if [[ -n ${HOMELAB_BACKUP_CONFIG:-} ]]; then
+	CONFIG=$HOMELAB_BACKUP_CONFIG
+elif ((EUID == 0)); then
+	CONFIG=/etc/homelab-backup/config.json
+else
+	CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/homelab-backup/config.json
+fi
+[[ -r $CONFIG ]] || { echo "homelab-backup: cannot read $CONFIG (install machines/backup first)" >&2; exit 2; }
+
+cfg() { jq -r "$1" "$CONFIG"; }
+
+HOST=$(cfg .host)
+STATE=$(cfg .state_dir)
+STAGING=$STATE/staging
+# set per verb (verb()): the reason the running verb failed, one file per verb so overlapping runs keep their own
+REASON=$STATE/.reason
+# the tag of the nightly snapshots: `run` sets it, retention and the drill only look at those
+NIGHTLY=nightly
+# the tag `run` gives a snapshot when none of the paths exist (only the dumps): kept apart so it never takes a nightly
+# retention slot from an older full snapshot, nor becomes the drill's snapshot; the next full run forgets them
+DUMPS_ONLY=dumps-only
+RESTIC=$(cfg '.restic_program // "restic"')
+RCLONE=$(cfg '.rclone_program // "rclone"')
+export RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_CACHE_DIR
+RESTIC_REPOSITORY=$(cfg .repository)
+RESTIC_PASSWORD_FILE=$(cfg .password_file)
+RESTIC_CACHE_DIR=$(cfg .cache_dir)
+if [[ $(cfg '.rclone_config // ""') != "" ]]; then export RCLONE_CONFIG; RCLONE_CONFIG=$(cfg .rclone_config); fi
+# another restic process (backup vs. weekly check) holds the repository lock: wait for it instead of failing
+restic_opts=(--retry-lock 2h)
+if [[ $RESTIC_REPOSITORY == rclone:* ]]; then restic_opts+=(-o "rclone.program=$RCLONE"); fi
+
+umask 077
+# the temp files of restic (pack files), sqlite3 and rclone go to the state dir's disk: /tmp is RAM on Armbian
+# (256M on bananapi-m4)
+export TMPDIR=$STATE/tmp
+mkdir -p "$STATE" "$TMPDIR" "$RESTIC_CACHE_DIR"
+
+log() { echo "homelab-backup[$HOST]: $*" >&2; }
+# die MESSAGE: fail the current verb with MESSAGE as the recorded reason
+die() {
+	log "$*"
+	echo "$*" >"$REASON"
+	exit 1
+}
+# attempt CMD...: run CMD in a subshell with errexit in force; its exit code goes to ATTEMPT and the reason it died
+# with (die) to ATTEMPT_REASON. A plain `CMD || ...` or `if CMD` would switch errexit off inside CMD, so a failing
+# step in it would go unnoticed.
+attempt() {
+	rm -f "$REASON"
+	set +e
+	(
+		set -e
+		"$@"
+	)
+	ATTEMPT=$?
+	set -e
+	ATTEMPT_REASON=$(cat "$REASON" 2>/dev/null) || ATTEMPT_REASON=
+	rm -f "$REASON"
+}
+# `command`: with the default restic_program "restic" a plain call would recurse into this function
+restic() { command "$RESTIC" "${restic_opts[@]}" "$@"; }
+
+need_rclone_config() {
+	[[ -r ${RCLONE_CONFIG:-} ]] || die "rclone config ${RCLONE_CONFIG:-<unset>} is missing: see machines/backup/README.md, Secrets"
+}
+
+need_secrets() {
+	[[ -r $RESTIC_PASSWORD_FILE ]] || die "restic password file $RESTIC_PASSWORD_FILE is missing: see machines/backup/README.md, Secrets"
+	if [[ $RESTIC_REPOSITORY == rclone:* ]]; then need_rclone_config; fi
+}
+
+# record VERB ok|fail [MESSAGE]: status JSON for monitoring, a copy of it in this host's Drive folder for the watch
+# on ubuntu-pc, and on failure the notify command
+record() {
+	local verb=$1 result=$2 message=${3:-} tmp folder err
+	tmp=$(mktemp "$STATE/.status.XXXXXX")
+	jq -n --arg verb "$verb" --arg host "$HOST" --arg result "$result" --arg message "$message" \
+		--arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg started "${STARTED:-}" \
+		'{host: $host, verb: $verb, ok: ($result == "ok"), message: $message, started_at: $started, finished_at: $finished}' >"$tmp"
+	chmod 644 "$tmp"
+	mv "$tmp" "$STATE/status-$verb.json"
+	# Only the verbs the timers run, so a status the watch reads is always refreshed by the next timer run, and only
+	# into a folder that exists: a token that cannot see the real one would create a second folder of that name.
+	# Best effort: when the upload fails, the watch reports this host's status as stale.
+	folder=$(cfg '.drive_folder // ""')
+	if [[ -n $folder && -r ${RCLONE_CONFIG:-} && $verb =~ ^(run|check|drill|tasks|watch)$ ]]; then
+		# a missing folder, an expired token and a network error all fail here: log rclone's own reason, on one line
+		# (the journal takes one line per entry, and Google's errors can span several)
+		if err=$("$RCLONE" lsf --max-depth 1 "$folder" 2>&1 >/dev/null | tr -s '\n' ' '); then
+			"$RCLONE" copyto "$STATE/status-$verb.json" "$folder/status/status-$verb.json" || log "status upload to $folder failed"
+		else
+			log "status not uploaded: cannot list $folder: $err"
+		fi
+	fi
+	if [[ $result != ok ]] && [[ $(cfg '.notify | length') -gt 0 ]]; then
+		local notify
+		mapfile -t notify < <(cfg '.notify[]')
+		"${notify[@]}" "homelab-backup $HOST: $verb failed: $message" || log "notify command failed"
+	fi
+}
+
+# --- dumps ------------------------------------------------------------------------------------------------------
+
+# publish SRC DST: move SRC over DST, or drop it when the content is unchanged, so an unchanged database keeps its
+# mtime and restic sees nothing to back up
+publish() {
+	if cmp -s "$1" "$2"; then rm -f "$1"; else mv -f "$1" "$2"; fi
+}
+# the checks of a dump, when it is made and again in the drill
+sqlite_intact() { [[ $(sqlite3 "$1" "PRAGMA integrity_check") == ok ]]; }
+is_pg_archive() { [[ $(head -c 5 "$1") == PGDMP ]]; }
+
+# The dumpers below build their dump in WORK (see dump_one) and move it into $STAGING only once it checked out.
+# Every step checks its own result (`|| return 1`): they must not rely on errexit alone, so a failed dump can never
+# replace the previous good one.
+dump_sqlite() {
+	local name=$1 work=$2 source=$3 need avail
+	[[ -f $source ]] || { log "dump $name: $source does not exist"; return 1; }
+	# the dump is at most the database plus its WAL
+	need=$(($(stat -c %s "$source") + $(stat -c %s "$source-wal" 2>/dev/null || echo 0)))
+	avail=$(df -B1 --output=avail "$work" | tail -n 1) || return 1
+	((avail > need)) || { log "dump $name: needs $need bytes in $STATE, only $avail free"; return 1; }
+	# VACUUM INTO: a consistent copy inside one read transaction, so the application keeps writing (WAL included)
+	# and the copy never has to restart, unlike `.backup` on a database that is written every few seconds.
+	# Run as root this is still safe for the application: SQLite gives the -wal/-shm files it creates as root to
+	# the database's owner (tests/in-docker.sh).
+	sqlite3 "$source" ".timeout 60000" "VACUUM INTO '$work/db'" || { log "dump $name: VACUUM INTO failed"; return 1; }
+	[[ -s $work/db ]] || { log "dump $name: empty dump"; return 1; }
+	sqlite_intact "$work/db" || { log "dump $name: integrity_check failed"; return 1; }
+	publish "$work/db" "$STAGING/$name.sqlite"
+}
+
+dump_postgres() {
+	local name=$1 work=$2 container=$3 database=$4 user=$5
+	docker exec "$container" pg_dump -U "$user" -d "$database" -Fc >"$work/dump" || { log "dump $name: pg_dump failed"; return 1; }
+	is_pg_archive "$work/dump" || { log "dump $name: pg_dump output is not a custom-format archive"; return 1; }
+	publish "$work/dump" "$STAGING/$name.pgdump"
+}
+
+dump_redis() {
+	local name=$1 work=$2 container=$3 before i
+	before=$(docker exec "$container" redis-cli LASTSAVE) || { log "dump $name: redis-cli failed"; return 1; }
+	docker exec "$container" redis-cli BGSAVE >/dev/null || { log "dump $name: BGSAVE failed"; return 1; }
+	for ((i = 0; i < 300; i++)); do
+		[[ $(docker exec "$container" redis-cli LASTSAVE) != "$before" ]] && break
+		sleep 1
+	done
+	((i < 300)) || { log "dump $name: BGSAVE did not finish in 5 minutes"; return 1; }
+	# the RDB snapshot plus the AOF directory (when appendonly is on)
+	mkdir "$work/data" || return 1
+	docker cp "$container:/data/." "$work/data/" || { log "dump $name: docker cp failed"; return 1; }
+	[[ -n $(ls -A "$work/data") ]] || { log "dump $name: empty /data"; return 1; }
+	rm -rf "${STAGING:?}/$name" || return 1
+	mv "$work/data" "$STAGING/$name"
+}
+
+# dump_one ENTRY_JSON: one [[dumps]] entry, in a subshell of its own. Its work dir $STATE/.work-<name> is on the
+# state dir's disk (never /tmp); the subshell's EXIT trap removes it whatever happens, and one a killed run left
+# behind goes at the start.
+dump_one() (
+	type=$(jq -r .type <<<"$1")
+	name=$(jq -r .name <<<"$1")
+	work=$STATE/.work-$name
+	log "dump $name ($type)"
+	rm -rf "$work"
+	mkdir "$work"
+	trap 'rm -rf "$work"' EXIT
+	case $type in
+	sqlite) dump_sqlite "$name" "$work" "$(jq -r .source <<<"$1")" ;;
+	postgres) dump_postgres "$name" "$work" "$(jq -r .container <<<"$1")" "$(jq -r .database <<<"$1")" "$(jq -r .user <<<"$1")" ;;
+	redis) dump_redis "$name" "$work" "$(jq -r .container <<<"$1")" ;;
+	*) log "dump $name: unknown type $type" && exit 1 ;;
+	esac
+)
+
+# dump: every [[dumps]] entry into $STAGING, then SHA256SUMS over the staging dir (the drill verifies it).
+# A failing dump does not stop the others; the verb fails at the end with the list of failed dumps.
+do_dump() {
+	local count i failed=() sums=$STATE/.SHA256SUMS
+	mkdir -p "$STAGING"
+	# leftovers of the earlier layout, which built dumps as <name>.tmp inside the staging dir
+	rm -rf "${STAGING:?}"/*.tmp
+	count=$(cfg '.dumps | length')
+	for ((i = 0; i < count; i++)); do
+		attempt dump_one "$(cfg ".dumps[$i]")"
+		((ATTEMPT == 0)) || failed+=("$(cfg ".dumps[$i].name")")
+	done
+	(cd "$STAGING" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum) >"$sums"
+	publish "$sums" "$STAGING/SHA256SUMS"
+	((${#failed[@]} == 0)) || die "dumps failed: ${failed[*]}"
+}
+
+# --- backup -----------------------------------------------------------------------------------------------------
+
+# repository_exists: 0 = the repository opens, 1 = there is none at that location (restic exit 10, restic 0.17+);
+# anything else ends the verb with what restic said
+repository_exists() {
+	local code=0
+	restic cat config >/dev/null || code=$?
+	case $code in
+	0) return 0 ;;
+	10) return 1 ;;
+	12) die "wrong restic password for $RESTIC_REPOSITORY ($RESTIC_PASSWORD_FILE)" ;;
+	*) die "cannot open the repository $RESTIC_REPOSITORY (restic exit $code, see the journal)" ;;
+	esac
+}
+
+# open_repository: the repository must exist already. Only `init` creates one: a run that started a new repository
+# on its own (a token that cannot see the old one, a wrong path) would split the history while every status said ok.
+open_repository() {
+	if ! repository_exists; then
+		die "no repository visible at $RESTIC_REPOSITORY. If this host has backed up before, its token cannot see it" \
+			"(a token from another Google Cloud project): fix the token, do not init (README.md, Secrets)." \
+			"Otherwise create it once with \`homelab-backup init\`."
+	fi
+}
+
+# list_paths: what to back up, one per line: the dump staging dir and the configured paths that exist on this host
+# (one host list serves Armbian and NixOS installs of the same machine, so some paths may be absent)
+list_paths() {
+	local path missing=()
+	echo "$STAGING"
+	while IFS= read -r path; do
+		if [[ -e $path ]]; then echo "$path"; else missing+=("$path"); fi
+	done < <(cfg '.paths[]')
+	((${#missing[@]} == 0)) || log "not present on this host, skipped: ${missing[*]}"
+}
+
+# list_excludes: restic exclude patterns; the live SQLite files are replaced by their dumps
+list_excludes() {
+	cfg '.exclude[]'
+	cfg '.dumps[] | select(.type == "sqlite") | .source | ., . + "-wal", . + "-shm", . + "-journal"'
+}
+
+do_run() {
+	local dump_failed="" no_paths="" incomplete="" cleanup_failed="" tag=$NIGHTLY files excludes code ids superseded
+	# without paths the run would back up only the dumps and still report ok (debian/run checks this at install too;
+	# this also covers NixOS)
+	jq -e '.paths | type == "array" and length > 0' "$CONFIG" >/dev/null || die "config: paths must be a non-empty list"
+	need_secrets
+	open_repository
+	attempt do_dump
+	if ((ATTEMPT != 0)); then
+		dump_failed=${ATTEMPT_REASON:-dumps failed}
+		# the reason if a later step fails without one of its own; every die below names the dumps too
+		echo "$dump_failed; the run failed after that too, see the journal" >"$REASON"
+	fi
+	files=$(mktemp "$STATE/.files.XXXXXX")
+	excludes=$(mktemp "$STATE/.exclude.XXXXXX")
+	list_paths >"$files"
+	list_excludes >"$excludes"
+	# list_paths prints the staging dir and then each path that exists: one line = none of the paths exist. Still
+	# back up the dumps, then fail
+	if (($(wc -l <"$files") == 1)); then
+		no_paths="none of the configured paths exist on this host: $(cfg '.paths | join(" ")')"
+		tag=$DUMPS_ONLY
+	fi
+	code=0
+	restic backup --host "$HOST" --tag "$tag" --files-from-verbatim "$files" --exclude-file "$excludes" \
+		--exclude-caches || code=$?
+	rm -f "$files" "$excludes"
+	# 3 = snapshot written but some files could not be read: keep going (retention), report it as a failure
+	((code == 0 || code == 3)) || die "restic backup failed (exit $code)${no_paths:+; $no_paths}${dump_failed:+; $dump_failed}"
+	((code == 0)) || incomplete="snapshot is incomplete: some files could not be read (see the journal)"
+	if [[ -n $no_paths ]]; then
+		# bounded while the condition lasts: the last 7 dumps-only snapshots, the data of older ones pruned
+		restic forget --host "$HOST" --tag "$DUMPS_ONLY" --group-by host --keep-last 7 --prune ||
+			log "forget of the older $DUMPS_ONLY snapshots failed"
+		die "$no_paths (snapshot tagged $DUMPS_ONLY, nightly retention skipped)${incomplete:+; $incomplete}${dump_failed:+; $dump_failed}"
+	fi
+	# a full snapshot supersedes the dumps-only ones. Forget with its own --prune: the nightly forget below prunes only
+	# when it removes a snapshot itself. A failure here fails the run but keeps the nightly retention; the next full run
+	# retries
+	if ids=$(restic snapshots --host "$HOST" --tag "$DUMPS_ONLY" --json | jq -r '.[].id'); then
+		if [[ -n $ids ]]; then
+			mapfile -t superseded <<<"$ids"
+			restic forget --prune "${superseded[@]}" || cleanup_failed="forget of the superseded $DUMPS_ONLY snapshots failed"
+		fi
+	else
+		cleanup_failed="listing the $DUMPS_ONLY snapshots failed"
+	fi
+	restic forget --host "$HOST" --tag "$NIGHTLY" --group-by host --prune \
+		--keep-daily "$(cfg .policy.retention.keep_daily)" \
+		--keep-weekly "$(cfg .policy.retention.keep_weekly)" \
+		--keep-monthly "$(cfg .policy.retention.keep_monthly)"
+	[[ -z $incomplete ]] || die "$incomplete${cleanup_failed:+; $cleanup_failed}${dump_failed:+; $dump_failed}"
+	[[ -z $cleanup_failed ]] || die "$cleanup_failed (the next full run retries)${dump_failed:+; $dump_failed}"
+	[[ -z $dump_failed ]] || die "$dump_failed (the snapshot holds the previous dumps of those)"
+}
+
+do_init() {
+	need_secrets
+	if repository_exists; then log "repository $RESTIC_REPOSITORY exists already"; else restic init; fi
+}
+
+do_check() {
+	need_secrets
+	restic check --read-data-subset="$(cfg .policy.check.read_data_subset)"
+}
+
+# drill: a restore that proves the backup is usable, not only present. Nightly snapshots only: one made by hand with
+# `homelab-backup restic backup ...` has no dump dir.
+do_drill() {
+	local latest snapshot snapshot_time tmp drill_file live restored
+	need_secrets
+	latest=$(restic snapshots --host "$HOST" --tag "$NIGHTLY" --latest 1 --json | jq -c 'max_by(.time) // empty')
+	[[ -n $latest ]] || die "no nightly snapshot of $HOST to restore"
+	snapshot=$(jq -r .id <<<"$latest")
+	snapshot_time=$(jq -r .time <<<"$latest")
+	tmp=$(mktemp -d "$STATE/drill.XXXXXX")
+	# shellcheck disable=SC2064 # expanded now: the trap runs when the verb's subshell exits, after this function's locals are gone
+	trap "rm -rf $(printf %q "$tmp")" EXIT
+	drill_file=$(cfg '.drill_file // ""')
+	local includes=(--include "$STAGING")
+	[[ -z $drill_file ]] || includes+=(--include "$drill_file")
+	restic restore "$snapshot" --target "$tmp" "${includes[@]}" --verify
+	[[ -f $tmp$STAGING/SHA256SUMS ]] || die "drill: snapshot $snapshot has no $STAGING/SHA256SUMS"
+	# hosts without [[dumps]] have an empty SHA256SUMS (sha256sum --check refuses an empty list)
+	if [[ -s $tmp$STAGING/SHA256SUMS ]]; then
+		(cd "$tmp$STAGING" && sha256sum --check --quiet SHA256SUMS) || die "drill: restored dumps do not match their SHA256SUMS"
+	fi
+	for restored in "$tmp$STAGING"/*.sqlite; do
+		[[ -e $restored ]] || continue
+		sqlite_intact "$restored" || die "drill: $(basename "$restored") fails integrity_check"
+	done
+	for restored in "$tmp$STAGING"/*.pgdump; do
+		[[ -e $restored ]] || continue
+		is_pg_archive "$restored" || die "drill: $(basename "$restored") is not a pg_dump archive"
+	done
+	if [[ -n $drill_file ]]; then
+		live=$drill_file
+		[[ -f $tmp$live ]] || die "drill: $live is not in snapshot $snapshot"
+		# a file changed after the snapshot cannot match it; that is not a backup failure
+		if [[ -f $live ]] && (($(stat -c %Y "$live") < $(date -d "$snapshot_time" +%s))); then
+			cmp -s "$tmp$live" "$live" || die "drill: restored $live differs from the live file, which has not changed since the snapshot"
+		else
+			log "drill: $live changed after the snapshot, compared only with the repository (--verify)"
+		fi
+	fi
+	log "drill: snapshot $snapshot ($snapshot_time) restored and verified"
+}
+
+do_tasks() {
+	local source
+	source=$(cfg '.tasks_offsite.source // ""')
+	[[ -n $source ]] || die "tasks off-site copy is not configured for $HOST"
+	need_rclone_config
+	PYTHONPATH=$(cfg .tasks_offsite.pythonpath) python3 -B "$(dirname "$(readlink -f "$0")")/tasks_offsite.py" \
+		--source "$source" --remote "$(cfg .drive_folder)/tasks" --rclone "$RCLONE"
+}
+
+# watch: every host in `watch` (another host's Drive folder, seen through this host's full-scope token) must have
+#   - exactly one folder of that name: Drive allows duplicates, and a path would resolve to either of them,
+#   - a restic snapshot file under policy.watch.max_age_hours old (one made by hand counts too: the tags are
+#     encrypted and the watcher has no password for that repository),
+#   - the status files the host uploads after each timer verb (record): none failed, the last run under that age.
+# Hosts without a notify command, and hosts that are down entirely, get noticed here.
+do_watch() {
+	local host folder parent name count max_age now newest finished statuses failed problems=() message
+	need_rclone_config
+	max_age=$(($(cfg .policy.watch.max_age_hours) * 3600))
+	now=$(date +%s)
+	while IFS=$'\t' read -r host folder; do
+		# gdrive:homelab-backup-<host>, or :local:/path/homelab-backup-<host> in the tests
+		if [[ $folder == */* ]]; then
+			parent=${folder%/*} name=${folder##*/}
+		else
+			parent=${folder%:*}: name=${folder##*:}
+		fi
+		if ! count=$("$RCLONE" lsjson --dirs-only "$parent" | jq --arg name "$name" 'map(select(.Name == $name)) | length'); then
+			problems+=("$host: cannot list $parent")
+			continue
+		fi
+		if ((count != 1)); then
+			problems+=("$host: $count folders named $name in $parent")
+			continue
+		fi
+		if ! newest=$("$RCLONE" lsjson --files-only "$folder/restic/snapshots" | jq -r '.[].ModTime' | date -f - +%s | sort -n | tail -n 1); then
+			problems+=("$host: no restic repository in $folder")
+		elif [[ -z $newest ]]; then
+			problems+=("$host: no snapshot yet")
+		elif ((now - newest > max_age)); then
+			problems+=("$host: newest snapshot is $(((now - newest) / 3600))h old")
+		else
+			log "watch: $host: newest snapshot is $(((now - newest) / 3600))h old"
+		fi
+		if ! statuses=$("$RCLONE" cat --include 'status-*.json' "$folder/status" | jq -s -c .); then
+			problems+=("$host: no status files in $folder/status")
+			continue
+		fi
+		mapfile -t failed < <(jq -r '.[] | select(.ok == false and (.verb | IN("run", "check", "drill", "tasks")))
+			| "\(.verb) failed: \(.message)"' <<<"$statuses")
+		problems+=("${failed[@]/#/$host: }")
+		finished=$(jq -r 'map(select(.verb == "run"))[0].finished_at // empty' <<<"$statuses")
+		if [[ -z $finished ]]; then
+			problems+=("$host: no run status")
+		elif ((now - $(date -d "$finished" +%s) > max_age)); then
+			problems+=("$host: last run finished at $finished")
+		fi
+	done < <(cfg '.watch[] | [.host, .folder] | @tsv')
+	if ((${#problems[@]})); then
+		printf -v message '%s; ' "${problems[@]}"
+		die "watched hosts: ${message%; }"
+	fi
+}
+
+# verb VERB: run do_VERB in a subshell (so `set -e` holds inside it) and record the result
+verb() {
+	local name=$1
+	STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	REASON=$STATE/.reason-$name
+	# one run or dump at a time: they share the dump work dirs and the staging dir (fd 9 holds the lock until exit)
+	if [[ $name == run || $name == dump ]]; then
+		exec 9>"$STATE/.lock-dump"
+		flock -n 9 || { log "another run or dump is in progress: waiting for it"; flock 9; }
+	fi
+	attempt "do_$name"
+	if ((ATTEMPT == 0)); then
+		record "$name" ok
+	else
+		record "$name" fail "${ATTEMPT_REASON:-exit $ATTEMPT, see the journal}"
+	fi
+	return "$ATTEMPT"
+}
+
+case ${1:-} in
+run | check | drill | tasks | watch | init | dump) verb "$1" ;;
+snapshots) need_secrets && restic snapshots --host "$HOST" ;;
+restic) need_secrets && shift && restic "$@" ;;
+status) for f in "$STATE"/status-*.json; do [[ -e $f ]] && cat "$f"; done ;;
+*)
+	sed -n 's/^#   homelab-backup/homelab-backup/p' "$0" >&2
+	exit 2
+	;;
+esac

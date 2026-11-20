@@ -1,0 +1,94 @@
+# odroidn2 (ODROID-N2+): Home Assistant stack, bots, Music Assistant, PrintOps.
+# Used twice: by debian/ on the current Armbian system and by nixos.nix after the NixOS reinstall
+# (machines/odroid-n2plus), which keeps the same data paths. /mnt/storage (Anton's encrypted disk) and the
+# torrents on /mnt/wd500 are never backed up.
+host = "odroidn2"
+scope = "system"
+# restored and compared with the live file by the monthly drill
+drill_file = "/home/ultra/homeassistant/configuration.yaml"
+
+paths = [
+  # uid/gid allocations on the NixOS install (absent on Armbian)
+  "/var/lib/nixos",
+  "/etc",
+  "/var/spool/cron",
+  "/home/ultra/homeassistant",
+  "/home/ultra/music-assistant",
+  "/home/ultra/esphome",
+  "/home/ultra/ssh-data",
+  "/home/ultra/.config",
+  "/var/www/ExpenseSyncBot/data",
+  "/var/www/ExpenseSyncBot/logs",
+  "/var/www/ExpenseSyncBot/.env",
+  "/var/www/ExpenseSyncBot/.env.stage",
+  "/var/www/hyper-summary-bot/data",
+  "/var/www/hyper-summary-bot/logs",
+  "/var/www/hyper-summary-bot/.env",
+  "/opt/hypercal/.env",
+  "/opt/hypercal/docker-compose.yml",
+  "/opt/hypercal/Caddyfile",
+  "/opt/hypercal/data",
+  "/opt/hypercal/logs",
+]
+
+# restic exclude patterns; a name without a slash matches at any depth. The live SQLite files listed under
+# [[dumps]] (and their -wal/-shm/-journal) are excluded automatically: the consistent dump is backed up instead.
+exclude = [
+  ".cache",
+  "node_modules",
+  "__pycache__",
+  # re-creatable from GitHub / rebuilt by ESPHome
+  "/home/ultra/homeassistant/.git",
+  "/home/ultra/homeassistant/submodules",
+  "/home/ultra/homeassistant/.tools",
+  "/home/ultra/esphome/.esphome",
+  # Home Assistant's own full backup tarballs (~2 GB): the same data, already covered by this backup
+  "/home/ultra/homeassistant/backups",
+]
+
+[[dumps]]
+type = "sqlite"
+name = "ha-recorder"
+source = "/home/ultra/homeassistant/home-assistant_v2.db"
+
+[[dumps]]
+type = "sqlite"
+name = "ha-zigbee"
+source = "/home/ultra/homeassistant/zigbee.db"
+
+[[dumps]]
+type = "sqlite"
+name = "music-assistant-library"
+source = "/home/ultra/music-assistant/library.db"
+
+[[dumps]]
+type = "sqlite"
+name = "music-assistant-auth"
+source = "/home/ultra/music-assistant/auth.db"
+
+[[dumps]]
+type = "sqlite"
+name = "expense-sync-bot"
+source = "/var/www/ExpenseSyncBot/data/expenses.db"
+
+[[dumps]]
+type = "sqlite"
+name = "hyper-summary-bot"
+source = "/var/www/hyper-summary-bot/data/hyper-summary.db"
+
+[[dumps]]
+type = "sqlite"
+name = "hypercal"
+source = "/opt/hypercal/data/calendar.db"
+
+[[dumps]]
+type = "postgres"
+name = "hga"
+container = "homeassistant-hga-postgres-1"
+database = "hga"
+user = "hga"
+
+[[dumps]]
+type = "redis"
+name = "hypercal-redis"
+container = "hypercal-redis"

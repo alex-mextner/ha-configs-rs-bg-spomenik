@@ -1,0 +1,20 @@
+# bananapi-m4 (Armbian trixie): bots in Docker Compose under /srv/compose, GitHub Actions runners.
+# The bots stack is not deployed yet: when it gets a database, add a [[dumps]] entry (see odroidn2.toml).
+host = "bananapi-m4"
+scope = "system"
+drill_file = "/etc/hostname"
+
+paths = [
+  "/etc",
+  "/var/spool/cron",
+  "/srv/compose",
+  "/home/ultra/.config",
+]
+
+exclude = [
+  ".cache",
+  "node_modules",
+  "__pycache__",
+  # GitHub Actions runner checkouts and toolcaches: recreated by the next job
+  "_work",
+]

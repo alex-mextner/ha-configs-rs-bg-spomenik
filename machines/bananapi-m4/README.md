@@ -78,12 +78,15 @@ and an executable `run` that sources `lib/common.sh`; its options arrive as JSON
    `PRESET_USER_PASSWORD=...`, `PRESET_ROOT_PASSWORD=...`, `PRESET_USER_KEY=https://github.com/alex-mextner.keys`,
    `PRESET_TIMEZONE=Europe/Belgrade`, `PRESET_LOCALE=en_US.UTF-8` (variables read by
    `/usr/lib/armbian/armbian-firstlogin` on this image; passwords are secrets and are not part of this spec).
-3. From a clone of this repo, copy this directory to the board and converge (after every later change, the same
-   `rsync` + `--commit` re-applies it):
+3. From a clone of this repo, copy this directory and `machines/backup` (the `backup` module links to it) to the
+   board and converge (after every later change, the same `rsync` + `--commit` re-applies it):
 
    ```sh
    ssh ultra@<ip> hostname   # Armbian's name for a fresh board; a known host's name (odroidn2, ...) is the wrong box
-   rsync -aL --delete machines/bananapi-m4/ ultra@<ip>:debian-tweaks/   # -L: modules/dotfiles is a symlink
+   # -L: modules/dotfiles is a symlink; modules/backup stays a link (its run finds hosts/ through it), copied apart
+   rsync -aL --delete --exclude /modules/backup machines/bananapi-m4/ ultra@<ip>:debian-tweaks/
+   rsync -a machines/bananapi-m4/modules/backup ultra@<ip>:debian-tweaks/modules/
+   rsync -a --delete machines/backup/ ultra@<ip>:backup/
    ssh -t ultra@<ip> 'cd debian-tweaks && sudo ./install.sh --force-host <that name>'            # preview: read it
    ssh -t ultra@<ip> 'cd debian-tweaks && sudo ./install.sh --force-host <that name> --commit'
    ssh ultra@<ip> 'cd debian-tweaks && sudo ./install.sh check'   # exit 0

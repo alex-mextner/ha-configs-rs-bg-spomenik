@@ -1,0 +1,3 @@
+description = "nightly restic backup to Google Drive: pinned restic + rclone, dumps, timers (machines/backup)"
+order = 80
+requires = ["packages"]

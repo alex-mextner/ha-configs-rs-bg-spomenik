@@ -1,0 +1,48 @@
+# ubuntu-pc (this workstation): user-level backup of what is not in git and not re-downloadable.
+# Runs as ultra in the user's systemd manager (sudo is unavailable to agents here); ultra is in the docker group,
+# which is all the Postgres dumps need.
+host = "ubuntu-pc"
+scope = "user"
+drill_file = "/home/ultra/.config/tasks-backup/age.pub"
+# failure alerts: the owner's Telegram CLI
+notify = ["/home/ultra/.local/bin/tg", "--tag", "problem", "--title", "homelab-backup"]
+# the [gdrive] remote this workstation already has (default for other hosts: <config dir>/rclone.conf). Unlike the
+# other hosts' tokens it has the full `drive` scope (README.md, Secrets), so it can also see their folders:
+rclone_config = "/home/ultra/.config/rclone/rclone.conf"
+# hosts whose newest snapshot in the Drive this host checks daily (homelab-backup watch; alerts through notify):
+# a host without Telegram, or one that is down, is noticed here. Add a host after its first backup.
+watch = []
+
+paths = [
+  # Tasks backup keys: without age.key the off-site Tasks sets cannot be decrypted
+  "/home/ultra/.config/tasks-backup",
+  "/home/ultra/.config/tg-cli",
+  "/home/ultra/.ssh",
+  "/home/ultra/dev/aisis/services/yandex-station/compose.yaml",
+]
+
+exclude = [
+  ".cache",
+  "node_modules",
+  # root-owned copy of Home Assistant's .storage (unreadable for ultra); odroidn2 backs up the original
+  "/home/ultra/.config/tg-cli/ha-source",
+]
+
+[[dumps]]
+type = "postgres"
+name = "aisis-quasar"
+container = "aisis-yandex-postgres-1"
+database = "quasar"
+user = "quasar"
+
+[[dumps]]
+type = "postgres"
+name = "aisis-quasar-stage"
+container = "aisis-yandex-postgres-1"
+database = "quasar_stage"
+user = "quasar"
+
+# copy the Tasks puller's encrypted sets to <remote>:<folder_prefix>-ubuntu-pc/tasks (one host is enough: both pullers hold the same sets)
+[tasks_offsite]
+source = "/home/ultra/.local/share/tasks-backup/bread"
+pythonpath = "/home/ultra/.local/lib/tasks-backup"
