@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # ssh-server: /etc/ssh/sshd_config.d/10-debian-tweaks.conf from [modules.ssh-server]
-# (password_authentication, permit_root_login). Turning passwords off is refused while no user in
-# [modules.users] declares an authorized key, has a login shell and can sudo (sudo = "nopasswd", or "password" with a
-# password already set): that would lock the owner out.
+# (password_authentication, permit_root_login, allow_users). Turning passwords off, or naming allow_users, is refused
+# while no user in [modules.users] (among allow_users, when set) declares an authorized key, has a login shell and can
+# sudo (sudo = "nopasswd", or "password" with a password already set): that would lock the owner out.
 # The drop-in is validated with `sshd -t` before ssh is reloaded (a reload keeps open sessions).
 source "$(dirname "$0")/../../lib/common.sh" "$@"
 
 password=$(opt '.password_authentication // false')
 root_login=$(opt '.permit_root_login // "no"')
+# Checked as JSON strings, before any shell word splitting: a newline in an entry would add an sshd directive. \A and
+# \z, not ^ and $: Oniguruma's $ also matches before a final newline.
+# first(.[]), not .[0] // empty: `//` drops a first bad entry that is `false`, letting the next one through.
+bad=$(opt '[.allow_users // [] | .[] | select(type != "string" or (test("\\A[a-z_][a-z0-9_-]*\\z") | not))]
+	| first(.[]) | tojson')
+[[ -z $bad ]] || { echo "  allow_users: $bad is not a user name" >&2; exit 2; }
+allow_users=$(opt '.allow_users // [] | join(" ")')
+allow_line=${allow_users:+AllowUsers $allow_users}
 yn() { [[ $1 == true ]] && echo yes || echo no; }
 
 # A user counts as an admin only if they can log in with a key AND then use sudo: their shell is executable, in
@@ -35,15 +43,17 @@ can_sudo() {
 	*) return 1 ;;
 	esac
 }
-if [[ $password == false ]]; then
+if [[ $password == false || -n $allow_users ]]; then
 	admins=0
 	while read -r user rule; do
+		[[ -z $allow_users || " $allow_users " == *" $user "* ]] || continue
 		if has_login "$user" "$rule" && can_sudo "$user" "$rule"; then admins=$((admins + 1)); fi
 	done < <(cfg '.modules.users.users // [] | .[] | select((.authorized_keys // []) | length > 0)
 		| "\(.name) \(.sudo // "none")"')
 	if ((admins == 0)); then
-		echo "  refusing password_authentication = false: no user in [modules.users] has authorized_keys, a login" \
-			"shell (installed, in /etc/shells) and working sudo (nopasswd, or password with a password set)" >&2
+		echo "  refusing password_authentication = false / allow_users: no user in [modules.users] (among allow_users," \
+			"when set) has authorized_keys, a login shell (installed, in /etc/shells) and working sudo (nopasswd, or" \
+			"password with a password set)" >&2
 		exit 1
 	fi
 fi
@@ -56,6 +66,7 @@ PasswordAuthentication $(yn "$password")
 KbdInteractiveAuthentication no
 PermitRootLogin $root_login
 PubkeyAuthentication yes
+$allow_line
 EOF
 # Validate the candidate before it is written: an sshd that rejects its config does not start after the next
 # reboot, which locks the owner out of this headless box. The candidate comes first, so its values win over the

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# service-users: [[modules.service-users.users]] name, uid, home, comment, group (optional).
+#   Without `group` the user gets its own group with gid = uid; with `group` (an existing group, e.g. "nogroup") that
+#   one is its primary group and no group of its own is created. No password, shell nologin: these users only run
+#   services (`sudo -u NAME ...` still works for one-off commands), and the home is created 0750 when it is not
+#   /nonexistent.
+# A user that exists is checked, not changed: a different uid, home or primary group fails the module (exit 1), because
+# files on disk carry the old ids and renumbering them is a migration, not a convergence.
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+count=$(opt '.users // [] | length')
+for ((i = 0; i < count; i++)); do
+	u=$(opt ".users[$i]")
+	name=$(jq -r '.name' <<<"$u")
+	uid=$(jq -r '.uid // empty' <<<"$u")
+	home=$(jq -r '.home // empty' <<<"$u")
+	comment=$(jq -r '.comment // ""' <<<"$u")
+	group=$(jq -r '.group // empty' <<<"$u")
+	if [[ ! $uid =~ ^[0-9]+$ || -z $home ]]; then
+		echo "  $name: uid (a number) and home are required" >&2
+		exit 2
+	fi
+	if [[ $comment == *[:$'\n']* ]]; then
+		echo "  $name: comment must not contain a colon or a newline (passwd field separators)" >&2
+		exit 2
+	fi
+
+	if entry=$(getent passwd "$name"); then
+		IFS=: read -r _ _ have_uid have_gid _ have_home _ <<<"$entry"
+		want_gid=$uid
+		if [[ -n $group ]] && ! want_gid=$(getent group "$group" | cut -d: -f3); then
+			echo "  $name: group $group does not exist" >&2
+			exit 1
+		fi
+		if [[ $have_uid != "$uid" || $have_home != "$home" || $have_gid != "$want_gid" ]]; then
+			echo "  $name exists as uid $have_uid gid $have_gid home $have_home, declared uid $uid gid $want_gid" \
+				"home $home: renumbering is a migration, do it by hand" >&2
+			exit 1
+		fi
+	else
+		if other=$(getent passwd "$uid"); then
+			echo "  $name: uid $uid already belongs to ${other%%:*}" >&2
+			exit 1
+		fi
+		if [[ -z $group ]] && other=$(getent group "$uid"); then
+			echo "  $name: gid $uid already belongs to group ${other%%:*}" >&2
+			exit 1
+		fi
+		if drift "create system user $name (uid $uid, home $home)"; then
+			args=(--system --uid "$uid" --home-dir "$home" --shell /usr/sbin/nologin --comment "$comment")
+			if [[ -n $group ]]; then
+				args+=(--no-user-group --gid "$group")
+			else
+				groupadd --system --gid "$uid" "$name"
+				args+=(--gid "$uid")
+			fi
+			useradd "${args[@]}" "$name"
+		fi
+	fi
+
+	if [[ $home != /nonexistent && ! -d $home ]]; then
+		drift "create $home (0750 $name)" && install -d -m 750 -o "$name" -g "$(id -gn "$name")" "$home"
+	fi
+done
+finish

@@ -1,0 +1,13 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/esb-log-retention.service, not this file.
+# ExpenseSyncBot's log retention sweep (the only thing that deletes its logs; it alerts the admin chat itself; was
+# www-data's crontab on the odroid). Its output goes to the journal: journalctl -u esb-log-retention.
+[Unit]
+Description=ExpenseSyncBot log retention
+ConditionPathExists=/var/www/ExpenseSyncBot/.env
+
+[Service]
+Type=oneshot
+User=www-data
+ExecStart=/var/www/ExpenseSyncBot/scripts/run-log-retention.sh
+Nice=10
+IOSchedulingClass=idle

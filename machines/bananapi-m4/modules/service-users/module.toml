@@ -1,0 +1,4 @@
+description = "system users with fixed uids: the bots, their Actions runners, uid placeholders for container users"
+# Before packages: a package that creates a system user (caddy) takes the highest free uid below 1000, which is 999,
+# the uid of HyperCalendarBot's container user that owns /opt/hypercal/data. Declared uids are taken first.
+order = 25

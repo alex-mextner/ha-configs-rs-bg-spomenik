@@ -1,3 +1,3 @@
-description = "sshd drop-in: key-only login, no root login (refuses while no user with a key and a login shell can sudo)"
+description = "sshd drop-in: key-only login, root login and AllowUsers as declared (refuses while no allowed user with a key and a login shell can sudo)"
 order = 45
 requires = ["users"]

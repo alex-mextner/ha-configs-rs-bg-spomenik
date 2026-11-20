@@ -44,11 +44,14 @@ conditions_met() {
 	return 0
 }
 
+# A unit that fails to start is reported at the end, not at once: one bot's unit (a bad receipt, a missing image) must
+# not keep the other bots' units and timers from being enabled and started.
+failed=()
 for unit in $(opt '.enable // [] | .[]'); do
 	if ! systemctl is-enabled -q "$unit" 2>/dev/null; then
-		drift "enable --now $unit" && systemctl enable --now "$unit"
+		drift "enable --now $unit" && { systemctl enable --now "$unit" || failed+=("$unit"); }
 	elif systemctl is-failed -q "$unit"; then
-		drift "$unit is failed: restart" && systemctl restart "$unit"
+		drift "$unit is failed: restart" && { systemctl restart "$unit" || failed+=("$unit"); }
 	# ConditionResult=no after a check (ConditionTimestamp set): the last start was skipped by a condition (a unit
 	# that stopped on its own or was stopped by an admin reports yes). A unit enabled while its condition was false
 	# stays inactive, and nothing starts it when the path appears later. A queued start job (boot) is left to run.
@@ -56,7 +59,8 @@ for unit in $(opt '.enable // [] | .[]'); do
 		$(systemctl show -P ConditionTimestampMonotonic "$unit") != 0 &&
 		-z $(systemctl list-jobs --no-legend "$unit") ]] &&
 		! systemctl is-active -q "$unit" && conditions_met "$unit"; then
-		drift "$unit: its condition holds now but it is not running: start" && systemctl start "$unit"
+		drift "$unit: its condition holds now but it is not running: start" &&
+			{ systemctl start "$unit" || failed+=("$unit"); }
 	fi
 done
 
@@ -82,4 +86,8 @@ for ((i = 0; i < count; i++)); do
 		fi
 	done
 done
+if ((${#failed[@]})); then
+	echo "  failed to start: ${failed[*]} (journalctl -u <unit>)" >&2
+	exit 1
+fi
 finish

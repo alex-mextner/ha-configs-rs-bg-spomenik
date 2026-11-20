@@ -1,5 +1,4 @@
-# bananapi-m4 (Armbian trixie): bots in Docker Compose under /srv/compose, GitHub Actions runners.
-# The bots stack is not deployed yet: when it gets a database, add a [[dumps]] entry (see odroidn2.toml).
+# bananapi-m4 (Armbian trixie): the Telegram bots (moved from the odroid on 2026-11-20) and their Actions runners.
 host = "bananapi-m4"
 scope = "system"
 drill_file = "/etc/hostname"
@@ -9,8 +8,27 @@ paths = [
   "/var/spool/cron",
   "/srv/compose",
   "/home/ultra/.config",
+  # HyperSummaryBot (logs are in the journal)
+  "/srv/hyper-summary-bot/data",
+  "/srv/hyper-summary-bot/.env",
+  # ExpenseSyncBot
+  "/var/www/ExpenseSyncBot/data",
+  "/var/www/ExpenseSyncBot/logs",
+  "/var/www/ExpenseSyncBot/.env",
+  "/var/www/ExpenseSyncBot/.env.stage",
+  # HyperCalendarBot (/srv/compose/hypercalinvntrmru is only a link to /opt/hypercal)
+  "/opt/hypercal/.env",
+  "/opt/hypercal/docker-compose.yml",
+  "/opt/hypercal/Caddyfile",
+  "/opt/hypercal/data",
+  "/opt/hypercal/logs",
+  # the release receipt: after a restore the boot unit creates the bot from the release it names, not :latest
+  "/opt/hypercal/releases/current.json",
+  "/opt/hypercal/stage/stage.env",
 ]
 
+# restic exclude patterns; a name without a slash matches at any depth. The live SQLite files listed under
+# [[dumps]] (and their -wal/-shm/-journal) are excluded automatically: the consistent dump is backed up instead.
 exclude = [
   ".cache",
   "node_modules",
@@ -18,3 +36,28 @@ exclude = [
   # GitHub Actions runner checkouts and toolcaches: recreated by the next job
   "_work",
 ]
+
+[[dumps]]
+type = "sqlite"
+name = "hyper-summary-bot"
+source = "/srv/hyper-summary-bot/data/hyper-summary.db"
+
+[[dumps]]
+type = "sqlite"
+name = "hyper-summary-bot-mtcute-session"
+source = "/srv/hyper-summary-bot/data/mtcute-session"
+
+[[dumps]]
+type = "sqlite"
+name = "expense-sync-bot"
+source = "/var/www/ExpenseSyncBot/data/expenses.db"
+
+[[dumps]]
+type = "sqlite"
+name = "hypercal"
+source = "/opt/hypercal/data/calendar.db"
+
+[[dumps]]
+type = "redis"
+name = "hypercal-redis"
+container = "hypercal-redis"

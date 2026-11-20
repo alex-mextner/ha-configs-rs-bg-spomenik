@@ -1,0 +1,12 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/hcb-log-retention.service, not this file.
+# HyperCalendarBot's log retention between deploys (the copy the last deploy installed; it alerts the admin chat
+# itself; was root's crontab on the odroid). Output: journalctl -u hcb-log-retention.
+[Unit]
+Description=HyperCalendarBot log retention
+ConditionPathExists=/opt/hypercal/scripts/log-retention.py
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hypercal/scripts/log-retention.py --root /opt/hypercal/logs --env-file /opt/hypercal/.env --alert
+Nice=10
+IOSchedulingClass=idle

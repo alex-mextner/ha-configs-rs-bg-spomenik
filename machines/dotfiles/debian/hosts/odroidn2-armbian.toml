@@ -35,3 +35,9 @@ enabled = false
 enabled = false
 [modules.systemd-units]
 enabled = false
+[modules.service-users]
+enabled = false
+[modules.bots]
+enabled = false
+[modules.actions-runners]
+enabled = false

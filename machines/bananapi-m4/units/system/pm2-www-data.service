@@ -1,0 +1,34 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/pm2-www-data.service, not this file.
+# ExpenseSyncBot's pm2 daemon (github.com/alex-mextner/ExpenseSyncBot, DEPLOY.md): the unit `pm2 startup systemd -u
+# www-data --hp /var/www` writes, plus a memory cap for the whole tree (expensesyncbot, bank-sync, the stage bot,
+# pm2-logrotate and the Chromium the bot starts for table pictures). It resurrects the list the deploys `pm2 save`.
+[Unit]
+Description=PM2 process manager (www-data: ExpenseSyncBot)
+Documentation=https://pm2.keymetrics.io/
+Wants=network-online.target
+After=network-online.target
+# Inactive, not failed, until the first `pm2 save` (the move to this host) wrote a list to resurrect.
+ConditionPathExists=/var/www/.pm2/dump.pm2
+
+[Service]
+Type=forking
+User=www-data
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+# pm2's CLI runs under Node (Debian's nodejs), the apps under Bun from /var/www/.bun.
+Environment=PATH=/var/www/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PM2_HOME=/var/www/.pm2
+PIDFile=/var/www/.pm2/pm2.pid
+Restart=on-failure
+# MemoryLow: under board-wide pressure the runners' jobs and the stage bots are reclaimed and swapped before the prod
+# bot and bank-sync (~250 MB together). The stage bot shares this cgroup; stage-bot.yml starts it for an open PR.
+MemoryLow=256M
+MemoryHigh=700M
+MemoryMax=900M
+ExecStart=/var/www/.bun/install/global/node_modules/pm2/bin/pm2 resurrect
+ExecReload=/var/www/.bun/install/global/node_modules/pm2/bin/pm2 reload all
+ExecStop=/var/www/.bun/install/global/node_modules/pm2/bin/pm2 kill
+
+[Install]
+WantedBy=multi-user.target

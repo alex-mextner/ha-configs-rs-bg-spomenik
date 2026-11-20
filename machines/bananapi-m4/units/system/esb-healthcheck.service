@@ -1,0 +1,13 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/esb-healthcheck.service, not this file.
+# ExpenseSyncBot's public health probe (https://finbot.mextner.com/health, retried before it alerts the admin chat; was
+# www-data's crontab on the odroid). Its own log is logs/healthcheck.log, rotated by the bot's log retention.
+[Unit]
+Description=ExpenseSyncBot public health check
+ConditionPathExists=/var/www/ExpenseSyncBot/.env
+
+[Service]
+Type=oneshot
+User=www-data
+ExecStart=/bin/sh -c '/var/www/ExpenseSyncBot/scripts/healthcheck-alert.sh >> /var/www/ExpenseSyncBot/logs/healthcheck.log 2>&1'
+# Shorter than the 2-minute timer period: a hung run would otherwise block every later probe, silently.
+TimeoutStartSec=90s

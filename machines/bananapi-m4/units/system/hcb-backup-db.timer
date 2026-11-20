@@ -1,0 +1,9 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/hcb-backup-db.timer, not this file.
+[Unit]
+Description=HyperCalendarBot database backup, daily 03:00
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+
+[Install]
+WantedBy=timers.target
