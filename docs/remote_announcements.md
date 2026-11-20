@@ -69,12 +69,11 @@ controller recovery, not a guarantee of physical interruption or audible latency
 All five mode labels use 6/10 while any living-room source is playing and 4/10
 otherwise. At the start of speech, the controller reads the routed Samsung TV
 (active Chromecast, Android TV or Music Assistant session), Kodi on the projector,
-and the living-room Yandex Mini. Both displays report their routed player only
-while the display is powered. Native Alice speech without underlying media does
+and the living-room Yandex Mini. The controller counts a display only when both the display
+and its selected player report active playback. Native Alice speech without underlying media does
 not count. Each queued label reads current playback after the preceding label or
 quiet cue completes. Paused, idle, powered-on, buffering, unavailable
-and restored states do not count as playing. The display’s selected player must
-also report observed playback. An assumed cloud-only speaker state after a
+and restored states do not count as playing. An assumed cloud-only speaker state after a
 disconnect does not raise the volume. The same rule applies when the
 studio speaker is selected for announcements. A louder speaker is temporarily
 turned down. The package configures the three source IDs on the target sensor through
@@ -95,18 +94,20 @@ reports `aisis_cannot_restore_muted_or_invalid_volume`. No Alice fallback is use
 verify the installed schema and actual native volume readback before deploying this
 HA guard change. Older Quasar can acknowledge a request while discarding level zero,
 so an HTTP/service acknowledgement is not restoration proof. After the restore call,
-the controller waits for matching AISIS volume state within the existing recovery
-deadline; absent readback reports `recovery_unconfirmed`, without a retry or extra
-volume command. The tests assert published device volume, and intervening human
+the controller waits for the original level or a distinct user volume or mute
+within the existing recovery deadline. Missing readback reports
+`recovery_unconfirmed` without retrying the command. The tests assert published device volume, and intervening human
 volume changes still prevent restore.
 
-A spoken-label restore on Yandex or AISIS keeps a per-speaker recovery record until actual volume readback
+Spoken labels and quiet cues on Yandex and AISIS keep a per-speaker recovery record until volume readback
 confirms the original level, or a valid different human volume/mute state is observed.
 While HA still reports the temporary speech level, another announcement is rejected
 as `yandex_volume_recovery_pending` or `aisis_volume_recovery_pending`, even after the service acknowledgement completes.
-Unrelated state attributes do not release this guard. A restore that was never sent
-clears its own record. Clearing the guard does not replay speech or send a restore;
-only a later regular announcement request can proceed.
+Unrelated state attributes do not release this guard. If HA has accepted the original
+volume but the final mute was never dispatched, the controller still waits for the
+volume readback. When HA dispatches the mute, the original remembered level and
+muted state must both be observed unless the user chooses a distinct volume.
+A later ordinary request can proceed after the guard clears.
 
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,
