@@ -416,6 +416,113 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.attributes["is_volume_muted"])
         self.assertEqual(state.attributes["volume_level"], 0.2)
 
+    async def test_next_label_cannot_capture_unconfirmed_yandex_restore(self) -> None:
+        async def delayed_restore(call) -> None:
+            if call.data["volume_level"] == 0.2:
+                self.calls.append((call.service, dict(call.data)))
+                return
+            await self.media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", delayed_restore)
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.15),
+            patch.object(integration, "RECOVERY_RESERVE", 0.08),
+        ):
+            await self.manager.announce("tv")
+        state = self.hass.states.get(self.entity)
+        self.hass.states.async_set(self.entity, "paused", state.attributes)
+        self.hass.states.async_set(CONFIG["target_entity"], "kodi", ROUTE_ATTRIBUTES)
+        calls_after_restore = list(self.calls)
+        with self.assertRaisesRegex(
+            ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+        ):
+            await self.manager.announce("kodi")
+        self.assertEqual(self.calls, calls_after_restore)
+        # A real human level, different from our pending restore and override,
+        # becomes the next baseline without replaying the earlier restore.
+        self.hass.states.async_set(
+            self.entity, "paused", {**state.attributes, "volume_level": 0.8}
+        )
+        self.hass.services.async_register("media_player", "volume_set", self.media)
+        await self.manager.announce("kodi")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.6, 0.2, 0.4, 0.8],
+        )
+
+    async def test_yandex_restore_waits_for_echo_before_queued_label(self) -> None:
+        first_restore, waiting = asyncio.Event(), asyncio.Event()
+        original_check = self.manager.confirm_restored_volume
+
+        async def observe_check(playback) -> None:
+            waiting.set()
+            await original_check(playback)
+
+        async def delayed_restore(call) -> None:
+            if call.data["volume_level"] == 0.2 and not first_restore.is_set():
+                self.calls.append((call.service, dict(call.data)))
+                first_restore.set()
+                return
+            await self.media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", delayed_restore)
+        with patch.object(self.manager, "confirm_restored_volume", observe_check):
+            self.manager.queue.debounce = 0
+            self.manager.queue.submit("tv")
+            await asyncio.wait_for(first_restore.wait(), 0.3)
+            self.hass.states.async_set(
+                CONFIG["target_entity"], "kodi", ROUTE_ATTRIBUTES
+            )
+            self.manager.queue.submit("kodi")
+            await asyncio.wait_for(waiting.wait(), 0.3)
+            state = self.hass.states.get(self.entity)
+            self.hass.states.async_set(
+                self.entity, "paused", {**state.attributes, "volume_level": 0.2}
+            )
+            await self.manager.queue.drain()
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.6, 0.2, 0.4, 0.2],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.2
+        )
+
+    async def test_unconfirmed_final_mute_keeps_next_label_off_stale_state(
+        self,
+    ) -> None:
+        state = self.hass.states.get(self.entity)
+        self.hass.states.async_set(
+            self.entity, state.state, {**state.attributes, "is_volume_muted": True}
+        )
+
+        async def mute_ack_only(call) -> None:
+            self.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register("media_player", "volume_mute", mute_ack_only)
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.15),
+            patch.object(integration, "RECOVERY_RESERVE", 0.08),
+        ):
+            await self.manager.announce("tv")
+        with self.assertRaisesRegex(
+            ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+        ):
+            await self.manager.announce("tv")
+        self.hass.states.async_set(
+            self.entity, "paused", {**state.attributes, "is_volume_muted": True}
+        )
+        self.manager.check_aisis_volume_recovery(self.hass.states.get(self.entity))
+        self.assertNotIn(self.entity, self.manager.volume_recovery)
+
+    async def test_titled_music_without_id_during_alice_is_active(self) -> None:
+        self.hass.states.async_set(
+            self.entity,
+            "playing",
+            {"alice_state": "SPEAKING", "media_title": "Fixture radio"},
+        )
+        self.assertEqual(self.manager.label_volume(0.8), 0.6)
+
     async def test_zero_volume_is_restored(self) -> None:
         state = self.hass.states.get(self.entity)
         self.hass.states.async_set(

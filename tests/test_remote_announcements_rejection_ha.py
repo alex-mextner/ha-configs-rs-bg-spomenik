@@ -76,7 +76,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(self.config["backend_entity"], "AISIS")
         self.hass.states.async_set(self.config["aisis_connected_entity"], "on")
         self.hass.states.async_set(entity, "idle", {"volume_level": 0.1})
-        self.manager.aisis_volume_recovery[entity] = (0.4, 0.1)
+        self.manager.volume_recovery[entity] = (0.4, 0.1)
         await self.reject("pending-recovery")
         self.assertEqual(
             self.manager.public_status["rejection_drop_reason"],
@@ -240,7 +240,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.reject("unconfirmed-restore")
         self.assertEqual(self.spoken_status(), before)
-        self.assertEqual(self.manager.aisis_volume_recovery[entity], (0.4, 0.1))
+        self.assertEqual(self.manager.volume_recovery[entity], (0.4, 0.1))
         self.assertEqual(
             self.manager.public_status["rejection_status"], "recovery_unconfirmed"
         )
@@ -416,6 +416,32 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(restored[0] - acknowledged[0], 0.19)
         self.assertEqual(
             self.hass.states.get(self.entity).attributes["volume_level"], 0.2
+        )
+
+    async def test_yandex_cue_restore_ack_cannot_become_next_labels_volume(
+        self,
+    ) -> None:
+        async def ack_only(call) -> None:
+            if call.data["volume_level"] == 0.2:
+                self.fixture.calls.append((call.service, dict(call.data)))
+                return
+            await self.fixture.media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", ack_only)
+        with (
+            patch.object(rejection, "CUE_BUDGET", 0.3),
+            patch.object(integration, "RECOVERY_RESERVE", 0.1),
+            patch.object(rejection, "CUE_SETTLE_SECONDS", 0.02),
+        ):
+            await self.reject()
+        before = list(self.fixture.calls)
+        with self.assertRaisesRegex(
+            integration.ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(self.fixture.calls, before)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.1
         )
 
     async def test_cue_waits_for_spoken_label_and_its_restore(self) -> None:

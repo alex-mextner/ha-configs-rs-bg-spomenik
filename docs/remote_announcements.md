@@ -100,10 +100,10 @@ deadline; absent readback reports `recovery_unconfirmed`, without a retry or ext
 volume command. The tests assert published device volume, and intervening human
 volume changes still prevent restore.
 
-An AISIS restore keeps a per-speaker recovery record until actual volume readback
+A spoken-label restore on Yandex or AISIS keeps a per-speaker recovery record until actual volume readback
 confirms the original level, or a valid different human volume/mute state is observed.
 While HA still reports the temporary speech level, another announcement is rejected
-as `aisis_volume_recovery_pending`, even after the service acknowledgement completes.
+as `yandex_volume_recovery_pending` or `aisis_volume_recovery_pending`, even after the service acknowledgement completes.
 Unrelated state attributes do not release this guard. A restore that was never sent
 clears its own record. Clearing the guard does not replay speech or send a restore;
 only a later regular announcement request can proceed.

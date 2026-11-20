@@ -229,7 +229,8 @@ class Manager:
         self.generation = 0
         self.closing = False
         self.services = ServiceCalls(hass)
-        self.aisis_volume_recovery: dict[str, tuple[float, float]] = {}
+        # A missing expected level denotes an outstanding final mute.
+        self.volume_recovery: dict[str, tuple[float | None, float]] = {}
 
     async def close(self) -> None:
         """Stop target listening while retaining unfinished provider ownership."""
@@ -468,12 +469,14 @@ class Manager:
             guard=guard,
         )
 
-    def check_aisis_volume_recovery(self, state: State) -> None:
-        """Reject stale volume after an unconfirmed restore of this entity."""
-        pending = self.aisis_volume_recovery.get(state.entity_id)
-        if pending is None:
-            return
-        original, applied = pending
+    def recovery_reason(self, entity: str, status: str) -> str:
+        """Retain per-backend recovery diagnostic codes."""
+        backend = "yandex" if entity == self.config["yandex_entity"] else "aisis"
+        return f"{backend}_volume_recovery_{status}"
+
+    @staticmethod
+    def volume_recovered(state: State, original: float | None, applied: float) -> bool:
+        """Accept a valid original level or a user's different level or mute."""
         volume = state.attributes.get("volume_level")
         valid_volume = (
             state.state not in ("unknown", "unavailable")
@@ -481,15 +484,24 @@ class Manager:
             and not isinstance(volume, bool)
             and 0.0 <= volume <= 1.0
         )
-        if valid_volume and (
+        return valid_volume and (
             state.attributes.get("is_volume_muted") is True
-            or can_restore_volume(volume, original, muted=False)
+            or (
+                original is not None
+                and can_restore_volume(volume, original, muted=False)
+            )
             or not can_restore_volume(volume, applied, muted=False)
-        ):
-            self.aisis_volume_recovery.pop(state.entity_id)
+        )
+
+    def check_aisis_volume_recovery(self, state: State) -> None:
+        """Check pending speech restores before either labels or quiet cues."""
+        pending = self.volume_recovery.get(state.entity_id)
+        if pending is None:
             return
-        message = "aisis_volume_recovery_pending"
-        raise ProviderNotReadyError(message)
+        if self.volume_recovered(state, *pending):
+            self.volume_recovery.pop(state.entity_id)
+            return
+        raise ProviderNotReadyError(self.recovery_reason(state.entity_id, "pending"))
 
     @staticmethod
     def observed_playback(state: State | None) -> bool:
@@ -538,6 +550,7 @@ class Manager:
                 entity_id == self.config["yandex_entity"]
                 and attrs.get("alice_state") in ("SPEAKING", "NONE")
                 and not attrs.get("media_content_id")
+                and not attrs.get("media_title")
             ):
                 continue
             return 0.6
@@ -549,8 +562,7 @@ class Manager:
         if before is None:
             message = "speaker_unavailable"
             raise ProviderNotReadyError(message)
-        if backend == "aisis":
-            self.check_aisis_volume_recovery(before)
+        self.check_aisis_volume_recovery(before)
         muted_before = bool(before.attributes.get("is_volume_muted"))
         if backend == "yandex" and "alice_state" not in before.attributes:
             message = "yandex_local_speech_connection_unavailable"
@@ -567,9 +579,7 @@ class Manager:
         if pause and not before.attributes.get("media_content_id"):
             message = "cannot_restore_unknown_music"
             raise ProviderNotReadyError(message)
-        return SpeechPlayback(
-            before, applied, pause=pause, verify_volume=backend == "aisis"
-        )
+        return SpeechPlayback(before, applied, pause=pause, verify_volume=True)
 
     async def prepare_playback(self, playback: SpeechPlayback) -> None:
         """Apply the optional pause and temporary speech volume."""
@@ -643,21 +653,14 @@ class Manager:
         )
 
     async def confirm_restored_volume(self, playback: SpeechPlayback) -> None:
-        """Require AISIS device readback within the existing recovery deadline."""
+        """Wait for actual readback within the shared recovery deadline."""
         confirmed = asyncio.Event()
+        expected = self.volume_recovery[playback.entity]
 
         @callback
         def observe(_event: Event[EventStateChangedData] | None = None) -> None:
             state = self.hass.states.get(playback.entity)
-            if (
-                state
-                and state.state not in ("unknown", "unavailable")
-                and can_restore_volume(
-                    state.attributes.get("volume_level"),
-                    playback.old_volume,
-                    muted=state.attributes.get("is_volume_muted", False),
-                )
-            ):
+            if state and self.volume_recovered(state, *expected):
                 confirmed.set()
 
         unsubscribe = async_track_state_change_event(
@@ -671,7 +674,7 @@ class Manager:
                     max(0.0, playback.recovery_deadline - time.monotonic()),
                 )
         except TimeoutError as error:
-            message = "aisis_volume_recovery_unconfirmed"
+            message = self.recovery_reason(playback.entity, "unconfirmed")
             raise ProviderNotReadyError(message) from error
         finally:
             unsubscribe()
@@ -682,9 +685,12 @@ class Manager:
         """Restore volume and mute only while the original guards hold."""
         if not self.volume_unchanged(playback, playback.applied):
             return
+        verify_volume = (
+            playback.verify_volume or playback.entity == self.config["yandex_entity"]
+        )
         try:
-            if playback.verify_volume:
-                self.aisis_volume_recovery[playback.entity] = (
+            if verify_volume:
+                self.volume_recovery[playback.entity] = (
                     playback.old_volume,
                     playback.applied,
                 )
@@ -696,12 +702,12 @@ class Manager:
                 guard=lambda: self.volume_unchanged(playback, playback.applied),
             )
             if not sent:
-                if playback.verify_volume:
-                    self.aisis_volume_recovery.pop(playback.entity, None)
+                if verify_volume:
+                    self.volume_recovery.pop(playback.entity, None)
                 return
-            if playback.verify_volume:
+            if verify_volume:
                 await self.confirm_restored_volume(playback)
-                self.aisis_volume_recovery.pop(playback.entity, None)
+                self.volume_recovery.pop(playback.entity, None)
             # A human can change volume/mute while the restore service is awaited.
             # Check again immediately before restoring mute.
             restored = self.hass.states.get(playback.entity)
@@ -714,13 +720,19 @@ class Manager:
                     muted=restored.attributes.get("is_volume_muted", False),
                 )
             ):
-                await self.call(
+                if verify_volume:
+                    self.volume_recovery[playback.entity] = (None, playback.old_volume)
+                sent = await self.call(
                     "volume_mute",
                     playback.entity,
                     is_volume_muted=True,
                     deadline=playback.recovery_deadline,
                     guard=lambda: self.volume_unchanged(playback, playback.old_volume),
                 )
+                if verify_volume:
+                    if sent:
+                        await self.confirm_restored_volume(playback)
+                    self.volume_recovery.pop(playback.entity, None)
         except Exception as error:
             _LOGGER.exception(
                 "Announcement volume recovery failed", exc_info=exception_info(error)
