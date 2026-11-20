@@ -1,0 +1,20 @@
+# Connector of the remotely managed Cloudflare tunnel `bananapi-m4`: the public ingress of the bots on this host
+# (hyper-summary-bot.mextner.com -> :3003, hypercal.mextner.com -> :3001, finbot*.mextner.com -> caddy :80). The
+# hostname rules live in Cloudflare (tunnel configuration), not here. Started by compose@cloudflared.service.
+# Secret, not in git: /srv/compose/cloudflared/.env (0600 root) with TUNNEL_TOKEN=<the tunnel's token>.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.11.1
+    container_name: cloudflared
+    restart: unless-stopped
+    # The origins are services on this host's loopback.
+    network_mode: host
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    env_file: .env
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 128m

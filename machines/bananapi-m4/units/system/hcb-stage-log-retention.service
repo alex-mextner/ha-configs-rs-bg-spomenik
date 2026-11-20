@@ -1,0 +1,14 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/hcb-stage-log-retention.service, not this file.
+# Retention of HyperCalendarBot's stage QA evidence and stage bot logs (the helper install-stage-qa.sh installed; was
+# two root crontab lines on the odroid). Output: journalctl -u hcb-stage-log-retention.
+[Unit]
+Description=HyperCalendarBot stage log retention
+ConditionPathExists=/usr/local/lib/hypercal-stage/log-retention.py
+
+[Service]
+Type=oneshot
+# Both sweeps run even when the first fails (a oneshot skips every ExecStart after a failed one, which would leave the
+# stage logs unrotated), and either failure still fails the unit.
+ExecStart=/bin/sh -c 'r=0; /usr/local/lib/hypercal-stage/log-retention.py --root /opt/hypercal/stage/evidence || r=1; /usr/local/lib/hypercal-stage/log-retention.py --root /opt/hypercal/stage/logs || r=1; exit $$r'
+Nice=10
+IOSchedulingClass=idle

@@ -106,7 +106,7 @@ declared_shell() {
 # new_user_shell NAME SUDO: the shell the users module creates NAME with: the declared one once it is usable; while it
 # is not, nologin (the declared shell may be a restricted one, the only barrier for whoever holds the key), except for
 # sudo = "nopasswd": that key gives root anyway, and the user must be an admin from the first run on, so that
-# ssh-server turns off password and root login on a run whose apt failed. useradd's default when none is declared.
+# ssh-server turns off password login (root's included) on a run whose apt failed. useradd's default when none is declared.
 # An existing user's shell is login-shell's alone.
 new_user_shell() {
 	local shell

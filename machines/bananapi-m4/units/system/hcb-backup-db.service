@@ -1,0 +1,14 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/hcb-backup-db.service, not this file.
+# HyperCalendarBot's daily database backup (was root's crontab on the odroid). The script is the copy the last deploy
+# installed into /opt/hypercal/scripts; it backs up inside the running container and restricts the copies' modes.
+# Output goes to the journal, not logs/backup.log: the bot container can write logs/, and root appending there would
+# follow a symlink the container planted.
+[Unit]
+Description=HyperCalendarBot database backup
+ConditionPathExists=/opt/hypercal/scripts/backup-db.sh
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hypercal/scripts/backup-db.sh
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,13 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/runners.slice, not this file.
+# Every self-hosted runner service (Slice= in units/system/actions.runner.alex-.service.d/) and so every job and deploy
+# they run: one cap for all five runners together, because jobs of three repositories can run at once and a per-unit
+# cap would add up to more than the 1.7 GB board. MemoryHigh throttles and reclaims (into zram) instead of killing a
+# deploy half way; the bots' own MemoryLow keeps their pages. Containers a job starts run under dockerd and escape it.
+# (Not `actions-runners.slice`: a dash in a slice name makes it a child of the slice named by the part before it.)
+[Unit]
+Description=GitHub Actions self-hosted runners
+
+[Slice]
+CPUWeight=20
+IOWeight=20
+MemoryHigh=700M

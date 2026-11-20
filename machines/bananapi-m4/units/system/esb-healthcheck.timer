@@ -1,0 +1,10 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/esb-healthcheck.timer, not this file.
+[Unit]
+Description=ExpenseSyncBot public health check, every 2 minutes
+
+[Timer]
+OnCalendar=*:0/2
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

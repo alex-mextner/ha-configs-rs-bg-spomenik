@@ -38,16 +38,17 @@ with a `SHA256SUMS`, is part of every snapshot. Temp files (restic's packs, SQLi
 | odroidn2 | `home-assistant_v2.db`, `zigbee.db` | sqlite dump | ~445 MB |
 | odroidn2 | `~/music-assistant` (settings, certs, logs) + `library.db`, `auth.db` | files + sqlite dump | ~30 MB |
 | odroidn2 | `~/esphome` (YAML, components), `~/ssh-data`, `~/.config` (user units, Tasks keys) | files | ~10 MB |
-| odroidn2 (Armbian only; they move to bananapi-m4) | ExpenseSyncBot `data/` (receipts, own backups), `logs/`, `.env`; `expenses.db` | files + sqlite dump | ~160 MB |
-| odroidn2 (Armbian only) | HyperSummaryBot `data/`, `logs/`, `.env`; `hyper-summary.db` | files + sqlite dump | ~125 MB |
-| odroidn2 (Armbian only) | HyperCalendarBot `/opt/hypercal` `.env`, compose, `data/`, `logs/`; `calendar.db`; redis `hypercal-redis` | files + sqlite dump + BGSAVE | ~40 MB |
+| odroidn2 (Armbian only) | ExpenseSyncBot, HyperSummaryBot, HyperCalendarBot: their stopped copies since the move to bananapi-m4 (2026-11-20), kept for rollback until the NixOS reinstall (no redis dump: `hypercal-redis` is stopped there) | files + sqlite dump | ~325 MB |
 | odroidn2 | Postgres `hga` (container `homeassistant-hga-postgres-1`) | pg_dump | small |
 | odroidn2 | `/etc`, `/var/spool/cron` (Armbian), `/var/lib/nixos`, `/var/lib/tailscale`, `/var/lib/bluetooth` (NixOS) | files | ~5 MB |
 | odroidn2 (NixOS) | `~/.local/bin` (host helpers), `~/odroid-overlay`, home-lan DHCP/DNS config and leases, `~/.kodi/userdata` | files | small |
 | ubuntu-pc | Postgres `quasar`, `quasar_stage` (container `aisis-yandex-postgres-1`) | pg_dump | ~16 MB |
 | ubuntu-pc | `~/.config/tasks-backup` (age key!), `~/.config/tg-cli`, `~/.ssh`, aisis `compose.yaml` | files | <1 MB |
 | ubuntu-pc | Tasks backup sets from the puller → `gdrive:homelab-backup-ubuntu-pc/tasks` | rclone copy, hourly | ~390 MB |
-| bananapi-m4 | `/etc`, `/var/spool/cron`, `/srv/compose` (bots stack), `~/.config` | files | small (no stack yet) |
+| bananapi-m4 | `/etc`, `/var/spool/cron`, `/srv/compose` (cloudflared), `~/.config` | files | small |
+| bananapi-m4 | ExpenseSyncBot `data/` (receipts, own backups), `logs/`, `.env`, `.env.stage`; `expenses.db` | files + sqlite dump | ~160 MB |
+| bananapi-m4 | HyperSummaryBot `data/`, `.env`; `hyper-summary.db`, its `mtcute-session` | files + sqlite dump | ~60 MB |
+| bananapi-m4 | HyperCalendarBot `/opt/hypercal` `.env`, compose, `data/`, `logs/`, `stage/stage.env`; `calendar.db`; redis `hypercal-redis` | files + sqlite dump + BGSAVE | ~40 MB |
 | macmini | `/var/lib/nixos`, `/srv`, `/home/ultra` | files | small (fresh install) |
 
 Not backed up: models and caches (`.cache`, `.ollama`, `node_modules`, ESPHome build dirs, docker images), git

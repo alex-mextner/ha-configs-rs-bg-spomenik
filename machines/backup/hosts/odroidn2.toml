@@ -87,8 +87,3 @@ name = "hga"
 container = "homeassistant-hga-postgres-1"
 database = "hga"
 user = "hga"
-
-[[dumps]]
-type = "redis"
-name = "hypercal-redis"
-container = "hypercal-redis"

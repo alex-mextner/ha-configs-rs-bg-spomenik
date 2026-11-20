@@ -1,0 +1,38 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/hyper-summary-bot.service, not this file.
+# HyperSummaryBot (github.com/alex-mextner/HyperSummaryBot): Bun, webhook on :3003 (tunnel bananapi-m4). The checkout
+# /srv/hyper-summary-bot, its .env and data/ are the repository's deploy state; the deploy job (runner bananapi-hsb,
+# user hsb) checks out the exact SHA, migrates and restarts this unit through its one sudo rule.
+[Unit]
+Description=HyperSummaryBot (Telegram bot)
+Documentation=https://github.com/alex-mextner/HyperSummaryBot/blob/main/docs/operations/deployment.md
+Wants=network-online.target
+After=network-online.target
+# Inactive, not failed, until the checkout and its secrets exist.
+ConditionPathExists=/srv/hyper-summary-bot/.env
+StartLimitIntervalSec=0
+
+[Service]
+User=hsb
+Group=hsb
+WorkingDirectory=/srv/hyper-summary-bot
+Environment=NODE_ENV=production
+# Bun loads .env from the working directory.
+ExecStart=/usr/local/bin/bun src/index.ts
+Restart=always
+# Crash-loop backoff: 3 s growing over 5 restarts to 2 min, so a broken deploy does not spin the shared board.
+# StartLimitIntervalSec=0 keeps Restart=always from ever giving up (the default burst limit would leave it failed).
+RestartSec=3
+RestartSteps=5
+RestartMaxDelaySec=2min
+TimeoutStopSec=10
+# 2 GB board shared with two other bots: reclaim above 384M, stop above 448M (pm2 restarted it at 512M on the odroid).
+# MemoryLow: under board-wide pressure the runners' jobs and the stage bots are reclaimed and swapped before this.
+MemoryLow=96M
+MemoryHigh=384M
+MemoryMax=448M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

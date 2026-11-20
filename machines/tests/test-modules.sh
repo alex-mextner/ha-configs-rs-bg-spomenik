@@ -29,6 +29,14 @@ expect "login-shell plan: a missing user drifts (exit 3)" test "$code" = 3
 expect "  ... naming it" contains "$out" "dt-no-such-user: login shell -> /bin/sh once the user exists"
 expect "  ... and the next entry is still handled" contains "$out" "root: login shell"
 
+module ssh-server check '{"allow_users": ["ultra", "x\nPermitRootLogin yes"]}'
+expect "ssh-server: an allow_users entry that is not a user name exits 2" test "$code" = 2
+expect "  ... naming it" contains "$err" "is not a user name"
+module ssh-server check '{"allow_users": ["ultra\n", "allowusers", "www-data"]}'
+expect "ssh-server: an allow_users entry with a trailing newline exits 2" test "$code" = 2
+module ssh-server check '{"allow_users": [false, "x\nPermitRootLogin yes"]}'
+expect "ssh-server: a first allow_users entry that is false exits 2" test "$code" = 2
+
 if ((EUID != 0)) || [[ ! -e /.dockerenv && ! -e /run/.containerenv ]]; then
 	echo "skip the rest (root in a container only)"
 	done_testing
@@ -74,6 +82,12 @@ expect "  ... refusing" contains "$err" "refusing password_authentication = fals
 module ssh-server check '{"password_authentication": false}' "$(ssh_config dt-bash nopasswd)"
 expect "ssh-server: an admin with /bin/bash counts (exit 3: the drop-in is not there yet)" test "$code" = 3
 expect "  ... no refusal" lacks "$err" "refusing"
+module ssh-server check '{"password_authentication": false, "allow_users": ["root"]}' "$(ssh_config dt-bash nopasswd)"
+expect "ssh-server: allow_users without the only admin is refused (exit 1)" test "$code" = 1
+expect "  ... refusing" contains "$err" "refusing password_authentication = false / allow_users"
+module ssh-server check '{"password_authentication": false, "allow_users": ["dt-bash", "root"]}' \
+	"$(ssh_config dt-bash nopasswd)"
+expect "ssh-server: allow_users with the admin counts (exit 3: the drop-in is not there yet)" test "$code" = 3
 usermod --shell /nonexistent/sh dt-bash
 module ssh-server check '{"password_authentication": false}' "$(ssh_config dt-bash nopasswd)"
 expect "ssh-server: an admin whose shell is gone does not count (exit 1)" test "$code" = 1

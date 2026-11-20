@@ -1,0 +1,9 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/hcb-log-retention.timer, not this file.
+[Unit]
+Description=HyperCalendarBot log retention, hourly at :17
+
+[Timer]
+OnCalendar=*-*-* *:17:00
+
+[Install]
+WantedBy=timers.target

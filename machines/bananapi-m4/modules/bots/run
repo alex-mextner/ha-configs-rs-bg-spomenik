@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# bots: what the Telegram bots on this host need besides packages and units.
+#   [[modules.bots.dirs]]   path, owner ("user:group"), mode: a directory with that owner and mode (not recursive)
+#   [[modules.bots.bun]]    prefix, version, sha256, owner, globals: Bun <version> at <prefix>/bin/bun from the
+#                           release zip (bun-linux-<arch>.zip, checked against sha256), owned by <owner>; globals are
+#                           "<package>@<version>" installed with `bun add -g` as <owner> (BUN_INSTALL=<prefix>)
+#   [modules.bots.links]    "<path>" = "<target>": a symlink; a regular file in its way is backed up first
+#   [modules.bots.sudoers]  "<file>" = ["<rule>", ...]: /etc/sudoers.d/<file> (0440), validated by visudo
+#   [modules.bots.tmpfiles] "<name>" = ["<line>", ...]: /etc/tmpfiles.d/<name>.conf, applied with systemd-tmpfiles
+#   stacks = [...]          compose/<name>/compose.yaml -> /srv/compose/<name>/compose.yaml, run by compose@<name>
+# The bots' own files (checkouts, .env, data) are per-repo state and never written here.
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+# --- directories -------------------------------------------------------------------------------------------------
+count=$(opt '.dirs // [] | length')
+for ((i = 0; i < count; i++)); do
+	d=$(opt ".dirs[$i]")
+	path=$(jq -r '.path' <<<"$d")
+	owner=$(jq -r '.owner // "root:root"' <<<"$d")
+	mode=$(jq -r '.mode // "755"' <<<"$d")
+	if [[ ! -d $path ]]; then
+		drift "create $path ($mode $owner)" && install -d -m "$mode" -o "${owner%%:*}" -g "${owner##*:}" "$path"
+	elif [[ $(stat -c '%a %U:%G' "$path") != "$mode $owner" ]]; then
+		drift "$path: $(stat -c '%a %U:%G' "$path") -> $mode $owner" &&
+			chown "$owner" "$path" && chmod "$mode" "$path"
+	fi
+done
+
+# --- Bun runtimes ------------------------------------------------------------------------------------------------
+case $(dpkg --print-architecture) in
+arm64) bun_arch=aarch64 ;;
+amd64) bun_arch=x64 ;;
+*) bun_arch=unsupported ;;
+esac
+tmp=''
+# A failed download or unzip, or an interrupt, must not leave ~100 MB of zip and binary on the eMMC.
+cleanup() { [[ -z $tmp ]] || rm -rf "$tmp"; }
+trap cleanup EXIT
+count=$(opt '.bun // [] | length')
+for ((i = 0; i < count; i++)); do
+	b=$(opt ".bun[$i]")
+	prefix=$(jq -r '.prefix' <<<"$b")
+	version=$(jq -r '.version' <<<"$b")
+	sha=$(jq -r '.sha256' <<<"$b")
+	owner=$(jq -r '.owner // "root"' <<<"$b")
+	bin=$prefix/bin/bun
+	# As the owner, never root: the owner can replace the binary, so running it as root would hand them root. Bounded:
+	# a replaced binary that blocks must not hang every `install.sh check`.
+	have=$(runuser -u "$owner" -- timeout 10 "$bin" --version 2>/dev/null || true)
+	if [[ $have != "$version" ]]; then
+		if drift "$bin: Bun ${have:-none} -> $version"; then
+			[[ $bun_arch != unsupported ]] || { echo "  no Bun build for $(dpkg --print-architecture)" >&2; exit 1; }
+			tmp=$(mktemp -d -p /var/tmp) # not the 256M zram /tmp
+			curl -fsSL --retry 3 -o "$tmp/bun.zip" \
+				"https://github.com/oven-sh/bun/releases/download/bun-v$version/bun-linux-$bun_arch.zip"
+			if ! echo "$sha  $tmp/bun.zip" | sha256sum -c --status; then
+				echo "  bun-v$version zip does not match sha256 $sha: refusing" >&2
+				exit 1
+			fi
+			unzip -q -d "$tmp" "$tmp/bun.zip"
+			# Verified as root, placed as the owner: the owner controls these paths, and root resolving them could be
+			# raced into writing or chowning through a swapped-in symlink.
+			runuser -u "$owner" -- install -D -m 755 /dev/stdin "$bin" <"$tmp/bun-linux-$bun_arch/bun"
+			runuser -u "$owner" -- ln -sfn bun "$prefix/bin/bunx"
+			rm -rf "$tmp"
+			tmp=''
+		fi
+	fi
+	for spec in $(jq -r '.globals // [] | .[]' <<<"$b"); do
+		name=${spec%@*}
+		want=${spec##*@}
+		got=$(runuser -u "$owner" -- timeout 10 head -c 65536 "$prefix/install/global/node_modules/$name/package.json" 2>/dev/null |
+			jq -r '.version // empty' 2>/dev/null || true)
+		if [[ $got != "$want" ]]; then
+			if drift "$prefix: global $name ${got:-none} -> $want"; then
+				home=$(getent passwd "$owner" | cut -d: -f6)
+				runuser -u "$owner" -- env HOME="$home" BUN_INSTALL="$prefix" PATH="$prefix/bin:/usr/bin:/bin" \
+					"$bin" add -g "$spec"
+			fi
+		fi
+	done
+done
+
+# --- symlinks ----------------------------------------------------------------------------------------------------
+for path in $(opt '.links // {} | keys[]'); do
+	target=$(opt ".links[\"$path\"]")
+	[[ -L $path && $(readlink "$path") == "$target" ]] && continue
+	if [[ -d $path && ! -L $path ]]; then
+		echo "  $path is a directory, declared a link to $target: move it away by hand" >&2
+		exit 1
+	fi
+	if drift "link $path -> $target"; then
+		if [[ -f $path && ! -L $path ]]; then
+			install -d -m 700 "$BACKUP_DIR"
+			cp -a "$path" "$BACKUP_DIR/$(echo "${path#/}" | tr / _).$(date +%Y%m%dT%H%M%S)"
+		fi
+		install -d "$(dirname "$path")"
+		ln -sfn "$target" "$path"
+	fi
+done
+
+# --- sudo rules --------------------------------------------------------------------------------------------------
+for file in $(opt '.sudoers // {} | keys[]'); do
+	rule=$(mktemp)
+	{
+		echo "$MARKER"
+		opt ".sudoers[\"$file\"] | if type == \"array\" then .[] else . end"
+	} >"$rule"
+	if ! visudo -cqf "$rule" >/dev/null; then
+		echo "  sudoers $file: visudo rejects the rule" >&2
+		rm -f "$rule"
+		exit 1
+	fi
+	ensure_file "/etc/sudoers.d/$file" 440 root:root <"$rule" || true
+	rm -f "$rule"
+done
+
+# --- tmpfiles.d --------------------------------------------------------------------------------------------------
+for file in $(opt '.tmpfiles // {} | keys[]'); do
+	if ensure_file "/etc/tmpfiles.d/$file.conf" 644 root:root < <(
+		echo "# Managed by debian-tweaks (bots): edit [modules.bots.tmpfiles] in machine.toml, not this file."
+		opt ".tmpfiles[\"$file\"] | .[]"
+	); then
+		drift "systemd-tmpfiles --create /etc/tmpfiles.d/$file.conf" && systemd-tmpfiles --create "/etc/tmpfiles.d/$file.conf"
+	fi
+done
+
+# --- Compose stack files -----------------------------------------------------------------------------------------
+for stack in $(opt '.stacks // [] | .[]'); do
+	src=$DT_DIR/compose/$stack/compose.yaml
+	[[ -f $src ]] || { echo "  missing compose/$stack/compose.yaml" >&2; exit 2; }
+	if ensure_file "/srv/compose/$stack/compose.yaml" 644 root:root < <(
+		echo "# Managed by debian-tweaks (bots): edit machines/bananapi-m4/compose/$stack/compose.yaml, not this file."
+		cat "$src"
+	); then
+		# A running stack keeps its old containers until `up` runs again (the unit's reload); a stopped one picks the
+		# file up when it starts. On a fresh install compose@.service comes later (systemd-units), so nothing to reload.
+		if systemctl is-active -q "compose@$stack.service"; then
+			drift "compose@$stack: reload so the edit reaches its containers" &&
+				systemctl reload "compose@$stack.service"
+		fi
+	fi
+done
+finish

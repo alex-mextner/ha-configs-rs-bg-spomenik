@@ -1,0 +1,5 @@
+description = "GitHub Actions self-hosted runners: pinned runner release unpacked per runner, registered, service enabled"
+# After systemd-units, which writes the drop-in every runner service gets (units/system/actions.runner.alex-.service.d).
+order = 72
+# bots creates /var/www, the parent of the www-data runner's directory.
+requires = ["service-users", "packages", "bots"]

@@ -1,0 +1,14 @@
+# Managed by debian-tweaks (systemd-units): edit units/system/esb-backup-db.service, not this file.
+# ExpenseSyncBot's daily database backup into data/backups (was www-data's crontab on the odroid).
+[Unit]
+Description=ExpenseSyncBot database backup
+ConditionPathExists=/var/www/ExpenseSyncBot/data/expenses.db
+
+[Service]
+Type=oneshot
+User=www-data
+WorkingDirectory=/var/www/ExpenseSyncBot
+Environment=PATH=/var/www/.bun/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/sh -c './scripts/backup-db.sh >> logs/backup.log 2>&1'
+Nice=10
+IOSchedulingClass=idle

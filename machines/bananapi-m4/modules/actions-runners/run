@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# actions-runners: version, sha256 (of actions-runner-linux-<arch>-<version>.tar.gz) and
+#   [[modules.actions-runners.runners]] repo ("owner/name"), name, labels, user, dir.
+# Per runner: the release is unpacked into <dir> as <user> (once: the runner updates itself afterwards, so a newer
+# version there is not drift); once registered (<dir>/.runner names it) its unit actions.runner.<owner>-<repo>.<name>
+# is written here from this config and kept enabled and running. Nothing in <dir> is ever run as root or trusted for a
+# unit name: <dir> belongs to the runner user, whose jobs could rewrite svc.sh or .service. Registration needs a
+# one-hour token from GitHub and is never automatic: an unregistered runner
+# is drift that install cannot fix (exit 1) until `scripts/register-runner.sh <name>` has run (see README.md).
+source "$(dirname "$0")/../../lib/common.sh" "$@"
+
+version=$(opt '.version')
+sha=$(opt '.sha256')
+case $(dpkg --print-architecture) in
+arm64) arch=arm64 ;;
+amd64) arch=x64 ;;
+*) arch=unsupported ;;
+esac
+tarball=''
+cleanup() { [[ -z $tarball ]] || rm -f "$tarball"; }
+trap cleanup EXIT
+unregistered=()
+
+# runner_json DIR USER: <dir>/.runner without the UTF-8 BOM the runner writes. Read as the runner user and capped: the
+# user owns the file and could make it a FIFO or a link to /dev/zero.
+runner_json() { runuser -u "$2" -- timeout 10 head -c 65536 "$1/.runner" 2>/dev/null | sed '1s/^\xEF\xBB\xBF//'; }
+
+count=$(opt '.runners // [] | length')
+for ((i = 0; i < count; i++)); do
+	r=$(opt ".runners[$i]")
+	repo=$(jq -r '.repo' <<<"$r")
+	name=$(jq -r '.name' <<<"$r")
+	user=$(jq -r '.user' <<<"$r")
+	dir=$(jq -r '.dir' <<<"$r")
+	# The runner user owns <dir> and its parent, so root never resolves a path in there: a symlink swapped in during
+	# the download would turn a root mkdir/chown into one on any directory. Every write below runs as the user.
+
+	if [[ ! -x $dir/bin/Runner.Listener ]]; then
+		if drift "$name: unpack actions-runner $version into $dir"; then
+			[[ $arch != unsupported ]] || { echo "  no runner build for $(dpkg --print-architecture)" >&2; exit 1; }
+			if [[ -z $tarball ]]; then
+				# Not /tmp: that is a 256M zram device on this board, too small (and RAM) for the ~200 MB tarball.
+				tarball=$(mktemp -p /var/tmp)
+				curl -fsSL --retry 3 -o "$tarball" \
+					"https://github.com/actions/runner/releases/download/v$version/actions-runner-linux-$arch-$version.tar.gz"
+				if ! echo "$sha  $tarball" | sha256sum -c --status; then
+					echo "  actions-runner $version does not match sha256 $sha: refusing" >&2
+					exit 1
+				fi
+				chmod 644 "$tarball"
+			fi
+			runuser -u "$user" -- mkdir -p -- "$dir"
+			runuser -u "$user" -- tar -xzf "$tarball" -C "$dir"
+		fi
+	fi
+
+	if [[ $(runner_json "$dir" "$user" | jq -r '.agentName // empty' 2>/dev/null) != "$name" ]]; then
+		drift "$name: not registered: token from GitHub, then sudo scripts/register-runner.sh $name (README.md)" || true
+		unregistered+=("$name")
+		continue
+	fi
+
+	svc=actions.runner.${repo/\//-}.$name.service
+	if ensure_file "/etc/systemd/system/$svc" 644 root:root <<EOF; then
+$MARKER
+[Unit]
+Description=GitHub Actions Runner (${repo/\//-}.$name)
+After=network-online.target
+
+[Service]
+ExecStart=$dir/bin/runsvc.sh
+User=$user
+WorkingDirectory=$dir
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		drift "$name: daemon-reload for $svc" && systemctl daemon-reload
+	fi
+	if ! systemctl is-enabled -q "$svc" 2>/dev/null || ! systemctl is-active -q "$svc"; then
+		drift "$name: enable --now $svc" && systemctl enable --now "$svc"
+	fi
+done
+
+if [[ $MODE == install ]] && ((${#unregistered[@]})); then
+	echo "  not registered (needs a token, see README.md): ${unregistered[*]}" >&2
+	exit 1
+fi
+finish

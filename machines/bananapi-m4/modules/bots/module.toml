@@ -1,0 +1,4 @@
+description = "bot hosting: pinned Bun runtimes (+ global packages), directories, links, sudo rules, Compose stack files"
+# Before systemd-units: the units it enables run the Bun installed here and the stacks written here.
+order = 68
+requires = ["packages", "service-users"]

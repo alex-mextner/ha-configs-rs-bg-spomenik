@@ -1,6 +1,7 @@
 # Banana Pi BPI-M4 (RTD1395, 4x A53, 2 GB RAM, 8 GB eMMC), Armbian 26.11 trixie minimal, kernel 6.18 "current".
-# Workload: bots in Docker Compose (Bun images, arm64), redis, GitHub Actions self-hosted runners (arm64),
-# the `computer` tool (Node 18+, systemd --user).
+# Workload: the Telegram bots HyperSummaryBot (Bun, systemd), HyperCalendarBot (Docker Compose: bot + redis) and
+# ExpenseSyncBot (Bun under pm2, caddy), their GitHub Actions self-hosted runners (arm64), cloudflared for their public
+# hostnames, the `computer` tool (Node 18+, systemd --user).
 # Apply: sudo ./install.sh (preview), sudo ./install.sh --commit (converge), sudo ./install.sh check (exit 0/3).
 
 [modules.system]
@@ -15,6 +16,41 @@ key_url = "https://download.docker.com/linux/debian/gpg"
 # "Docker Release (CE deb) <docker@docker.com>", as published on https://docs.docker.com/engine/install/debian/
 fingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
+[modules.apt-sources.sources.tailscale]
+uris = "https://pkgs.tailscale.com/stable/debian"
+suites = "{codename}"
+components = "main"
+key_url = "https://pkgs.tailscale.com/stable/debian/trixie.asc"
+# "Tailscale Inc. (Package repository signing key)", as published on https://pkgs.tailscale.com/stable/#debian-trixie
+fingerprint = "2596A99EAAB33821893C0A79458CA832957F5868"
+
+# Before packages: caddy's package creates a system user, which would otherwise take uid 999 (see the module).
+[[modules.service-users.users]]
+name = "hypercal"
+uid = 999
+group = "nogroup"
+home = "/nonexistent"
+comment = "HyperCalendarBot container user (botuser in the image), owns /opt/hypercal/data"
+
+[[modules.service-users.users]]
+name = "hsb"
+uid = 950
+home = "/var/lib/hsb"
+comment = "HyperSummaryBot and its Actions runner"
+
+[[modules.service-users.users]]
+name = "hcb-runner"
+uid = 951
+home = "/var/lib/hcb-runner"
+comment = "HyperCalendarBot deploy runner (deploys through one sudo rule)"
+
+[[modules.service-users.users]]
+name = "hcb-qa"
+uid = 952
+home = "/var/lib/hcb-qa-runner"
+# Shared by two repositories' PR jobs, as on the odroid: each can read the other's runner credentials (#127)
+comment = "Stage QA runners of HyperCalendarBot and ExpenseSyncBot"
+
 [modules.packages]
 install = [
   # docker engine + compose v2 from download.docker.com (docker.io in trixie has no compose v2 plugin)
@@ -27,6 +63,19 @@ install = [
   "htop", "tmux", "rsync", "less", "vim-tiny",
   # ultra's login shell (installed before the login-shell module sets it; the dotfiles are a zsh setup)
   "zsh",
+  # tailnet access (`ssh root@bananapi-m4`); the one-time login is in README.md
+  "tailscale",
+  # the bots: ExpenseSyncBot's origin web server; python3 runs the bots' deploy and retention scripts; sqlite3 for
+  # consistent copies; unzip for the Bun release zips
+  "caddy", "python3", "sqlite3", "unzip",
+  # ExpenseSyncBot renders tables with Playwright's headless Chromium (browser downloaded by the bot's own Playwright
+  # into /var/www/.cache): the libraries and fonts `playwright install-deps --dry-run chromium` lists for trixie,
+  # without xvfb (headless only)
+  "libasound2t64", "libatk-bridge2.0-0t64", "libatk1.0-0t64", "libatspi2.0-0t64", "libcairo2", "libcups2t64",
+  "libdbus-1-3", "libdrm2", "libgbm1", "libglib2.0-0t64", "libnspr4", "libnss3", "libpango-1.0-0", "libx11-6",
+  "libxcb1", "libxcomposite1", "libxdamage1", "libxext6", "libxfixes3", "libxkbcommon0", "libxrandr2",
+  "libfontconfig1", "libfreetype6", "fonts-noto-color-emoji", "fonts-unifont", "xfonts-scalable", "fonts-liberation",
+  "fonts-ipafont-gothic", "fonts-wqy-zenhei", "fonts-tlwg-loma-otf", "fonts-freefont-ttf",
 ]
 
 [[modules.users.users]]
@@ -44,16 +93,33 @@ authorized_keys = [
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGpvc8Es/UxcnDgKsAn84iu+oofvL0yWbDOxTie4aTwC",
 ]
 
+# Root login with the same keys as ultra (who has NOPASSWD sudo anyway): the bots' ops tooling and incident sessions
+# run `ssh root@<host>` (HyperCalendarBot's post-ship check and local fallback deploy, docker logs, sqlite reads).
+[[modules.users.users]]
+name = "root"
+authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMdEyhpamHIpibpBBnExkEe/sTf4ga0frBRWEQhBLQtD ultra@home",
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINpnCxVsKPqVbKHtg5fKYabNIO8Ue8qYMkeJh/UFNtLd",
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGpvc8Es/UxcnDgKsAn84iu+oofvL0yWbDOxTie4aTwC",
+]
+
 [modules.login-shell.shells]
 ultra = "/usr/bin/zsh"
+# ExpenseSyncBot's operations run as www-data (`su - www-data`, its runner and pm2)
+www-data = "/bin/bash"
 
 [modules.ssh-server]
 password_authentication = false
-permit_root_login = "no"
+permit_root_login = "prohibit-password"
+# Only the people log in: a service user whose home its own jobs can write (www-data, the runner users) cannot turn a
+# planted authorized_keys into a shell or a port forward.
+allow_users = ["ultra", "root"]
 
 [modules.zram]
-# 2 GB RAM: a 1 GB zstd swap (~3x compression) is effectively +2 GB for idle bot processes.
-percent = 50
+# 1.7 GB RAM, three bots: swap the size of RAM. zstd packs the bots' idle heaps ~4x (measured 2026-11-20: 869 MB of
+# pages in 197 MB), so a full swap costs ~430 MB of RAM; mem_limit_percent caps that RAM at half the board.
+# 50% filled up the day the third bot moved here.
+percent = 100
 algorithm = "zstd"
 priority = 100
 mem_limit_percent = 50
@@ -73,10 +139,132 @@ tmp_size = "256M"
 "log-opts" = { "max-size" = "10m", "max-file" = "3" }
 "default-ulimits" = { nofile = { Name = "nofile", Soft = 65536, Hard = 65536 } }
 
+[modules.bots]
+stacks = ["cloudflared"]
+
+[[modules.bots.dirs]]
+path = "/srv/compose"
+[[modules.bots.dirs]]
+path = "/srv/compose/cloudflared"
+mode = "750"
+[[modules.bots.dirs]]
+path = "/srv/hyper-summary-bot"
+owner = "hsb:hsb"
+mode = "750"
+[[modules.bots.dirs]]
+path = "/opt/hypercal"
+[[modules.bots.dirs]]
+path = "/var/www"
+owner = "www-data:www-data"
+
+# HyperSummaryBot: /usr/local/bin/bun (the version its CI tests with)
+[[modules.bots.bun]]
+prefix = "/usr/local"
+version = "1.4.2"
+sha256 = "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7"
+owner = "root"
+
+# ExpenseSyncBot: /var/www/.bun/bin/{bun,pm2}, the paths its workflows name (the odroid's versions)
+[[modules.bots.bun]]
+prefix = "/var/www/.bun"
+version = "1.2.17"
+sha256 = "a0b996f48c977beb4e87b09a471ded7e63ee5c2fb4b72790c7ab4badbc147d6b"
+owner = "www-data"
+globals = ["pm2@6.0.8"]
+
+[modules.bots.links]
+# ExpenseSyncBot's Caddyfile ships with its code (its deploy runs `caddy reload`)
+"/etc/caddy/Caddyfile" = "/var/www/ExpenseSyncBot/Caddyfile"
+# HyperCalendarBot keeps the odroid's layout (/opt/hypercal, Compose project hypercalinvntrmru, its deploy tooling
+# names both); compose@hypercalinvntrmru.service starts it at boot through these two links
+"/srv/compose/hypercalinvntrmru" = "/opt/hypercal"
+"/opt/hypercal/compose.yaml" = "docker-compose.yml"
+
+# One rule per file, each the only root right of its user, except hcb-qa (two repositories' QA runners, see above).
+[modules.bots.sudoers]
+hsb-deploy = ["hsb ALL=(root) NOPASSWD: /usr/bin/systemctl restart hyper-summary-bot.service"]
+hcb-runner = ["hcb-runner ALL=(root) NOPASSWD: /usr/local/sbin/hypercal-activate-release"]
+hcb-qa = ["hcb-qa ALL=(root) NOPASSWD: /usr/local/sbin/hypercal-stage-qa"]
+esb-stage-qa = ['hcb-qa ALL=(root) NOPASSWD: /usr/local/lib/esb-stage-qa/odroid-stage-qa-report.py ""']
+
+# The HCB (root) and ESB (www-data) deploys share one flock. Root-owned at boot: with fs.protected_regular=2 root cannot
+# open a lock file www-data created in the sticky /run/lock, while an O_CREAT open of a file owned like the directory
+# (root) is allowed to everyone; the www-data group lets ESB's deploy in and keeps every other user out (0666 let any
+# job hold the lock and stall both deploys, or write the owner file root's deploy reads).
+[modules.bots.tmpfiles]
+odroid-deploy-lock = [
+  "f /run/lock/odroid-deploy.lock 0660 root www-data -",
+  "f /run/lock/odroid-deploy.lock.owner 0660 root www-data -",
+]
+
 [modules.systemd-units]
-system = ["compose@.service"]
-# put the bots stack in /srv/compose/bots/compose.yaml; the unit stays inactive until that file exists
-enable = ["compose@bots.service"]
+system = [
+  "compose@.service",
+  "hyper-summary-bot.service",
+  "pm2-www-data.service",
+  "caddy.service.d/10-expensesyncbot.conf",
+  "compose@cloudflared.service.d/10-token.conf",
+  "compose@hypercalinvntrmru.service.d/10-start-only.conf",
+  "runners.slice", "actions.runner.alex-.service.d/50-yield-to-services.conf",
+  "esb-backup-db.service", "esb-backup-db.timer",
+  "esb-healthcheck.service", "esb-healthcheck.timer",
+  "esb-log-retention.service", "esb-log-retention.timer",
+  "hcb-backup-db.service", "hcb-backup-db.timer",
+  "hcb-log-retention.service", "hcb-log-retention.timer",
+  "hcb-stage-log-retention.service", "hcb-stage-log-retention.timer",
+]
+# Each bot unit stays inactive (a condition, not a failure) until the bot's own state is on the box: the checkout and
+# .env (hyper-summary-bot, caddy), pm2's saved list (pm2-www-data), the stack file (compose@*), the scripts a deploy
+# installs (timers' services).
+enable = [
+  "compose@cloudflared.service",
+  "compose@hypercalinvntrmru.service",
+  "hyper-summary-bot.service",
+  "pm2-www-data.service",
+  "caddy.service",
+  "esb-backup-db.timer", "esb-healthcheck.timer", "esb-log-retention.timer",
+  "hcb-backup-db.timer", "hcb-log-retention.timer", "hcb-stage-log-retention.timer",
+]
+
+# Registration (token from GitHub) is one-time and by hand: README.md, "Bots".
+[modules.actions-runners]
+version = "2.338.2"
+sha256 = "670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945"
+
+[[modules.actions-runners.runners]]
+repo = "alex-mextner/HyperSummaryBot"
+name = "bananapi-hsb"
+labels = ["bananapi-m4", "hyper-summary-bot"]
+user = "hsb"
+dir = "/var/lib/hsb/actions-runner"
+
+[[modules.actions-runners.runners]]
+repo = "alex-mextner/HyperCalendarBot"
+name = "bananapi-hcb"
+labels = ["bananapi-hcb"]
+user = "hcb-runner"
+dir = "/var/lib/hcb-runner/actions-runner"
+
+[[modules.actions-runners.runners]]
+repo = "alex-mextner/HyperCalendarBot"
+name = "bananapi-hcb-qa"
+labels = ["stage-qa"]
+user = "hcb-qa"
+dir = "/var/lib/hcb-qa-runner/actions-runner"
+
+[[modules.actions-runners.runners]]
+repo = "alex-mextner/ExpenseSyncBot"
+name = "bananapi-esb"
+labels = ["bananapi-m4"]
+user = "www-data"
+dir = "/var/www/actions-runner"
+
+[[modules.actions-runners.runners]]
+repo = "alex-mextner/ExpenseSyncBot"
+name = "bananapi-esb-qa"
+labels = ["stage-qa"]
+user = "hcb-qa"
+dir = "/var/lib/hcb-qa-runner/actions-runner-esb"
 
 # ~/.files (github.com/alex-mextner/.files) for ultra: modules/dotfiles links ../../dotfiles/debian. At the commit
 # pinned in ../dotfiles/debian/rev (one pin for every host; `rev = "<sha>"` here would override it).
