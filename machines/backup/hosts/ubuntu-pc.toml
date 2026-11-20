@@ -11,7 +11,7 @@ notify = ["/home/ultra/.local/bin/tg", "--tag", "problem", "--title", "homelab-b
 rclone_config = "/home/ultra/.config/rclone/rclone.conf"
 # hosts whose newest snapshot in the Drive this host checks daily (homelab-backup watch; alerts through notify):
 # a host without Telegram, or one that is down, is noticed here. Add a host after its first backup.
-watch = []
+watch = ["bananapi-m4"]
 
 paths = [
   # Tasks backup keys: without age.key the off-site Tasks sets cannot be decrypted

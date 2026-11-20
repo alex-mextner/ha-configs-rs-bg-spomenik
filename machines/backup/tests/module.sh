@@ -46,6 +46,17 @@ chmod +x "$tmp/stub/systemctl"
 export PATH=$tmp/stub:$PATH SYSTEMCTL_STATE=$tmp/enabled
 # changed: a log shows a change debian/run made or would make (common.sh's `~ ...` drift lines, `wrote ...`)
 changed() { grep -qE '^  (~|\+|wrote) ' "$1"; }
+# units NAME: NAME.timer is enabled and both units are written; no_units NAME: neither, and the timer is not enabled
+units() {
+	grep -qx "$1.timer" "$SYSTEMCTL_STATE" || fail "$1.timer not enabled"
+	[[ -f $unitdir/$1.service && -f $unitdir/$1.timer ]] || fail "$1 units not written"
+}
+no_units() {
+	[[ ! -e $unitdir/$1.service && ! -e $unitdir/$1.timer ]] || fail "$1 units not removed"
+	! grep -qx "$1.timer" "$SYSTEMCTL_STATE" || fail "$1.timer not disabled"
+}
+# watch_of FILE: the host file's `watch` as JSON (null when absent)
+watch_of() { python3 -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb")).get("watch")))' "$1"; }
 
 if ((EUID != 0)); then
 	code=0
@@ -84,26 +95,40 @@ jq -e --arg host "$host" '.repository == "rclone:gdrive:homelab-backup-\($host)/
 	and .drive_folder == "gdrive:homelab-backup-\($host)" and (.restic_program | endswith("/restic"))' \
 	"$confdir/config.json" >/dev/null || fail "config.json: $(cat "$confdir/config.json")"
 [[ $(stat -c %a "$confdir") == 700 ]] || fail "$confdir is not 0700"
-for timer in homelab-backup homelab-backup-check homelab-backup-drill; do
-	grep -qx "$timer.timer" "$SYSTEMCTL_STATE" || fail "$timer.timer not enabled"
-	[[ -f $unitdir/$timer.service && -f $unitdir/$timer.timer ]] || fail "$timer units not written"
-done
+for timer in homelab-backup homelab-backup-check homelab-backup-drill; do units "$timer"; done
 [[ -L $bindir/homelab-backup && -x $bindir/homelab-backup ]] || fail "homelab-backup not linked into $bindir"
 pass "$host: config.json points at gdrive:homelab-backup-$host/restic with the pinned restic, timers enabled, homelab-backup on PATH"
 
-# watch units left from a host file that listed hosts once (neither host lists any now): disabled and removed
-for suffix in service timer; do
-	cp "$unitdir/homelab-backup.$suffix" "$unitdir/homelab-backup-watch.$suffix"
-done
-echo homelab-backup-watch.timer >>"$SYSTEMCTL_STATE"
+# watch units exist exactly when the host file lists hosts to watch
+if watch_of "$backup_dir/hosts/$host.toml" | jq -e '. // [] | length > 0' >/dev/null; then
+	units homelab-backup-watch
+else
+	no_units homelab-backup-watch
+fi
+
+# a verb the host file no longer asks for: its units are disabled and removed. Run from a copy of the module whose
+# host file first lists a watched host and then none, so the test does not depend on the real host's `watch`
+mkdir -p "$tmp/machines"
+cp -r "$backup_dir" "$tmp/machines/backup"
+ln -s "$(cd "$backup_dir/../bananapi-m4" && pwd)" "$tmp/machines/bananapi-m4"
+fixture_sh=$tmp/machines/backup/debian/install.sh fixture_host=$tmp/machines/backup/hosts/$host.toml
+sed -i -e '/^watch = /d' -e '1i watch = ["fixture-host"]' "$fixture_host"
+[[ $(watch_of "$fixture_host") == '["fixture-host"]' ]] || fail "fixture: could not set watch in $fixture_host"
+"$fixture_sh" "$host" --commit >"$tmp/commit-watch.log" 2>&1 || fail "--commit with a watched host (see $tmp/commit-watch.log)"
+units homelab-backup-watch
+sed -i '/^watch = /d' "$fixture_host"
+[[ $(watch_of "$fixture_host") == null ]] || fail "fixture: could not drop watch from $fixture_host"
 code=0
-"$install_sh" "$host" check >"$tmp/check-stale.log" 2>&1 || code=$?
+"$fixture_sh" "$host" check >"$tmp/check-stale.log" 2>&1 || code=$?
 ((code == 3)) || fail "check with stale watch units: exit $code, expected 3"
-"$install_sh" "$host" --commit >"$tmp/commit3.log" 2>&1 || fail "--commit with stale watch units (see $tmp/commit3.log)"
-[[ ! -e $unitdir/homelab-backup-watch.service && ! -e $unitdir/homelab-backup-watch.timer ]] || fail "stale watch units not removed"
-! grep -qx homelab-backup-watch.timer "$SYSTEMCTL_STATE" || fail "stale watch timer not disabled"
-"$install_sh" "$host" check >"$tmp/check3.log" 2>&1 || fail "check after removing the stale units (see $tmp/check3.log)"
+"$fixture_sh" "$host" --commit >"$tmp/commit3.log" 2>&1 || fail "--commit with stale watch units (see $tmp/commit3.log)"
+no_units homelab-backup-watch
+"$fixture_sh" "$host" check >"$tmp/check3.log" 2>&1 || fail "check after removing the stale units (see $tmp/check3.log)"
 pass "$host: units of a verb the host file no longer asks for are disabled and removed"
+# back to the real module: converges again (for ubuntu-pc this re-adds its watched host to a converged install)
+"$install_sh" "$host" --commit >"$tmp/commit4.log" 2>&1 || fail "--commit back to the real module (see $tmp/commit4.log)"
+"$install_sh" "$host" check >"$tmp/check4.log" 2>&1 || fail "check back on the real module (see $tmp/check4.log)"
+pass "$host: back on the real host file, --commit converges again"
 
 # a regular file where the link goes is not replaced: the module refuses before it writes anything, and leaves it alone
 libdir=$(dirname "$(readlink "$bindir/homelab-backup")")
