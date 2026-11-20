@@ -108,7 +108,7 @@ No test should toggle physical appliances or inject a live remote event.
 
 ## Issue 159 deployment and rollback
 
-Install the following six runtime files together from the reviewed merged commit.
+Install the following seven runtime files together from the reviewed merged commit.
 
 - `packages/universal_remote.yaml`
 - `packages/music_remote.yaml`
@@ -116,14 +116,14 @@ Install the following six runtime files together from the reviewed merged commit
 - `custom_components/ekf_appliances/remote_mode.py`
 - `custom_components/ekf_appliances/remote_control.py`
 - `custom_components/remote_announcements/__init__.py`
+- `custom_components/remote_announcements/services.yaml`
 
-Compare the six live files with their expected originals and retain verified
+Compare the seven live files with their expected originals and retain verified
 backups. Run the installed `scripts/ha_safe_reload.sh` configuration check and
-restart once. After startup, verify the playback entities attribute on
+restart once. After startup, verify the `remote_announcement_playback_entities` attribute on
 `sensor.universal_remote_target`, the `input_text.audio_pending_tap_ms` helper,
-and the speaker and climate entities. Observe the healthy process for 60 seconds.
-If rollback
-is required, restore these six verified originals together after checking for
+the `remote_announcements.adopt_label_volume` action, and the speaker and climate
+entities. Observe the healthy process for 60 seconds. If rollback is required, restore these seven verified originals together after checking for
 intervening changes. Preserve unrelated files and the production Git index.
 
 ## Issue 88 deployment and rollback
