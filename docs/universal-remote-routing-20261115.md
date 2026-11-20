@@ -118,13 +118,19 @@ Install the following seven runtime files together from the reviewed merged comm
 - `custom_components/remote_announcements/__init__.py`
 - `custom_components/remote_announcements/services.yaml`
 
+When checking announcements, use a source that reports playback for the 6/10
+case. The Android TV Remote entity reports power, active app, volume and mute.
+A native TV app without a Cast or Music Assistant playing report provides no
+playback indication. If no other living-room source reports playback, its
+confirmation uses 4/10.
+
 Compare the seven live files with their expected originals and retain verified
 backups. Run the installed `scripts/ha_safe_reload.sh` configuration check and
-restart once. After startup, verify the `remote_announcement_playback_entities` attribute on
-`sensor.universal_remote_target`, the `input_text.audio_pending_tap_ms` helper,
+restart once. After startup, verify the `remote_announcement_playback_entities`
+attribute on `sensor.universal_remote_target`, the `input_text.audio_pending_tap_ms` helper,
 the `remote_announcements.adopt_label_volume` action, and the speaker and climate
-entities. Observe the healthy process for 60 seconds. If rollback is required, restore these seven verified originals together after checking for
-intervening changes. Preserve unrelated files and the production Git index.
+entities. Observe the healthy process for 60 seconds. If rollback is required,
+restore these seven verified originals together after checking for intervening changes. Preserve unrelated files and the production Git index.
 
 ## Issue 88 deployment and rollback
 
