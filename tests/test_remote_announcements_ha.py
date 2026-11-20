@@ -1362,7 +1362,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.manager.target_changed(
             Event(
                 EVENT_STATE_CHANGED,
-                Context,
                 {
                     "old_state": State(
                         CONFIG["target_entity"], "chromecast", {"initialized": False}
