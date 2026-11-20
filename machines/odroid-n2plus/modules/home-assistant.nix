@@ -137,6 +137,40 @@ in
     };
   };
 
+  # Restore/reconcile native Version + Template Update entries after HA starts.
+  # HA_TOKEN stays in ~/.env, never in the Nix store. Runtime stores are read-only;
+  # their IDs are checked against live metadata before any native config flow.
+  systemd.services.ha-core-update-notice = {
+    description = "Home Assistant Core update notice";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "ha-compose.service" ];
+    after = [ "ha-compose.service" ];
+    unitConfig = {
+      ConditionPathExists = "/home/ultra/.env";
+      StartLimitIntervalSec = "15min";
+      StartLimitBurst = 3;
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      User = "ultra";
+      Group = "ultra";
+      ExecStart = "${pkgs.python3}/bin/python3 ${../../../scripts/provision_ha_core_update.py}";
+      RuntimeDirectory = "ha-core-update-notice";
+      RuntimeDirectoryMode = "0700";
+      UMask = "0077";
+      TimeoutStartSec = "5min";
+      Restart = "on-failure";
+      RestartSec = "30s";
+      MemoryMax = "128M";
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = "read-only";
+      ReadWritePaths = [ "/tmp" ];
+      RestrictAddressFamilies = [ "AF_INET" "AF_UNIX" ];
+    };
+  };
+
   # Bridge between HA and this host (Kodi unit, Transmission and Kodi JSON-RPC, DHCP pins in the home-lan dnsmasq,
   # router inventory). It binds 172.20.0.1, the host side of ha-net, which exists only once compose is up.
   # ~/.local/bin/ha-host-actions.py is the copy the HA repo deploys (scripts/host/ha-host-actions.py).

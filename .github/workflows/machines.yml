@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - machines/**
+      - scripts/provision_ha_core_update.py
+      - tests/ha_core_update/**
       - Makefile
       - .github/workflows/machines.yml
   push:
@@ -11,6 +13,8 @@ on:
       - main
     paths:
       - machines/**
+      - scripts/provision_ha_core_update.py
+      - tests/ha_core_update/**
       - Makefile
       - .github/workflows/machines.yml
   workflow_dispatch:
@@ -25,5 +29,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6.0.2
+      - name: Test HA Core update notice provisioning
+        run: python3 -m unittest discover -s tests/ha_core_update -v
       - name: make test-machines
         run: make test-machines

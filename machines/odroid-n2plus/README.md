@@ -66,6 +66,36 @@ action bridge edits the static leases and restarts the container), caddy for mex
 deploys its Caddyfile), cloudflared (remotely managed tunnel; nixpkgs' module is for locally managed tunnels only),
 avahi (the HA stack's reflector relays three service types into ha-net through its own macvlan leg).
 
+## Home Assistant update notice
+
+After HA starts, `ha-core-update-notice.service` provisions the native Version sources
+(local installation and stable Home Assistant Versions) and a Template Update named
+**Home Assistant Core** in **Settings → System → Updates**. Its installed version is
+read from the running HA, not from the pinned Compose tag. The release link and the
+four-step reminder cover backup outside the eMMC, incompatible changes, updating the
+pinned version, and checking HA after applying it. The reminder fits HA's 255-character
+limit. There is no install action or automatic update.
+
+The service reuses the entries and entity IDs restored with `.storage`; a repeat with
+matching settings makes no API writes. It reads only the relevant runtime records,
+compares their IDs with live metadata, and makes all changes through native HA config
+flows. It never edits `.storage`. Ambiguous, disabled or still-unsaved entries fail
+without replacing/deleting them.
+
+The existing admin `HA_TOKEN` is read from `/home/ultra/.env`, as for the watchdogs.
+It stays outside git and the Nix store. On a fresh install, finish HA onboarding and
+provide that runtime credential before starting `ha-core-update-notice.service`.
+Each invocation prints a private `/tmp/ha-core-update-notice-*.log` path.
+A read-only verification is available with
+`python3 scripts/provision_ha_core_update.py --check` from the HA checkout.
+
+To update HA on this host, first make and check a backup outside the eMMC and review
+all intervening incompatible changes. Change the `homeassistant` image pin in
+`ha/compose.odroid.yaml` in this NixOS configuration, then apply the reviewed rebuild.
+The declared `ha-compose` reload applies that overlay. Check the running version,
+HA logs/repairs and the household's important integrations afterwards. Keep the backup:
+an older container alone does not undo database migrations.
+
 ## Memory
 
 3.7 GB of RAM plus zram (50%, zstd); no swap on disk (Armbian froze in a swap thrash on its USB swapfile). Every

@@ -264,6 +264,7 @@ git -C ~/homeassistant log -1 --oneline; git -C ~/homeassistant status --short |
 | Check | How | Expected |
 |---|---|---|
 | Home Assistant | http://192.168.0.39:8123 and the app; Settings → System → Repairs; Logbook | loads, history continues from before the stop, no new repairs |
+| HA update notice | Settings → System → Updates; `systemctl status ha-core-update-notice`; `python3 ~/homeassistant/scripts/provision_ha_core_update.py --check` after the checkout contains this script | one Home Assistant Core notice, correct running/latest versions, all four reminder steps; restored entries reused, no install action |
 | DHCP | on a test client: forget and rejoin Wi-Fi (or `sudo dhclient -r && sudo dhclient`); `docker logs --since 10m home-lan-dhcp` | DHCPACK from 192.168.0.39, the client's pinned address |
 | DNS | `dig @192.168.0.39 ya.ru +short`; a `living` device (Yandex speaker) answers a voice request | answers |
 | IR | `ls -l /dev/lirc0`; press a remote button, HA Developer tools → Events of `ekf_appliances` | `crw-rw---- root video`, the event arrives |
