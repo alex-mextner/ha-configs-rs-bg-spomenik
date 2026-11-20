@@ -989,6 +989,9 @@ script:
             down: volume_down
             info: info
             apple_tv: bluetooth_enable
+      - if: "{{ button == 'ok_hold' }}"
+        then:
+          - stop: The initial OK already handled this speaker gesture
       - if: >-
           {{ button not in music_commands and button not in ['back', 'exit']
              and not 0 <= digit_num <= 9 }}
@@ -1111,7 +1114,8 @@ automation:
                     {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
                   brightness: 255
           - conditions: >-
-              {{ is_state('input_boolean.audio_mode', 'on') and button != 'audio' }}
+              {{ button != 'audio' and
+                 route.speaker_ok | default(is_state('input_boolean.audio_mode', 'on')) }}
             sequence:
               - action: script.audio_mode_dispatch
                 data:

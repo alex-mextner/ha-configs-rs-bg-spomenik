@@ -15,7 +15,7 @@ INPUT_MIN_GAP = 0.150
 INPUT_MAX_GAP = 1.000
 CAPTURE_EPSILON = 0.000001  # UTC epoch float resolution; never a debounce window.
 INTERNAL_KEYS = {"input_timeout", "projector_timeout", "power_state", "wake_done"}
-DISPLAY_ONLY_KEYS = {"menu", "home", "guide", "ok_hold", "dash", "netflix", "youtube"}
+DISPLAY_ONLY_KEYS = {"menu", "home", "guide", "dash", "netflix", "youtube"}
 
 
 class RemoteRoute(TypedDict):
@@ -25,6 +25,7 @@ class RemoteRoute(TypedDict):
     native: bool
     blocked: NotRequired[str]
     power_request_id: NotRequired[str]
+    speaker_ok: NotRequired[bool]
 
 
 @dataclass(frozen=True)
@@ -300,7 +301,11 @@ class RemoteMode:
             self.expires_at = max(self.expires_at, at + LEASE_SECONDS)
             self._arm_lease()
             self._publish()
-        return self.resolve()
+        route = self.resolve()
+        if button in {"ok", "ok_hold"}:
+            # Receiver bundles can publish both events before YAML runs.
+            route["speaker_ok"] = self.audio
+        return route
 
     def _input_press(self, at: float) -> RemoteRoute:
         since_frame = at - self._last_input_frame

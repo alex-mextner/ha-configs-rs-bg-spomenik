@@ -668,6 +668,61 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     self.hass.states.get("input_text.audio_last_press_ms").state, "0"
                 )
 
+    async def test_one_physical_speaker_ok_hold_is_one_music_action_after_focus_changes(
+        self,
+    ) -> None:
+        self.reset(("tv", "on", "off"))
+        self.hass.states.async_set(TV, "on")
+        mapper = RemoteMapper()
+        now = time.time()
+        mapper.feed(
+            [
+                {
+                    "address": 0xBF00,
+                    "command": 0xEA15,
+                    "repeat": i > 0,
+                    "offset": i * 0.108,
+                }
+                for i in range(5)
+            ],
+            now,
+        )
+        self.assertEqual([key for key, _ in mapper.event_times], ["ok", "ok_hold"])
+        self.assertEqual(len(set(mapper.event_press_ids)), 1)
+        for (button, at), identity in zip(
+            mapper.event_times, mapper.event_press_ids, strict=True
+        ):
+            self.controller.physical_press(button, at, press_id=str(identity))
+        # Both frames arrived while the speaker owned the key. A later mode
+        # selection must not redirect either queued automation to the TV.
+        self.hass.states.async_set("input_boolean.audio_mode", "off")
+        for button, at in mapper.event_times:
+            current = State(
+                "event.ekf_universal_remote",
+                str(at),
+                {
+                    "event_type": button,
+                    "last_received": at,
+                    "receiver_enabled": True,
+                },
+            )
+            await self.run_automation(
+                "universal_remote_dispatcher",
+                button,
+                trigger_override={
+                    "platform": "state",
+                    "entity_id": current.entity_id,
+                    "from_state": State(
+                        current.entity_id, "previous", {"event_type": "info"}
+                    ),
+                    "to_state": current,
+                },
+            )
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+
     async def test_speaker_display_key_keeps_receive_time_power_rejection(self) -> None:
         for button in ("home", "netflix"):
             with self.subTest(button=button):

@@ -42,7 +42,7 @@ the speaker selected for sixty seconds after the latest press. Audio, Back and
 Exit dismiss speaker mode immediately. Colour lights work without extending
 speaker focus. Display navigation and app buttons leave speaker focus and use
 their normal power guards on the same press. Apple TV in speaker mode enables
-Bluetooth on the speaker.
+Bluetooth on the speaker. A short or held OK toggles music once.
 
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable
