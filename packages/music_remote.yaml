@@ -340,11 +340,15 @@ script:
                 response_variable: result
       - variables:
           # A Station can report paused with no current item.
-          # The native play action only resumes an existing item.
+          # A lost local link also clears metadata. Only a local report
+          # can distinguish an empty Station from a cloud-only resumable queue.
           start_wave: >-
             {{ cmd == 'play_pause' and route.owner == 'speaker'
                and route.speaker_backend == 'yandex'
                and states(target_entity) in ['idle', 'paused', 'standby', 'off']
+               and state_attr(target_entity, 'alice_state') not in [none, '', 'unknown', 'unavailable']
+               and not state_attr(target_entity, 'assumed_state')
+               and not state_attr(target_entity, 'restored')
                and not state_attr(target_entity, 'media_content_id')
                and not state_attr(target_entity, 'media_title') }}
       - variables:

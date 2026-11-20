@@ -319,6 +319,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             ("input_boolean.projector_power", "off"),
             ("input_boolean.audio_was_playing", "off"),
             ("input_text.audio_last_press_ms", "0"),
+            ("input_text.audio_pending_tap_ms", "0"),
             ("input_text.ac_last_mode", "cool"),
             (TV, "off"),
             ("media_player.projector", "off"),
@@ -614,7 +615,11 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         for button, command, extra in [
             ("left", "previous", {}),
             ("next", "next", {}),
+            ("prev", "previous", {}),
             ("play", "play_pause", {}),
+            ("ok", "play_pause", {}),
+            ("mute", "play_pause", {}),
+            ("0", "play_pause", {}),
             ("volume_up", "volume_up", {}),
             ("down", "volume_down", {}),
             ("1", "volume_set", {"volume_level": 0.1}),
@@ -636,6 +641,44 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     calls,
                     [("script.music_remote_command", {"command": command, **extra})],
+                )
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "on"
+                )
+
+    async def test_audio_digit_then_up_both_control_speaker_until_back(self) -> None:
+        self.reset(("tv", "on", "off"))
+        for button in ("6", "up", "back"):
+            await self.run_automation("universal_remote_dispatcher", button)
+        self.assertEqual(
+            self.appliance_calls(),
+            [
+                (
+                    "script.music_remote_command",
+                    {"command": "volume_set", "volume_level": 0.6},
+                ),
+                ("script.music_remote_command", {"command": "volume_up"}),
+            ],
+        )
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "off")
+
+    async def test_single_audio_after_leaving_speaker_mode_starts_music(self) -> None:
+        for buttons in (("back",), ("volume_down", "audio")):
+            with self.subTest(buttons=buttons):
+                self.reset(("tv", "on", "off"))
+                for button in buttons:
+                    await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+                self.calls.clear()
+                await self.run_automation("universal_remote_dispatcher", "audio")
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("script.music_remote_command", {"command": "play_pause"})],
+                )
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
                 )
 
     async def test_diagnostic_attribute_updates_do_not_replay_any_remote_automation(
@@ -1257,8 +1300,17 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.hass.services.async_register("media_player", "play_media", self.capture)
         for entity, state, attrs, expected in [
-            (stock, "paused", {"media_content_id": ""}, "play_media"),
-            (stock, "idle", {}, "play_media"),
+            (
+                stock,
+                "paused",
+                {"alice_state": "IDLE", "media_content_id": ""},
+                "play_media",
+            ),
+            (stock, "idle", {"alice_state": "IDLE"}, "play_media"),
+            (stock, "idle", {"alice_state": "SPEAKING"}, "play_media"),
+            (stock, "paused", {"assumed_state": True}, "media_play"),
+            (stock, "paused", {}, "media_play"),
+            (stock, "idle", {"assumed_state": True}, "media_play"),
             (stock, "paused", {"media_content_id": "1234"}, "media_play"),
             (stock, "paused", {"media_title": "Current track"}, "media_play"),
             (stock, "playing", {}, "media_pause"),

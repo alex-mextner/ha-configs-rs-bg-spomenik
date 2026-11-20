@@ -33,9 +33,12 @@ wake the projector when the TV is on; Power remains busy until all active pairs
 settle. Independent AC, lighting and speaker controls remain available.
 
 A single Audio press toggles playback. On the living-room Yandex Station,
-Play resumes the current track or starts My Wave if there is no current item.
-Double Audio selects speaker controls. Play and volume keep that selection
-active for sixty seconds after the latest press. Audio dismisses it immediately.
+Play resumes the current track or starts My Wave when the local Station reports
+no current item. In cloud-only mode it requests resume, since
+the missing track information cannot establish whether the queue is empty.
+Double Audio selects speaker controls. Playback, track and volume buttons keep
+the speaker selected for sixty seconds after the latest press. Audio, Back and
+Exit dismiss speaker mode immediately.
 
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable

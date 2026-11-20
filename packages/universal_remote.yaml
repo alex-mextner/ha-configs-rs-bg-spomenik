@@ -32,6 +32,11 @@ input_text:
     max: 16
     initial: "0"
     icon: mdi:gesture-double-tap
+  audio_pending_tap_ms:
+    name: Audio pending first tap (ms)
+    max: 16
+    initial: "0"
+    icon: mdi:gesture-double-tap
   ac_last_mode:
     # Kept for external references; Amazon uses the outdoor temperature.
     name: AC last used mode
@@ -49,8 +54,7 @@ input_boolean:
     initial: false
     icon: mdi:remote-tv
   audio_mode:
-    # Double AUDIO within 800ms enters; another AUDIO exits. One action exits,
-    # except volume/up/down which keep it active until 3s of inactivity.
+    # Double Audio selects the speaker. Audio, Back, Exit or 60s idle dismisses it.
     name: Audio mode (Yandex speaker)
     initial: false
     icon: mdi:speaker
@@ -922,7 +926,7 @@ script:
   # and falls back to single-press play/pause on the speaker otherwise.
   audio_mode_handle_press:
     alias: Audio button handler
-    # `mode: restart`: second press within the 500ms debounce cancels the
+    # A second press within 800ms cancels the
     # pending single-tap play/pause and activates audio mode instead.
     # So a double-tap produces a clean activation, no pause side-effect.
     mode: restart
@@ -933,22 +937,29 @@ script:
           - stop: dismissed via audio press
       - variables:
           now_ms: "{{ (now().timestamp() * 1000) | int }}"
-          last_ms: "{{ states('input_text.audio_last_press_ms') | int(0) }}"
+          last_ms: "{{ states('input_text.audio_pending_tap_ms') | int(0) }}"
           dt: "{{ now_ms - last_ms }}"
-      - action: input_text.set_value
-        target: { entity_id: input_text.audio_last_press_ms }
-        data: { value: "{{ now_ms }}" }
+
       # Second tap within 800ms of a previous one → activate audio mode.
       # Wider window (500→800) because user was missing it — NEC auto-
       # repeat + human reaction put real double-taps at ~400-700ms.
       - if: "{{ 0 < dt < 800 }}"
         then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.audio_pending_tap_ms }
+            data: { value: "0" }
           - action: script.audio_mode_activate
           - stop: activated via double tap
       # First tap — wait for a possible second tap. If one arrives,
       # mode:restart cancels this delay. Otherwise fall through to
       # play/pause as the single-press action.
+      - action: input_text.set_value
+        target: { entity_id: input_text.audio_pending_tap_ms }
+        data: { value: "{{ now_ms }}" }
       - delay: "00:00:00.8"
+      - action: input_text.set_value
+        target: { entity_id: input_text.audio_pending_tap_ms }
+        data: { value: "0" }
       - action: script.music_remote_command
         data: { command: play_pause }
 
@@ -964,7 +975,6 @@ script:
     sequence:
       - variables:
           digit_num: "{{ button | int(-1) }}"
-          sticky: "{{ button in ['play', 'volume_up', 'volume_down', 'up', 'down'] }}"
           music_commands:
             left: previous
             prev: previous
@@ -998,13 +1008,9 @@ script:
                 data:
                   command: volume_set
                   volume_level: "{{ digit_num / 10 }}"
-      # Play and volume keys keep the speaker selected for the next press.
-      - if: "{{ not sticky }}"
-        then:
-          - if: "{{ button == 'info' }}"
-            then:
-              - delay: "00:00:02.5"
-          - action: script.audio_mode_deactivate
+          - conditions: "{{ button in ['back', 'exit'] }}"
+            sequence:
+              - action: script.audio_mode_deactivate
 
 automation:
   - alias: Universal Remote Dispatcher
@@ -1345,7 +1351,7 @@ automation:
 
   # ===== Audio mode safety timeout — 60s of inactivity =====
   # Restarts on activation AND on every dispatched in-mode press (which
-  # bumps audio_last_press_ms). Sticky keys (play and volume) keep the mode
+  # bumps audio_last_press_ms). Speaker controls keep the mode
   # alive across taps this way.
   - alias: Audio mode inactivity timeout
     id: audio_mode_timeout
