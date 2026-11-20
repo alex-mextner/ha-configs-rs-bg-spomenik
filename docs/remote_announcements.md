@@ -66,8 +66,19 @@ and shutdown still has a bounded wait. A command already accepted by a physical
 speaker cannot be recalled. These deadlines therefore provide best-effort
 controller recovery, not a guarantee of physical interruption or audible latency.
 
-Speech volume is `max(current volume, configured volume_floor)`, currently 0.4
-in this package (HA 0..1; speaker 0..10). Restore the old volume only while the
+All five mode labels use 6/10 while any living-room source is playing and 4/10
+otherwise. At the start of speech, the controller reads the routed Samsung TV
+(active Chromecast, Android TV or Music Assistant session), Kodi on the projector,
+and the living-room Yandex Mini. Both displays report their routed player only
+while the display is powered. Native Alice speech without underlying media does
+not count. Each queued label reads current playback after the preceding label or
+quiet cue completes. Paused, idle, powered-on, buffering, unavailable
+and restored states do not count as playing. The same rule applies when the
+studio speaker is selected for announcements. A louder speaker is temporarily
+turned down. Older configurations without `playback_entities` keep their
+configured minimum speech volume.
+
+Restore the old volume only while the
 current level still equals our temporary level and the
 speaker was not muted by the user during speech. Yandex volume-zero mute is lifted
 for speech and its remembered volume plus previous mute state are restored; user

@@ -208,7 +208,112 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.attributes["volume_level"], 0.2)
         self.assertEqual(self.manager.status, "ready")
 
-    async def test_muted_speaker_gets_floor_then_original_level_and_mute(self) -> None:
+    async def test_mode_labels_follow_actual_playback_and_restore_louder_volume(
+        self,
+    ) -> None:
+        tv = "media_player.ue48j5500_ue48j5500"
+        projector = "media_player.projector"
+        # Orphan playback behind an off display and unrelated media do not count.
+        self.hass.states.async_set("media_player.home", "playing")
+        self.hass.states.async_set(CONFIG["aisis_entity"], "playing")
+        self.hass.states.async_set("media_player.gostinaia", "playing")
+        original = dict(self.hass.states.get(self.entity).attributes, volume_level=0.8)
+        for tv_state, projector_state, speaker_state, expected in (
+            ("playing", "paused", "idle", 0.6),
+            ("on", "playing", "paused", 0.6),
+            ("off", "unavailable", "playing", 0.6),
+            ("on", "paused", "idle", 0.4),
+            ("off", "off", "idle", 0.4),
+            ("paused", "idle", "paused", 0.4),
+            ("buffering", "unknown", "idle", 0.4),
+        ):
+            with self.subTest(
+                tv=tv_state, projector=projector_state, speaker=speaker_state
+            ):
+                self.hass.states.async_set(tv, tv_state)
+                self.hass.states.async_set(projector, projector_state)
+                self.hass.states.async_set(self.entity, speaker_state, original)
+                self.calls.clear()
+                await self.manager.announce("tv")
+                self.assertEqual(
+                    [name for name, _ in self.calls],
+                    [
+                        "volume_set",
+                        "send_command",
+                        "volume_set",
+                    ],
+                )
+                self.assertEqual(self.calls[0][1]["volume_level"], expected)
+                self.assertEqual(self.calls[-1][1]["volume_level"], 0.8)
+                self.assertEqual(self.hass.states.get(self.entity).state, speaker_state)
+
+    async def test_restored_playback_cannot_raise_idle_label(self) -> None:
+        self.hass.states.async_set(
+            "media_player.projector", "playing", {"restored": True}
+        )
+        state = self.hass.states.get(self.entity)
+        self.hass.states.async_set(self.entity, "paused", state.attributes)
+        await self.manager.announce("tv")
+        self.assertEqual(self.calls[0][1]["volume_level"], 0.4)
+
+    async def test_queued_label_resamples_music_and_ignores_speech_only_echo(
+        self,
+    ) -> None:
+        self.manager.queue.debounce = 0
+        for track, expected in ((None, 0.4), ("new-track", 0.6)):
+            with self.subTest(track=track):
+                self.calls.clear()
+                self.hass.states.async_set(
+                    CONFIG["target_entity"], "tv", {"initialized": True}
+                )
+                self.hass.states.async_set(
+                    self.entity,
+                    "idle",
+                    {
+                        "alice_state": "IDLE",
+                        "volume_level": 0.2,
+                    },
+                )
+
+                async def native(call, content=track) -> dict[str, str]:
+                    result = await self.native(call)
+                    if self.manager.current_target() == "tv":
+                        self.hass.states.async_set(
+                            CONFIG["target_entity"], "kodi", {"initialized": True}
+                        )
+                        self.manager.queue.submit("kodi")
+                        state = self.hass.states.get(self.entity)
+                        self.hass.states.async_set(
+                            self.entity,
+                            "playing",
+                            {
+                                **state.attributes,
+                                "alice_state": "SPEAKING",
+                                "media_content_id": content,
+                            },
+                        )
+                    return result
+
+                self.hass.services.async_register(
+                    "yandex_station",
+                    "send_command",
+                    native,
+                    supports_response=SupportsResponse.OPTIONAL,
+                )
+                self.manager.queue.submit("tv")
+                await self.manager.queue.drain()
+                self.assertEqual(
+                    [
+                        data["volume_level"]
+                        for name, data in self.calls
+                        if name == "volume_set"
+                    ],
+                    [0.4, 0.2, expected, 0.2],
+                )
+
+    async def test_muted_speaker_gets_label_volume_then_original_level_and_mute(
+        self,
+    ) -> None:
         state = self.hass.states.get(self.entity)
         self.hass.states.async_set(
             self.entity, state.state, {**state.attributes, "is_volume_muted": True}
@@ -220,7 +325,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "volume_set",
                 {
                     "entity_id": self.entity,
-                    "volume_level": self.manager.config["volume_floor"],
+                    "volume_level": 0.6,
                 },
             ),
         )
@@ -235,9 +340,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.entity, state.state, {**state.attributes, "volume_level": 0.0}
         )
         await self.manager.announce("tv")
-        self.assertEqual(
-            self.calls[0][1]["volume_level"], self.manager.config["volume_floor"]
-        )
+        self.assertEqual(self.calls[0][1]["volume_level"], 0.6)
         self.assertEqual(self.calls[-1][1]["volume_level"], 0.0)
 
     async def test_manual_volume_change_wins(self) -> None:
@@ -268,10 +371,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.attributes["is_volume_muted"])
 
     async def test_user_volume_away_and_back_is_preserved(self) -> None:
-        self.volume_sequence = [0.8, 0.5]
+        self.volume_sequence = [0.8, 0.6]
         await self.manager.announce("tv")
         self.assertEqual(
-            self.hass.states.get(self.entity).attributes["volume_level"], 0.5
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.6
         )
         self.assertEqual([name for name, _ in self.calls].count("volume_set"), 1)
 
@@ -659,10 +762,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             spoken,
             [{"duid": "M00ZRW3008RAJG", "text": self.manager.cache.get("tv").marker}],
         )
-        self.assertEqual(self.calls, [])
+        self.assertEqual(
+            [(name, data["volume_level"]) for name, data in self.calls],
+            [("volume_set", 0.6), ("volume_set", 0.7)],
+        )
 
     def prepare_aisis_native_volume(self, volume: float, *, muted: bool = False) -> str:
-        """Publish AISIS state through its supported integer-volume boundary."""
+        """Publish studio playback while the living-room speaker is paused."""
+        room_speaker = self.hass.states.get(self.entity)
+        self.hass.states.async_set(self.entity, "paused", room_speaker.attributes)
         entity = CONFIG["aisis_entity"]
         self.hass.states.async_set(CONFIG["backend_entity"], "AISIS")
         self.hass.states.async_set(CONFIG["aisis_connected_entity"], "on")
@@ -685,7 +793,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append((call.service, dict(call.data)))
             self.assertEqual(call.data["entity_id"], entity)
             # Literal supported native levels, not an acknowledgement-only fake.
-            level = {0.0: 0, 0.1: 1, 0.4: 4}[call.data["volume_level"]]
+            level = {0.0: 0, 0.1: 1, 0.4: 4, 0.8: 8}[call.data["volume_level"]]
             self.aisis_native_levels.append(level)
             if level == 0 and self.aisis_restore_ack_only:
                 self.aisis_restore_requested.set()
@@ -751,7 +859,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.aisis_native_levels, [4, 0])
         self.assertEqual(
             self.hass.states.get(entity).attributes["volume_level"],
-            self.manager.config["volume_floor"],
+            0.4,
         )
         self.assertEqual(self.manager.status, "recovery_unconfirmed")
         self.assertEqual(
@@ -801,10 +909,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             entity, state.state, {**state.attributes, "volume_level": 0.8}
         )
         await self.manager.announce("tv")
-        self.assertEqual(self.aisis_native_levels, [4, 0])
+        self.assertEqual(self.aisis_native_levels, [4, 0, 4, 8])
         self.assertEqual(
             [name for name, _ in self.calls],
-            ["volume_set", "speak", "volume_set", "speak"],
+            ["volume_set", "speak", "volume_set"] * 2,
         )
         self.assertEqual(self.hass.states.get(entity).attributes["volume_level"], 0.8)
 

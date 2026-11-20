@@ -443,7 +443,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for name, data in self.fixture.calls
                 if name == "volume_set"
             ],
-            [0.4],
+            [0.6],
         )
         self.fixture.speech_gate.set()
         await speech
@@ -454,7 +454,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for name, data in self.fixture.calls
                 if name == "volume_set"
             ],
-            [0.4, 0.2, 0.1, 0.2],
+            [0.6, 0.2, 0.1, 0.2],
         )
         self.assertEqual(
             self.hass.states.get(self.entity).attributes["media_content_id"],

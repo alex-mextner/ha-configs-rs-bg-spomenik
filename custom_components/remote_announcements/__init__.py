@@ -76,6 +76,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Required("aisis_connected_entity"): cv.entity_id,
                 vol.Required("area"): cv.string,
                 vol.Optional("tts_entity", default="tts.bracho_bracho"): cv.entity_id,
+                vol.Optional("playback_entities"): cv.entity_ids,
                 vol.Optional("volume_floor", default=0.5): vol.All(
                     vol.Coerce(float), vol.Range(min=0, max=1)
                 ),
@@ -490,6 +491,29 @@ class Manager:
         message = "aisis_volume_recovery_pending"
         raise ProviderNotReadyError(message)
 
+    def label_volume(self, old_volume: float) -> float:
+        """Sample room playback before a label changes music or speaker volume."""
+        if "playback_entities" not in self.config:
+            return speech_volume(old_volume, self.config["volume_floor"])
+        for entity_id in self.config["playback_entities"]:
+            state = self.hass.states.get(entity_id)
+            if (
+                not state
+                or state.state != "playing"
+                or state.attributes.get("restored")
+            ):
+                continue
+            # Yandex native speech and cues use Alice, independently of the
+            # media player. A speech-only echo has no underlying player content.
+            if (
+                entity_id == self.config["yandex_entity"]
+                and state.attributes.get("alice_state") in ("SPEAKING", "NONE")
+                and not state.attributes.get("media_content_id")
+            ):
+                continue
+            return 0.6
+        return 0.4
+
     def playback(self, backend: str, entity: str) -> SpeechPlayback:
         """Validate speaker capabilities and snapshot recoverable playback."""
         before = self.hass.states.get(entity)
@@ -509,7 +533,7 @@ class Manager:
         if backend == "aisis" and (muted_before or old_volume < AISIS_MINIMUM_VOLUME):
             message = "aisis_cannot_restore_muted_or_invalid_volume"
             raise ProviderNotReadyError(message)
-        applied = speech_volume(old_volume, self.config["volume_floor"])
+        applied = self.label_volume(old_volume)
         pause = self.config["music_mode"] == "pause" and before.state == "playing"
         if pause and not before.attributes.get("media_content_id"):
             message = "cannot_restore_unknown_music"
@@ -519,7 +543,7 @@ class Manager:
         )
 
     async def prepare_playback(self, playback: SpeechPlayback) -> None:
-        """Apply the optional pause and minimum speech volume."""
+        """Apply the optional pause and temporary speech volume."""
         if playback.pause:
             # The device may pause before its service acknowledgement times out.
             # Recovery still checks the actual state and original content.
@@ -527,7 +551,7 @@ class Manager:
             await self.call(
                 "media_pause", playback.entity, deadline=playback.work_deadline
             )
-        if playback.applied > playback.old_volume or playback.muted_before:
+        if playback.applied != playback.old_volume or playback.muted_before:
             # Yandex volume_set lifts volume-zero mute and keeps the remembered
             # music level; restore both that level and mute after speech.
             playback.raised = True
