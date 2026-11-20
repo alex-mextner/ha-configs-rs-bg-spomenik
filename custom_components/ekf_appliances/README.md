@@ -21,7 +21,7 @@ The temperature sensor must report a recognized temperature unit; unknown, unava
 
 ## Devices and capabilities
 
-**Haier:** full-state off/cool/heat/dry/fan/auto; 16–30°C in 1°C steps; auto/low/medium/high fan; off/vertical swing; none/sleep/boost presets. Boost is available in cool/heat. Switching to another active mode clears boost. While off, changing desired settings does not turn the AC on. Explicit off always sends the model-specific off command, even when the assumed state is already off.
+**Haier:** full-state off/cool/heat/dry/fan/auto; 16–30°C in 1°C steps; auto/low/medium/high fan; off/vertical swing; none/sleep/boost presets. Boost is available in cool/heat. Switching to another active mode clears boost. While off, changing desired settings does not turn the AC on. Explicit off always sends the model-specific off command, even when the assumed state is already off. The universal remote’s Amazon button uses the assumed mode to choose between power-on and power-off. Power-on selects heat or cool from the outdoor temperature and retains the existing target temperature. To send OFF regardless of the assumed mode, call `climate.turn_off` on `climate.kondei_1`.
 
 The first setup defaults to off, 24°C, auto fan, no swing/preset, and previous mode cool. Later reloads restore the previous assumed mode and desired settings without transmitting. The native target temperature is persisted separately from HA's display-unit conversion. A legacy Comfort preset restores as None while preserving the other valid settings; restoration still sends no IR commands.
 

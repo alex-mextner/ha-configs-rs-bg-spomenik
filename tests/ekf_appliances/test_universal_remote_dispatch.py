@@ -518,7 +518,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     self.hass.states.get("input_boolean.audio_mode").state, mode[1]
                 )
 
-    async def test_amazon_turns_on_once_at_24_using_outdoor_temperature_in_every_mode(
+    async def test_amazon_turns_on_once_at_retained_target_using_outdoor_temperature(
         self,
     ) -> None:
         for mode, outdoor in product(MODES, (23.9, 24.0, 30.0)):
@@ -532,11 +532,12 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     self.appliance_calls(),
                     [
                         (
-                            "climate.set_temperature",
-                            {"entity_id": [AC], "temperature": 24, "hvac_mode": wanted},
+                            "climate.set_hvac_mode",
+                            {"entity_id": [AC], "hvac_mode": wanted},
                         )
                     ],
                 )
+                self.assertEqual(self.hass.states.get(AC).attributes["temperature"], 30)
                 self.assertEqual(
                     self.hass.states.get("input_boolean.audio_mode").state, mode[1]
                 )
@@ -561,8 +562,8 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.appliance_calls(),
             [
                 (
-                    "climate.set_temperature",
-                    {"entity_id": [AC], "temperature": 24, "hvac_mode": "heat"},
+                    "climate.set_hvac_mode",
+                    {"entity_id": [AC], "hvac_mode": "heat"},
                 )
             ],
         )
