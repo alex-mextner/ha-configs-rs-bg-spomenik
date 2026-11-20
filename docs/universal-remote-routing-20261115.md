@@ -10,7 +10,8 @@ an intermediate projector or native state to announcements.
 The controller uses physical capture timestamps and cancellable callback
 ownership for two independent deadlines: the inclusive one-second INPUT double
 window and exactly sixty seconds of inactivity. Single INPUT retains its original
-pair snapshot. Selecting the TV or Chromecast never powers on the TV. The lease starts at the physical action, including
+pair snapshot. When INPUT selects the TV pair, an off TV stays off. Explicit app
+and source commands can still wake it. The lease starts at the physical action, including
 the first INPUT of a single, and every accepted universal-remote action renews it.
 Display OFF or projector shutdown invalidates stale pending input and affected
 manual focus. Unknown observations never mean OFF.
@@ -102,7 +103,24 @@ Focused checks use isolated source and in-memory hardware boundaries. Full
 repository suites, coverage and heavier matrices belong to genuine CI/RunPod.
 No test should toggle physical appliances or inject a live remote event.
 
-## Deployment and rollback
+## Issue 159 deployment and rollback
+
+Install the following five runtime files together from the reviewed merged commit.
+
+- `packages/universal_remote.yaml`
+- `packages/music_remote.yaml`
+- `packages/remote_announcements.yaml`
+- `custom_components/ekf_appliances/remote_mode.py`
+- `custom_components/remote_announcements/__init__.py`
+
+Compare the five live files with their expected originals and retain verified
+backups. Use the installed `scripts/ha_safe_reload.sh` to validate the combined
+Python and YAML changes and restart once. Verify the target sensor, speaker and
+climate entities, then observe the healthy process for 60 seconds. If rollback
+is required, restore these five verified originals together after checking for
+intervening changes. Preserve unrelated files and the production Git index.
+
+## Issue 88 deployment and rollback
 
 Review the scoped source diff and exact tested commit. Preserve unrelated staged
 and unstaged production changes. Deploy only these 13 reviewed runtime files:
