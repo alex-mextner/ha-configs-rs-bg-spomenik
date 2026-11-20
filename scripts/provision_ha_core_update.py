@@ -28,7 +28,6 @@ SUMMARY = (
 )
 ENTRIES = "config/config_entries/entry"
 FLOW = "config/config_entries/flow"
-OPTIONS = "config/config_entries/options/flow"
 LOG = logging.getLogger("ha-core-update-notice")
 
 
@@ -224,33 +223,6 @@ def finish_flow(
         fail(f"Native flow for {handler} did not save successfully")
 
 
-def update_options(api: API, helper: dict[str, Any], desired: dict[str, Any]) -> None:
-    """Use the current native schema and refuse concurrent options changes."""
-    flow = api.request(
-        "POST", OPTIONS, {"handler": helper["entry_id"], "show_advanced_options": False}
-    )
-    if flow.get("type") != "form" or flow.get("step_id") != "update":
-        fail("Unexpected native Core helper options form")
-    live = api.request("GET", ENTRIES)
-    if entry_fingerprint([helper]).get(helper["entry_id"]) != entry_fingerprint(
-        live
-    ).get(helper["entry_id"]):
-        fail("Core helper changed while opening its options; retry later")
-    editable = {field["name"]: field for field in flow["data_schema"]}
-    existing = helper["options"]
-    payload = {key: value for key, value in existing.items() if key in editable}
-    for key, value in payload.items():
-        description = editable[key].get("description", {})
-        if "suggested_value" in description and description["suggested_value"] != value:
-            fail("Native Core helper options differ from the checked snapshot")
-    if not desired.keys() <= editable.keys():
-        fail("Native Core helper options schema does not support the declared fields")
-    payload.update(desired)
-    result = api.request("POST", f"{OPTIONS}/{flow['flow_id']}", payload)
-    if result.get("type") != "create_entry":
-        fail("Native Core helper options did not save successfully")
-
-
 def desired_options(current: str, latest: str) -> dict[str, Any]:
     """Build a notice from runtime sensors, with no installer."""
     return {
@@ -277,8 +249,10 @@ def ensure_sources(
     """Create missing Version entries and wait for registry records."""
     changed = False
     sensors: dict[str, str] = {}
-    for source, initial_entry in sources.items():
-        if initial_entry is None:
+    for source in sources:
+        # A previous source's setup can take time; never create from the old snapshot.
+        entries, _registry = snapshot(api, config, wait)
+        if version_entry(entries, source) is None:
             if check:
                 fail(f"Version {source} has not been provisioned")
             steps = [("user", {"version_source": "Local installation"})]
@@ -347,19 +321,31 @@ def reconcile(
             **existing.get("additional_options", {}),
             **desired["additional_options"],
         }
-        if any(existing.get(key) != value for key, value in desired.items()):
-            if check:
-                fail("Core helper options differ from the declared notice")
-            update_options(api, helper, desired)
-            changed = True
+        differing = [
+            key for key, value in desired.items() if existing.get(key) != value
+        ]
+        if differing:
+            # HA options flows replace a copy taken when the form opened, without CAS.
+            # Even our fields could overwrite a concurrent user's options.
+            fail(
+                "Core helper options differ from the declared notice ("
+                + ", ".join(differing)
+                + "); leaving existing options unchanged"
+            )
 
-    return verify_notice(api, config, desired, wait=wait, changed=changed)
+    result = verify_notice(api, config, desired, sensors, wait=wait)
+    return {"changed": changed, **result}
 
 
 def verify_notice(
-    api: API, config: Path, desired: dict[str, Any], *, wait: float, changed: bool
+    api: API,
+    config: Path,
+    desired: dict[str, Any],
+    sensors: dict[str, str],
+    *,
+    wait: float,
 ) -> dict[str, Any]:
-    """Confirm the saved helper loaded and cannot install updates."""
+    """Confirm available, current rendered versions and a notice with no installer."""
     deadline = time.monotonic() + wait
     while True:
         entries, registry = snapshot(api, config, wait)
@@ -371,13 +357,28 @@ def verify_notice(
         if entity and saved:
             state = api.request("GET", f"states/{entity}")
             attrs = state["attributes"]
+            versions = {
+                source: api.request("GET", f"states/{sensor}").get("state")
+                for source, sensor in sensors.items()
+            }
+            valid_versions = all(
+                isinstance(value, str) and value not in {"", "unknown", "unavailable"}
+                for value in versions.values()
+            )
+            release_url = "https://github.com/home-assistant/core/releases/tag/" + str(
+                versions["supervisor"]
+            )
             if (
-                attrs.get("release_summary") == SUMMARY
+                state["state"] in {"on", "off"}
+                and valid_versions
+                and attrs.get("installed_version") == versions["local"]
+                and attrs.get("latest_version") == versions["supervisor"]
+                and attrs.get("release_url") == release_url
+                and attrs.get("release_summary") == SUMMARY
                 and not attrs.get("supported_features", 0) & 1
                 and not attrs.get("auto_update", False)
             ):
                 return {
-                    "changed": changed,
                     "entity_id": entity,
                     "state": state["state"],
                 }

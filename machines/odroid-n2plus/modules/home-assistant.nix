@@ -268,11 +268,24 @@ in
   # end-to-end check of HA's external URL (scripts/dataplicity_watchdog.py).
   systemd.services.ha-fail-safe = ultraCheck "Home Assistant fail-safe check" "${checkout}/scripts/ha_fail_safe_cron.sh";
   systemd.services.ha-dataplicity-watchdog = ultraCheck "Home Assistant external URL watchdog" "${checkout}/scripts/dataplicity_watchdog.py";
-  systemd.timers = lib.genAttrs [ "ha-fail-safe" "ha-dataplicity-watchdog" ] (_: {
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnBootSec = "10min";
-      OnUnitActiveSec = "5min";
+  systemd.timers =
+    (lib.genAttrs [ "ha-fail-safe" "ha-dataplicity-watchdog" ] (_: {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "10min";
+        OnUnitActiveSec = "5min";
+      };
+    }))
+    // {
+      ha-core-update-notice = {
+        description = "Retry the Core update notice after a slow HA startup";
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          # Calendar events keep retrying after the finite service start-limit window.
+          # RemainAfterExit keeps a successful service active, so later ticks do no work.
+          OnCalendar = "*:0/5";
+          Unit = "ha-core-update-notice.service";
+        };
+      };
     };
-  });
 }

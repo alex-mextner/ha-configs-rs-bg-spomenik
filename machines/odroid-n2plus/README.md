@@ -77,10 +77,20 @@ pinned version, and checking HA after applying it. The reminder fits HA's 255-ch
 limit. There is no install action or automatic update.
 
 The service reuses the entries and entity IDs restored with `.storage`; a repeat with
-matching settings makes no API writes. It reads only the relevant runtime records,
-compares their IDs with live metadata, and makes all changes through native HA config
-flows. It never edits `.storage`. Ambiguous, disabled or still-unsaved entries fail
-without replacing/deleting them.
+matching settings makes no API writes. It reads only the relevant runtime records and
+compares their IDs and modification times with live metadata. Missing entries are
+created through native HA config flows. Existing helper options are never rewritten:
+HA's options API cannot prevent overwriting a simultaneous UI edit. If the restored
+helper differs from the declared notice, the service reports the differing fields and
+leaves it unchanged for inspection in HA's Helpers UI. Ambiguous, disabled or
+still-unsaved entries also fail without replacing or deleting them. The service never
+edits `.storage`.
+
+Verification waits for an available notice whose rendered versions match the live
+Version sensors and whose release link matches the latest version. A slow cold start
+may exhaust the short service retries; `ha-core-update-notice.timer` tries again every
+five minutes after the start-limit window expires. Once the service succeeds, it stays
+active and subsequent timer ticks do no work.
 
 The existing admin `HA_TOKEN` is read from `/home/ultra/.env`, as for the watchdogs.
 It stays outside git and the Nix store. On a fresh install, finish HA onboarding and
