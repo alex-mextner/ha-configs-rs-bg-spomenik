@@ -1,5 +1,5 @@
 # Floorhouse home dashboard seed (ha-floorhouse #108).
-# Live dashboard is storage-mode (url_path: floorhouse) on odroidn2;
+# Live dashboard is storage-mode (url_path: floor-house) on odroidn2;
 # this file is the git source of truth pushed via scripts/deploy.sh --push-seed.
 title: Дом
 views:
@@ -42,7 +42,7 @@ views:
                     at: 0.6
                     size: 0.7
               - id: stairs1
-                name: 2fl
+                name: На 2 этаж
                 x: 0
                 y: 7
                 w: 2
@@ -84,7 +84,8 @@ views:
                   humidity: sensor.ekf_connect_ir_vlazhnost
                 slots:
                   - kind: media_player
-                    entity: media_player.televizor
+                    entity: media_player.ue48j5500_ue48j5500
+                    title: Телевизор
                     x: 4
                     y: 3.9
                   - kind: climate
@@ -211,6 +212,7 @@ views:
                     extras:
                       connection: sensor.aisis_speaker_m00zrw3008rajg_connected
                       sound_level: sensor.aisis_speaker_m00zrw3008rajg_sound_level
+                      notify: notify.aisis_speaker_m00zrw3008rajg_notify
                     x: 0
                     y: 2
                   - kind: printer
@@ -236,7 +238,7 @@ views:
                 w: 6
                 h: 5
               - id: stairs2
-                name: 1fl
+                name: На 1 этаж
                 x: 0
                 y: 7
                 w: 2
