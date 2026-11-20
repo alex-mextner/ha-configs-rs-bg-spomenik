@@ -197,6 +197,8 @@ lovelace:
       type: module
     - url: /local/community/transmission-card/transmission-card.js?v=20260619
       type: js
+    - url: /local/floorhouse/floorhouse-card.js?v=20261119a
+      type: module
     - url: /local/community/rutracker-results-card/rutracker-results-card.js?v=20260621d
       type: module
   dashboards:

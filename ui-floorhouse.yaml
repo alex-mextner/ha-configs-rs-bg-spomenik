@@ -1,0 +1,338 @@
+# Floorhouse home dashboard seed (ha-floorhouse #108).
+# Live dashboard is storage-mode (url_path: floorhouse) on odroidn2;
+# this file is the git source of truth pushed via scripts/deploy.sh --push-seed.
+title: Дом
+views:
+  - title: Дом
+    path: home
+    panel: true
+    cards:
+      - type: custom:floorhouse-card
+        title: Дом
+        cell_px: 56
+        meters_per_cell: 0.5
+        floors:
+          - id: floor1
+            name: 1 этаж
+            rooms:
+              - id: prikhozhaya
+                name: Прихожая
+                x: 0
+                y: 0
+                w: 3
+                h: 3
+                doors:
+                  - wall: left
+                    at: 1.1
+                    size: 0.8
+              - id: koridor
+                name: Коридор
+                x: 0
+                y: 3
+                w: 2
+                h: 4
+              - id: wc
+                name: Санузел
+                x: 2
+                y: 3
+                w: 2
+                h: 2
+                doors:
+                  - wall: left
+                    at: 0.6
+                    size: 0.7
+              - id: stairs1
+                name: 2fl
+                x: 0
+                y: 7
+                w: 2
+                h: 3
+              - id: desk
+                name: Рабочее место
+                x: 4
+                y: 0
+                w: 4
+                h: 1
+              - id: kukhnia
+                name: Кухня
+                x: 4
+                y: 1
+                w: 4
+                h: 4
+                doors:
+                  - wall: bottom
+                    at: 0.6
+                    size: 0.9
+                slots:
+                  - kind: sensor
+                    entity: sensor.kettle_water_temperature
+                    title: Чайник
+                    x: 0.4
+                    y: 0.3
+              - id: gostinaia
+                name: Гостиная
+                x: 2
+                y: 5
+                w: 6
+                h: 5
+                doors:
+                  - wall: left
+                    at: 0.8
+                    size: 1.0
+                sensors:
+                  temperature: sensor.ekf_connect_ir_temperatura
+                  humidity: sensor.ekf_connect_ir_vlazhnost
+                slots:
+                  - kind: media_player
+                    entity: media_player.televizor
+                    x: 4
+                    y: 3.9
+                  - kind: climate
+                    entity: climate.kondei_1
+                    x: 0.3
+                    y: 0.55
+            objects:
+              - type: plant
+                x: 2.2
+                y: 2.25
+                w: 0.6
+                h: 0.6
+              - type: desk
+                x: 2.15
+                y: 3.15
+                w: 1.7
+                h: 0.5
+              - type: counter
+                x: 7.05
+                y: 1.15
+                w: 0.8
+                h: 3.7
+              - type: table
+                x: 4.6
+                y: 2.5
+                w: 1.7
+                h: 1.2
+              - type: chair
+                x: 4.9
+                y: 1.6
+                w: 0.6
+                h: 0.6
+              - type: chair
+                x: 4.9
+                y: 3.85
+                w: 0.6
+                h: 0.6
+              - type: desk
+                x: 4.2
+                y: 0.3
+                w: 3.6
+                h: 0.45
+              - type: stairs
+                x: 0.45
+                y: 7.25
+                w: 1.1
+                h: 2.5
+              - type: couch-l
+                x: 2.15
+                y: 7.9
+                w: 1.7
+                h: 1.85
+              - type: table
+                x: 3.6
+                y: 6.9
+                w: 1.3
+                h: 0.9
+              - type: chair
+                x: 6.9
+                y: 5.25
+                w: 0.6
+                h: 0.6
+              - type: tv
+                x: 7.8
+                y: 6.6
+                w: 0.18
+                h: 1.8
+              - type: light
+                entity_id: light.liustra
+                fixture: ceiling
+                x: 5
+                y: 7.5
+              - type: light
+                entity_id: light.girlianda
+                fixture: point
+                x: 7.2
+                y: 5.4
+              - type: light
+                entity_id: light.motion_light_motion_light
+                fixture: point
+                x: 1
+                y: 5
+              - type: light
+                entity_id: light.tualet_1_tualet_1
+                fixture: point
+                x: 3
+                y: 4
+              - type: light
+                entity_id: light.kukhnia_white
+                fixture: ceiling
+                x: 6
+                y: 3
+          - id: floor2
+            name: 2 этаж
+            rooms:
+              - id: spalnia
+                name: Спальня
+                x: 0
+                y: 0
+                w: 4
+                h: 5
+                doors:
+                  - wall: bottom
+                    at: 0.8
+                    size: 0.9
+                slots:
+                  - kind: climate
+                    entity: climate.kondei_2
+                    x: 1
+                    y: 3.9
+              - id: studia
+                name: Студия
+                x: 4
+                y: 0
+                w: 4
+                h: 5
+                doors:
+                  - wall: bottom
+                    at: 0.8
+                    size: 0.9
+                slots:
+                  - kind: media_player
+                    entity: media_player.aisis_speaker_m00zrw3008rajg
+                    extras:
+                      connection: sensor.aisis_speaker_m00zrw3008rajg_connected
+                      sound_level: sensor.aisis_speaker_m00zrw3008rajg_sound_level
+                    x: 0
+                    y: 2
+                  - kind: printer
+                    entity: sensor.printer_k1_se_nozzle_temperature
+                    secondary: sensor.printer_k1_se_bed_temperature
+                    title: K1se
+                    x: 2
+                    y: 2
+              - id: ugol
+                name: Угол
+                x: 0
+                y: 5
+                w: 2
+                h: 2
+                doors:
+                  - wall: right
+                    at: 0.5
+                    size: 0.7
+              - id: vtoroi_etazh
+                name: Второй этаж
+                x: 2
+                y: 5
+                w: 6
+                h: 5
+              - id: stairs2
+                name: 1fl
+                x: 0
+                y: 7
+                w: 2
+                h: 3
+            objects:
+              - type: bed
+                x: 0.35
+                y: 0.4
+                w: 2.3
+                h: 3.1
+              - type: chair
+                x: 3.1
+                y: 0.45
+                w: 0.65
+                h: 0.65
+              - type: plant
+                x: 3.05
+                y: 4.2
+                w: 0.6
+                h: 0.6
+              - type: desk
+                x: 4.4
+                y: 0.35
+                w: 3.2
+                h: 0.6
+              - type: chair
+                x: 5.5
+                y: 1.15
+                w: 0.65
+                h: 0.65
+              - type: couch
+                x: 4.4
+                y: 3.9
+                w: 2.4
+                h: 0.75
+                rot: 180
+              - type: plant
+                x: 7.2
+                y: 0.35
+                w: 0.65
+                h: 0.65
+              - type: chair
+                x: 1.15
+                y: 6.15
+                w: 0.65
+                h: 0.65
+              - type: table
+                x: 4.4
+                y: 6.6
+                w: 1.6
+                h: 1.1
+              - type: chair
+                x: 4.65
+                y: 5.55
+                w: 0.6
+                h: 0.6
+              - type: chair
+                x: 4.65
+                y: 8.15
+                w: 0.6
+                h: 0.6
+              - type: couch
+                x: 6.3
+                y: 8.9
+                w: 1.5
+                h: 0.8
+              - type: tv
+                x: 7.8
+                y: 6.4
+                w: 0.18
+                h: 1.5
+              - type: stairs
+                x: 0.45
+                y: 7.25
+                w: 1.1
+                h: 2.5
+              - type: light
+                entity_id: light.studiia
+                fixture: ceiling
+                x: 6
+                y: 2.5
+              - type: light
+                entity_id: light.studiia_ultra_lampa_socket_1
+                fixture: point
+                x: 7.2
+                y: 1.2
+        dock:
+          - kind: light
+            entity: light.studio_sw
+          - kind: network
+            entity: device_tracker.echowhiskey536
+          - kind: embed
+            title: Заметка
+            card:
+              type: markdown
+              content: |
+                ## Дом
+                План-дашборд floorhouse. Черновик правок хранится локально;
+                источник правды — ui-floorhouse.yaml в git.
