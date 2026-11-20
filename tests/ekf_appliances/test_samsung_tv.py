@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from homeassistant.components.media_player import MediaPlayerEntity
 
@@ -29,7 +29,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from homeassistant import loader
 from homeassistant.components.media_player import MediaPlayerEntityFeature as Feature
 from homeassistant.config_entries import ConfigEntries, ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_STATE_CHANGED
+from homeassistant.core import (
+    CoreState,
+    Event,
+    HomeAssistant,
+    ServiceRegistry,
+    State,
+    callback,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -211,6 +219,7 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.fail_ir = False
         self.feedback = False
         self.entities = []
+        self.power_pair_runtimes = []
         self.real_sleep = asyncio.sleep
         self.platform = EntityPlatform(
             hass=self.hass,
@@ -320,6 +329,9 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.entities.append(self.player)
 
     async def asyncTearDown(self) -> None:
+        for runtime in self.power_pair_runtimes:
+            for pair in runtime.power_pairs:
+                await pair.close()
         await self.player.async_cancel_power()
         await self.platform.async_reset()
         self.no_delay.stop()
@@ -402,6 +414,275 @@ class SamsungAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(added), 1)
         self.assertIsInstance(added[0], media_player.ProjectorMediaPlayer)
         self.assertEqual(self.commands, [])
+
+    def select_both_power_pairs(self) -> ApplianceRuntime:
+        """Select the Kodi host and Android player that install both pairs."""
+        er.async_get(self.hass).async_get_or_create(
+            "media_player",
+            "androidtv_remote",
+            "android-fixture",
+            suggested_object_id="android",
+        )
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            data={
+                **CONFIG,
+                "tv_kodi_entity_id": "media_player.home",
+                "tv_androidtv_entity_id": "media_player.android",
+            },
+        )
+        self.entry.runtime_data = ApplianceRuntime(self.hass, self.entry)
+        # Every display and player already reports OFF, so startup matches
+        # the baseline and has no reason to request any power change.
+        for entity_id in (
+            "binary_sensor.projector_hdmi_connected",
+            "sensor.kodi_service_state",
+            "media_player.android",
+        ):
+            self.hass.states.async_set(entity_id, "off")
+        return self.entry.runtime_data
+
+    def mock_power_routes(self) -> dict[str, AsyncMock]:
+        """Mock every endpoint a power command could reach."""
+        self.service_seen = asyncio.Event()
+        routes = {
+            "service": patch.object(
+                ServiceRegistry,
+                "async_call",
+                AsyncMock(
+                    side_effect=lambda *_args, **_kwargs: self.service_seen.set()
+                ),
+            ),
+            "projector_power": patch.object(
+                ApplianceRuntime, "async_projector_power", AsyncMock()
+            ),
+            "projector_ir": patch.object(
+                ApplianceRuntime, "async_send_projector", AsyncMock()
+            ),
+            "television_power": patch.object(
+                SamsungTvMediaPlayer, "_async_power", AsyncMock()
+            ),
+        }
+        mocks = {name: route.start() for name, route in routes.items()}
+        for route in routes.values():
+            self.addCleanup(route.stop)
+        return mocks
+
+    def forbid_power_io(self) -> dict[str, AsyncMock]:
+        """Record every power command route; setup and startup must use none."""
+        mocks = self.mock_power_routes()
+        route = patch.object(PowerPair, "_async_command", AsyncMock())
+        mocks["pair_command"] = route.start()
+        self.addCleanup(route.stop)
+        return mocks
+
+    def record_state_events(self) -> dict[str, list[State]]:
+        """Collect every published state per entity, starting before setup."""
+        recorded: dict[str, list[State]] = {}
+
+        @callback
+        def record(event: Event) -> None:
+            state = event.data["new_state"]
+            if state is not None:
+                recorded.setdefault(state.entity_id, []).append(state)
+
+        self.addCleanup(self.hass.bus.async_listen(EVENT_STATE_CHANGED, record))
+        return recorded
+
+    async def setup_power_pair_entities(
+        self, runtime: ApplianceRuntime, *, eager: bool
+    ) -> list[MediaPlayerEntity]:
+        """Run the real platform setup, adding entities eagerly or after install."""
+        added = []
+        if eager:
+
+            def add_entities(entities) -> None:
+                # HA schedules additions with eager_start=True: the first state
+                # write happens inside this call, before the setup function
+                # reaches its next statement.
+                entities = list(entities)
+                added.extend(entities)
+                self.hass.async_create_task(
+                    self.platform.async_add_entities(entities), eager_start=True
+                )
+        else:
+            add_entities = added.extend
+
+        # asyncTearDown closes the pairs: its block_till_done would otherwise
+        # wait out an unconfirmed command's 120 s timeout when a test fails.
+        self.power_pair_runtimes.append(runtime)
+        with (
+            patch(
+                "custom_components.ekf_appliances.samsung_tv.SamsungPowerCoordinator",
+                return_value=self.coordinator,
+            ),
+            # The stand-in coordinator already holds its first OFF observation.
+            patch.object(self.coordinator, "async_config_entry_first_refresh"),
+        ):
+            await media_player.async_setup_entry(self.hass, self.entry, add_entities)
+        if not eager:
+            await self.platform.async_add_entities(added)
+        return added
+
+    async def assert_first_publication_carries_revisions(
+        self, *, eager: bool, running: bool
+    ) -> None:
+        runtime = self.select_both_power_pairs()
+        if running:
+            self.hass.set_state(CoreState.running)
+        io = self.forbid_power_io()
+        recorded = self.record_state_events()
+        projector, television = await self.setup_power_pair_entities(
+            runtime, eager=eager
+        )
+        self.assertIsInstance(projector, media_player.ProjectorMediaPlayer)
+        self.assertIsInstance(television, SamsungTvMediaPlayer)
+        pairs = {
+            projector: runtime.projector_power_pair,
+            television: runtime.tv_power_pair,
+        }
+
+        def assert_published(moment: str, state_of) -> None:
+            for entity, pair in pairs.items():
+                with self.subTest(entity=type(entity).__name__, moment=moment):
+                    attributes = state_of(entity).attributes
+                    self.assertEqual(
+                        attributes["power_intent_revision"], pair.intent_revision
+                    )
+                    self.assertTrue(pair.intent_revision.endswith(":0"))
+                    self.assertIsNone(attributes["last_power_intent"])
+                    self.assertIsNone(attributes["power_sync_target"])
+
+        # The first published state, before any later dependency change.
+        for entity in pairs:
+            first = recorded.get(entity.entity_id)
+            self.assertTrue(first, f"{type(entity).__name__} never published")
+        assert_published(
+            "first publication", lambda entity: recorded[entity.entity_id][0]
+        )
+        if not running:
+            self.hass.set_state(CoreState.running)
+            self.hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await self.hass.async_block_till_done()
+        assert_published(
+            "after startup", lambda entity: self.hass.states.get(entity.entity_id)
+        )
+        for name, mock in io.items():
+            with self.subTest(route=name):
+                mock.assert_not_called()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.native_calls, [])
+
+    async def test_off_startup_publishes_revisions_when_entities_are_added_eagerly(
+        self,
+    ) -> None:
+        await self.assert_first_publication_carries_revisions(eager=True, running=False)
+
+    async def test_running_hass_publishes_revisions_when_entities_are_added_eagerly(
+        self,
+    ) -> None:
+        await self.assert_first_publication_carries_revisions(eager=True, running=True)
+
+    async def test_entities_added_after_install_publish_revisions_on_first_write(
+        self,
+    ) -> None:
+        await self.assert_first_publication_carries_revisions(eager=False, running=True)
+
+    async def wait_for_service_calls(self, service: AsyncMock, count: int) -> None:
+        async with asyncio.timeout(2):
+            while len(service.await_args_list) < count:
+                self.service_seen.clear()
+                await self.service_seen.wait()
+
+    async def test_running_hass_startup_mismatch_publishes_first_revision_before_add(
+        self,
+    ) -> None:
+        runtime = self.select_both_power_pairs()
+        self.hass.set_state(CoreState.running)
+        # Displays are ON while their players are OFF: startup must request ON.
+        self.hass.states.async_set("binary_sensor.projector_hdmi_connected", "on")
+        self.hass.states.async_set("sensor.kodi_service_state", "off")
+        self.set_native("on")
+        io = self.mock_power_routes()
+        recorded = self.record_state_events()
+        projector, television = await self.setup_power_pair_entities(
+            runtime, eager=True
+        )
+        pairs = {
+            projector: runtime.projector_power_pair,
+            television: runtime.tv_power_pair,
+        }
+        for entity, pair in pairs.items():
+            with self.subTest(entity=type(entity).__name__):
+                self.assertTrue(recorded[entity.entity_id])
+                attributes = recorded[entity.entity_id][0].attributes
+                self.assertEqual(
+                    attributes["power_intent_revision"], pair.intent_revision
+                )
+                self.assertTrue(pair.intent_revision.endswith(":1"))
+                self.assertTrue(attributes["power_sync_target"] is True)
+                self.assertTrue(attributes["last_power_intent"] is True)
+        await self.wait_for_service_calls(io["service"], 2)
+        self.assertCountEqual(
+            io["service"].await_args_list,
+            [
+                call("rest_command", "host_kodi_start", {}, blocking=True),
+                call(
+                    "media_player",
+                    "turn_on",
+                    {"entity_id": "media_player.android"},
+                    blocking=True,
+                ),
+            ],
+        )
+        for name in ("projector_power", "projector_ir", "television_power"):
+            with self.subTest(route=name):
+                io[name].assert_not_called()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.native_calls, [])
+
+    async def test_tv_power_on_event_carries_fresh_media_attributes(self) -> None:
+        runtime = self.select_both_power_pairs()
+        self.hass.set_state(CoreState.running)
+        io = self.mock_power_routes()
+        recorded = self.record_state_events()
+        _projector, television = await self.setup_power_pair_entities(
+            runtime, eager=True
+        )
+        await self.hass.async_block_till_done()
+        recorded[television.entity_id].clear()
+        # The TV is switched on with its own remote while both sides were OFF.
+        self.set_native("on")
+        await self.wait_for_service_calls(io["service"], 1)
+        turn_on = [
+            state for state in recorded[television.entity_id] if state.state == "on"
+        ]
+        self.assertTrue(turn_on)
+        attributes = turn_on[0].attributes
+        # Only the backend-derived source is observable here: the configured
+        # Android player is OFF, so it owns no media_title or volume.
+        self.assertEqual(attributes["source"], "TV")
+        self.assertTrue(attributes["power_sync_target"] is True)
+        self.assertEqual(
+            attributes["power_intent_revision"], runtime.tv_power_pair.intent_revision
+        )
+        self.assertTrue(runtime.tv_power_pair.intent_revision.endswith(":1"))
+        self.assertEqual(
+            io["service"].await_args_list,
+            [
+                call(
+                    "media_player",
+                    "turn_on",
+                    {"entity_id": "media_player.android"},
+                    blocking=True,
+                )
+            ],
+        )
+        for name in ("projector_power", "projector_ir", "television_power"):
+            with self.subTest(route=name):
+                io[name].assert_not_called()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.native_calls, [])
 
     async def test_adapter_binds_existing_device_without_merging_gateway(self) -> None:
         await self.attach()
