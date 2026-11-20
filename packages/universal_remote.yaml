@@ -964,7 +964,7 @@ script:
     sequence:
       - variables:
           digit_num: "{{ button | int(-1) }}"
-          sticky: "{{ button in ['volume_up', 'volume_down', 'up', 'down'] }}"
+          sticky: "{{ button in ['play', 'volume_up', 'volume_down', 'up', 'down'] }}"
           music_commands:
             left: previous
             prev: previous
@@ -998,7 +998,7 @@ script:
                 data:
                   command: volume_set
                   volume_level: "{{ digit_num / 10 }}"
-      # Back and other non-sticky keys only leave the mode when unmapped.
+      # Play and volume keys keep the speaker selected for the next press.
       - if: "{{ not sticky }}"
         then:
           - if: "{{ button == 'info' }}"
@@ -1343,9 +1343,9 @@ automation:
           text: "Ищу {{ trigger.event.data.query }}"
           end_session: true
 
-  # ===== Audio mode safety timeout — 3s of inactivity =====
+  # ===== Audio mode safety timeout — 60s of inactivity =====
   # Restarts on activation AND on every dispatched in-mode press (which
-  # bumps audio_last_press_ms). Sticky keys (vol/up/down) keep the mode
+  # bumps audio_last_press_ms). Sticky keys (play and volume) keep the mode
   # alive across taps this way.
   - alias: Audio mode inactivity timeout
     id: audio_mode_timeout
@@ -1361,7 +1361,7 @@ automation:
         entity_id: input_boolean.audio_mode
         state: "on"
     action:
-      - delay: "00:00:03"
+      - delay: "00:01:00"
       - if: "{{ is_state('input_boolean.audio_mode', 'on') }}"
         then:
           - action: script.audio_mode_deactivate

@@ -32,6 +32,11 @@ rejected if YAML runs after confirmation. Explicit source/app selection may star
 wake the projector when the TV is on; Power remains busy until all active pairs
 settle. Independent AC, lighting and speaker controls remain available.
 
+A single Audio press toggles playback. On the living-room Yandex Station,
+Play resumes the current track or starts My Wave if there is no current item.
+Double Audio selects speaker controls. Play and volume keep that selection
+active for sixty seconds after the latest press. Audio dismisses it immediately.
+
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable
 mute or climate data, and failed native text responses use the same cue.

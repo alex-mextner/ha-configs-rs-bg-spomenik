@@ -1227,9 +1227,76 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             and data.get("command") not in {"beep_on", "beep_off"}
         ]
         self.assertEqual(commands, [{"command": "play_pause"}])
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "on")
         self.assertEqual(
             [x for x in self.calls if x[0].startswith("media_player.")], []
         )
+
+    async def test_music_owner_play_starts_empty_station_and_resumes_or_pauses_tracks(
+        self,
+    ) -> None:
+        package = yaml.safe_load(PACKAGE.with_name("music_remote.yaml").read_text())
+        command = Script(
+            self.hass,
+            cv.SCRIPT_SCHEMA(package["script"]["music_remote_command"]["sequence"]),
+            "music_remote_command",
+            "script",
+        )
+        stock = "media_player.yandex_station_m0011hm00z86hg"
+        ma = "media_player.music_assistant_queue"
+        route = {"entity_id": stock, "owner": "speaker", "speaker_backend": "yandex"}
+
+        async def resolve(_call: ServiceCall) -> dict[str, str]:
+            return route
+
+        self.hass.services.async_register(
+            "script",
+            "music_remote_resolve",
+            resolve,
+            supports_response=SupportsResponse.ONLY,
+        )
+        self.hass.services.async_register("media_player", "play_media", self.capture)
+        for entity, state, attrs, expected in [
+            (stock, "paused", {"media_content_id": ""}, "play_media"),
+            (stock, "idle", {}, "play_media"),
+            (stock, "paused", {"media_content_id": "1234"}, "media_play"),
+            (stock, "paused", {"media_title": "Current track"}, "media_play"),
+            (stock, "playing", {}, "media_pause"),
+            (ma, "paused", {}, "media_play"),
+        ]:
+            with self.subTest(entity=entity, state=state, attrs=attrs):
+                route.update(
+                    entity_id=entity, owner="ma" if entity == ma else "speaker"
+                )
+                self.hass.states.async_set(
+                    entity, state, {"supported_features": 1 | 512 | 16384, **attrs}
+                )
+                self.calls.clear()
+                await command.async_run({"command": "play_pause"}, context=Context())
+                data = {"entity_id": entity}
+                if expected == "play_media":
+                    data.update(
+                        media_content_type="command",
+                        media_content_id="Включи мою волну",
+                    )
+                self.assertEqual(
+                    [
+                        call
+                        for call in self.calls
+                        if call[0].startswith("media_player.")
+                    ],
+                    [(f"media_player.{expected}", data)],
+                )
+        route.update(entity_id=stock, owner="speaker")
+        for state in ("unknown", "unavailable"):
+            with self.subTest(state=state):
+                self.hass.states.async_set(stock, state)
+                self.calls.clear()
+                result = await command.async_run(
+                    {"command": "play_pause"}, context=Context()
+                )
+                self.assertIsNone(result.service_response)
+                self.assertEqual(self.calls, [])
 
     async def test_reconnected_receiver_does_not_replay_recent_cached_button(
         self,
