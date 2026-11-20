@@ -39,7 +39,17 @@ All of these must hold; otherwise do not start.
   from ultra's side: rclone logs only NOTICE to his 0750 home, his tailscaled runs in userspace (no sshd or
   kernel trace), and the journal holds only his cron lines. So ask Anton for his backup schedule, write it here,
   and choose the window outside it with at least an hour of margin on both sides:
-  - Anton's backup windows: _not yet confirmed; this step stays open until they are listed here_
+  - Anton's backup windows: **not derivable from the host; no scheduled backup job runs there.** Observed on
+    2026-11-20 (read-only):
+    - His crontab holds only `diskbench/collect.sh` (every 20 min at :00/:20/:40, ~30 s, local disk benchmark), the
+      SFTP watchdog (every 2 min) and two `@reboot` starts.
+    - `rclone serve sftp` runs permanently (6+ days uptime); the Nextcloud client connects from his side. The
+      server log (NOTICE level) records no sessions, only watchdog restarts and a once-a-minute failed-login probe.
+    - Last writes under /mnt/storage/photos: 2026-10-07, 2026-11-12 11:50, 2026-11-17 00:42 (irregular, no daily
+      pattern).
+
+    Window (safe default, odroidn2's local clock, CET): **12:00-15:00**. His observed writes fall outside it; the
+    step 4 pre-flight shows any open SFTP session, so wait until it prints nothing before stopping.
   Then tell him the date and that his SFTP is down for ~2 hours in the window.
 
 Timing: a 2-3 hour daytime window when nobody needs the projector, the owner at the board for steps 2 (optional), 5
