@@ -86,7 +86,7 @@ remote_reject:
       required: true
       selector: {text: {}}
     press_id:
-      description: Stable physical press identity; defaults to the caller context.
+      description: Stable physical press identity. When omitted, uses the physical press that remote_prepare bound to the caller context, else the caller context ID.
       selector: {text: {}}
 
 remote_dispatch:
