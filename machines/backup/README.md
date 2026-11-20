@@ -38,11 +38,12 @@ with a `SHA256SUMS`, is part of every snapshot. Temp files (restic's packs, SQLi
 | odroidn2 | `home-assistant_v2.db`, `zigbee.db` | sqlite dump | ~445 MB |
 | odroidn2 | `~/music-assistant` (settings, certs, logs) + `library.db`, `auth.db` | files + sqlite dump | ~30 MB |
 | odroidn2 | `~/esphome` (YAML, components), `~/ssh-data`, `~/.config` (user units, Tasks keys) | files | ~10 MB |
-| odroidn2 | ExpenseSyncBot `data/` (receipts, own backups), `logs/`, `.env`; `expenses.db` | files + sqlite dump | ~160 MB |
-| odroidn2 | HyperSummaryBot `data/`, `logs/`, `.env`; `hyper-summary.db` | files + sqlite dump | ~125 MB |
-| odroidn2 | HyperCalendarBot `/opt/hypercal` `.env`, compose, `data/`, `logs/`; `calendar.db`; redis `hypercal-redis` | files + sqlite dump + BGSAVE | ~40 MB |
+| odroidn2 (Armbian only; they move to bananapi-m4) | ExpenseSyncBot `data/` (receipts, own backups), `logs/`, `.env`; `expenses.db` | files + sqlite dump | ~160 MB |
+| odroidn2 (Armbian only) | HyperSummaryBot `data/`, `logs/`, `.env`; `hyper-summary.db` | files + sqlite dump | ~125 MB |
+| odroidn2 (Armbian only) | HyperCalendarBot `/opt/hypercal` `.env`, compose, `data/`, `logs/`; `calendar.db`; redis `hypercal-redis` | files + sqlite dump + BGSAVE | ~40 MB |
 | odroidn2 | Postgres `hga` (container `homeassistant-hga-postgres-1`) | pg_dump | small |
-| odroidn2 | `/etc`, `/var/spool/cron`, `/var/lib/nixos` (after the NixOS reinstall) | files | ~5 MB |
+| odroidn2 | `/etc`, `/var/spool/cron` (Armbian), `/var/lib/nixos`, `/var/lib/tailscale`, `/var/lib/bluetooth` (NixOS) | files | ~5 MB |
+| odroidn2 (NixOS) | `~/.local/bin` (host helpers), `~/odroid-overlay`, home-lan DHCP/DNS config and leases, `~/.kodi/userdata` | files | small |
 | ubuntu-pc | Postgres `quasar`, `quasar_stage` (container `aisis-yandex-postgres-1`) | pg_dump | ~16 MB |
 | ubuntu-pc | `~/.config/tasks-backup` (age key!), `~/.config/tg-cli`, `~/.ssh`, aisis `compose.yaml` | files | <1 MB |
 | ubuntu-pc | Tasks backup sets from the puller → `gdrive:homelab-backup-ubuntu-pc/tasks` | rclone copy, hourly | ~390 MB |
@@ -80,8 +81,8 @@ after its first backup (Secrets, step 4). On the host itself: `homelab-backup st
 ## Install
 
 **NixOS** (macmini, odroid-n2plus): the flake host imports `./backup/nixos.nix` and sets
-`homelab.backup.enable = true;` (plus `homelab.backup.host = "odroidn2";` on the ODROID, whose host file is shared
-with its Armbian install). `sudo nixos-rebuild switch --flake ./machines#<host>`, then the secrets below.
+`homelab.backup.enable = true;` (plus `homelab.backup.host = "odroidn2-nixos";` on the ODROID: `hosts/odroidn2-nixos.toml`
+writes to the Armbian install's repository, host `odroidn2`, without the bots). `sudo nixos-rebuild switch --flake ./machines#<host>`, then the secrets below.
 
 **bananapi-m4**: the module is `modules/backup` there (a symlink to `../../backup/debian`), configured by
 `[modules.backup]` in `machine.toml`; it converges with the rest: `sudo ./install.sh --commit`. The symlink needs

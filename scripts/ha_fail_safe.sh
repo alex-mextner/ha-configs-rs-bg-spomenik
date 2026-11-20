@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # HA Fail-Safe Manager
 # Usage: ./ha_fail_safe.sh [action]
 # Actions: check, fix-orphaned, restart, status

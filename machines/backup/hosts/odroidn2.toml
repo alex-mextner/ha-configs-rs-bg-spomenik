@@ -1,6 +1,6 @@
-# odroidn2 (ODROID-N2+): Home Assistant stack, bots, Music Assistant, PrintOps.
-# Used twice: by debian/ on the current Armbian system and by nixos.nix after the NixOS reinstall
-# (machines/odroid-n2plus), which keeps the same data paths. /mnt/storage (Anton's encrypted disk) and the
+# odroidn2 (ODROID-N2+) on Armbian: Home Assistant stack, bots, Music Assistant, PrintOps. Used by debian/ on the
+# Armbian install until the NixOS move; the NixOS install (machines/odroid-n2plus) uses odroidn2-nixos.toml, the
+# same repository without the bots (they move to bananapi-m4 first). /mnt/storage (Anton's encrypted disk) and the
 # torrents on /mnt/wd500 are never backed up.
 host = "odroidn2"
 scope = "system"

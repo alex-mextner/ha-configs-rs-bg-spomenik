@@ -1,0 +1,86 @@
+# odroidn2 (ODROID-N2+) on NixOS (machines/odroid-n2plus): Home Assistant stack, Music Assistant, LAN DHCP/DNS,
+# Kodi, PrintOps. The same restic repository and snapshot host as the Armbian install (host = "odroidn2", whose
+# list in odroidn2.toml still carries the bots); the bots are on bananapi-m4 by the time this file is in use
+# (odroid-n2plus/MIGRATION.md, step 0). /mnt/storage (Anton's encrypted disk), /home/anton and the torrents on
+# /mnt/wd500 are never backed up.
+host = "odroidn2"
+scope = "system"
+# restored and compared with the live file by the monthly drill
+drill_file = "/home/ultra/homeassistant/configuration.yaml"
+
+paths = [
+  # uid/gid allocations
+  "/var/lib/nixos",
+  "/etc",
+  # tailscale node state (ultra's node) and Bluetooth pairings
+  "/var/lib/tailscale",
+  "/var/lib/bluetooth",
+  "/home/ultra/homeassistant",
+  "/home/ultra/music-assistant",
+  "/home/ultra/esphome",
+  "/home/ultra/ssh-data",
+  "/home/ultra/.config",
+  # deployed host helpers (ha-host-actions.py, Kodi helpers) and the go2rtc config of this board
+  "/home/ultra/.local/bin",
+  "/home/ultra/odroid-overlay",
+  # DHCP (dnsmasq config with the static leases, lease file), DNS relay config, TLS front config
+  "/home/ultra/.local/share/home-lan",
+  "/home/ultra/.local/state/home-lan",
+  # Kodi settings and library database
+  "/home/ultra/.kodi/userdata",
+  # the eMMC is the only copy now: ultra's SSH keys (the Tasks backup pull reaches bread with them), HA_TOKEN,
+  # PrintOps (.env and token files) and the router CLI checkout (its inventory database is a dump below)
+  "/home/ultra/.ssh",
+  "/home/ultra/.env",
+  "/home/ultra/printops",
+  "/home/ultra/dev/router-cli",
+]
+
+# restic exclude patterns; a name without a slash matches at any depth. The live SQLite files listed under
+# [[dumps]] (and their -wal/-shm/-journal) are excluded automatically: the consistent dump is backed up instead.
+exclude = [
+  ".cache",
+  "node_modules",
+  "__pycache__",
+  # re-creatable from GitHub / rebuilt by ESPHome
+  "/home/ultra/homeassistant/.git",
+  "/home/ultra/homeassistant/submodules",
+  "/home/ultra/homeassistant/.tools",
+  "/home/ultra/esphome/.esphome",
+  # Home Assistant's own full backup tarballs (~2 GB): the same data, already covered by this backup
+  "/home/ultra/homeassistant/backups",
+  "/home/ultra/.kodi/userdata/Thumbnails",
+]
+
+[[dumps]]
+type = "sqlite"
+name = "ha-recorder"
+source = "/home/ultra/homeassistant/home-assistant_v2.db"
+
+[[dumps]]
+type = "sqlite"
+name = "ha-zigbee"
+source = "/home/ultra/homeassistant/zigbee.db"
+
+[[dumps]]
+type = "sqlite"
+name = "music-assistant-library"
+source = "/home/ultra/music-assistant/library.db"
+
+[[dumps]]
+type = "sqlite"
+name = "music-assistant-auth"
+source = "/home/ultra/music-assistant/auth.db"
+
+[[dumps]]
+type = "sqlite"
+name = "router-cli-inventory"
+# read by ha-host-actions (ROUTER_CLI_DB default)
+source = "/home/ultra/.local/share/router-cli/inventory.sqlite3"
+
+[[dumps]]
+type = "postgres"
+name = "hga"
+container = "homeassistant-hga-postgres-1"
+database = "hga"
+user = "hga"
