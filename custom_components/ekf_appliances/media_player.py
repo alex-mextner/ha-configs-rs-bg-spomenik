@@ -49,8 +49,11 @@ async def async_setup_entry(
         else:
             await television.coordinator.async_config_entry_first_refresh()
             entities.append(television)
-    async_add_entities(entities)
+    # HA adds entities eagerly, so their first state write happens inside
+    # async_add_entities. Install the controllers first or that write lacks
+    # power_intent_revision, and a stable power state never republishes it.
     install_power_pairs(entry.runtime_data, projector, television)
+    async_add_entities(entities)
 
 
 class ProjectorMediaPlayer(EkfEntity, MediaPlayerEntity):

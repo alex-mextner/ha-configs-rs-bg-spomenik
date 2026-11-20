@@ -94,6 +94,7 @@ class PairBindingsTests(unittest.IsolatedAsyncioTestCase):
             hass=self.hass,
             entity_id="media_player.tv",
             async_write_ha_state=Mock(),
+            async_write_power_state=Mock(),
             _async_power=tv_power,
             media_routing=TelevisionMediaRouting(self.hass, self.entry),
             coordinator=SimpleNamespace(

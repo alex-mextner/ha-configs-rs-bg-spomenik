@@ -145,7 +145,7 @@ def install_power_pairs(
     projector: MediaPlayerEntity,
     television: SamsungTvMediaPlayer | None = None,
 ) -> None:
-    """Register after platforms are created; perform no power I/O during setup."""
+    """Register before entities are added; perform no power I/O during setup."""
     hass = runtime.hass
     entry = runtime.entry
 
@@ -165,11 +165,13 @@ def install_power_pairs(
         entry.async_on_unload(async_at_started(hass, start))
         runtime.power_pairs.append(pair)
 
-    def notify(entity: MediaPlayerEntity) -> Callable[[], None]:
+    def notify(
+        entity: MediaPlayerEntity, write: Callable[[], None] | None = None
+    ) -> Callable[[], None]:
         @callback
         def changed() -> None:
             if entity.hass is not None and entity.entity_id is not None:
-                entity.async_write_ha_state()
+                (write or entity.async_write_ha_state)()
 
         return changed
 
@@ -214,7 +216,7 @@ def install_power_pairs(
             wait_for_feedback=True,
         ),
         hooks=PowerPairHooks(
-            changed=notify(television),
+            changed=notify(television, television.async_write_power_state),
             create_task=hass.async_create_task,
             preempt_commands=True,
         ),

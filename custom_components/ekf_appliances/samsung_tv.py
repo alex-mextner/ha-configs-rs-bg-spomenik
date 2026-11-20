@@ -315,6 +315,15 @@ class SamsungTvMediaPlayer(
         self.async_write_ha_state()
 
     @callback
+    def async_write_power_state(self) -> None:
+        """Publish a power change with fresh media attributes."""
+        # Power-pair listeners are registered before this entity's own
+        # coordinator/backend listeners, so they run first; refresh the media
+        # cache before publishing or the on-event carries stale attributes.
+        self._copy_native_attributes()
+        self.async_write_ha_state()
+
+    @callback
     def _async_backend_registry_changed(self, _event: Event) -> None:
         self._subscribe_backend()
         data = self.runtime.entry.data
