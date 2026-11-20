@@ -1,0 +1,41 @@
+cage 0.3.0: never draw a cursor (kiosk).
+The arrow in the middle of the screen came from Chromium: cage puts the (virtual) cursor in the centre,
+sends pointer-enter to the kiosk window and Chromium answers with set_cursor. libinput also reports
+the HDMI-CEC inputs (vc4-hdmi) as keyboard+pointer, so cage set its own xcursor too. Hide all of it.
+
+--- a/seat.c
++++ b/seat.c
+@@ -126,12 +126,9 @@
+ 	}
+ 	wlr_seat_set_capabilities(seat->seat, caps);
+ 
+-	/* Hide cursor if the seat doesn't have pointer capability. */
+-	if ((caps & WL_SEAT_CAPABILITY_POINTER) == 0) {
+-		wlr_cursor_unset_image(seat->cursor);
+-	} else {
+-		wlr_cursor_set_xcursor(seat->cursor, seat->xcursor_manager, DEFAULT_XCURSOR);
+-	}
++	/* Kiosk: never draw the compositor cursor. HDMI-CEC inputs (vc4-hdmi) count as a pointer for
++	 * libinput, so "no pointer => hidden" does not hold on a Raspberry Pi. */
++	wlr_cursor_unset_image(seat->cursor);
+ }
+ 
+ static void
+@@ -493,7 +490,8 @@
+ 	/* This can be sent by any client, so we check to make sure
+ 	 * this one actually has pointer focus first. */
+ 	if (focused_client == event->seat_client->client) {
+-		wlr_cursor_set_surface(seat->cursor, event->surface, event->hotspot_x, event->hotspot_y);
++		/* Kiosk: ignore the client's cursor image (Chromium asks for an arrow on pointer enter). */
++		wlr_cursor_unset_image(seat->cursor);
+ 	}
+ }
+ 
+@@ -834,6 +832,7 @@
+ 		return NULL;
+ 	}
+ 	wlr_cursor_attach_output_layout(seat->cursor, server->output_layout);
++	wlr_cursor_unset_image(seat->cursor);
+ 
+ 	if (!seat->xcursor_manager) {
+ 		seat->xcursor_manager = wlr_xcursor_manager_create(NULL, XCURSOR_SIZE);
