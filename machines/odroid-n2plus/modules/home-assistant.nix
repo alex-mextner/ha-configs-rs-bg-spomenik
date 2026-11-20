@@ -91,6 +91,9 @@ in
     HA_COMPOSE_OVERLAYS=${overlay}
   '';
 
+  # Bound per-attempt diagnostic logs during repeated cold-start failures.
+  systemd.tmpfiles.rules = [ "d /tmp/ha-core-update-notice 0700 ultra ultra 7d" ];
+
   systemd.services.ha-compose = {
     description = "Home Assistant Docker Compose stack";
     wantedBy = [ "multi-user.target" ];
@@ -134,6 +137,40 @@ in
       TimeoutStopSec = "180s";
       # the compose client only; the containers are in docker.slice (memory.nix)
       MemoryMax = "256M";
+    };
+  };
+
+  # Restore/reconcile native Version + Template Update entries after HA starts.
+  # HA_TOKEN stays in ~/.env, never in the Nix store. Runtime stores are read-only;
+  # their IDs are checked against live metadata before any native config flow.
+  systemd.services.ha-core-update-notice = {
+    description = "Home Assistant Core update notice";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "ha-compose.service" ];
+    after = [ "ha-compose.service" ];
+    unitConfig = {
+      ConditionPathExists = "/home/ultra/.env";
+      StartLimitIntervalSec = "15min";
+      StartLimitBurst = 3;
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      User = "ultra";
+      Group = "ultra";
+      ExecStart = "${pkgs.python3}/bin/python3 ${../../../scripts/provision_ha_core_update.py}";
+      RuntimeDirectory = "ha-core-update-notice";
+      RuntimeDirectoryMode = "0700";
+      UMask = "0077";
+      TimeoutStartSec = "5min";
+      Restart = "on-failure";
+      RestartSec = "30s";
+      MemoryMax = "128M";
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = "read-only";
+      ReadWritePaths = [ "/tmp" ];
+      RestrictAddressFamilies = [ "AF_INET" "AF_UNIX" ];
     };
   };
 
@@ -234,11 +271,24 @@ in
   # end-to-end check of HA's external URL (scripts/dataplicity_watchdog.py).
   systemd.services.ha-fail-safe = ultraCheck "Home Assistant fail-safe check" "${checkout}/scripts/ha_fail_safe_cron.sh";
   systemd.services.ha-dataplicity-watchdog = ultraCheck "Home Assistant external URL watchdog" "${checkout}/scripts/dataplicity_watchdog.py";
-  systemd.timers = lib.genAttrs [ "ha-fail-safe" "ha-dataplicity-watchdog" ] (_: {
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnBootSec = "10min";
-      OnUnitActiveSec = "5min";
+  systemd.timers =
+    (lib.genAttrs [ "ha-fail-safe" "ha-dataplicity-watchdog" ] (_: {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "10min";
+        OnUnitActiveSec = "5min";
+      };
+    }))
+    // {
+      ha-core-update-notice = {
+        description = "Retry the Core update notice after a slow HA startup";
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          # Calendar events keep retrying after the finite service start-limit window.
+          # RemainAfterExit keeps a successful service active, so later ticks do no work.
+          OnCalendar = "*:0/5";
+          Unit = "ha-core-update-notice.service";
+        };
+      };
     };
-  });
 }
