@@ -147,6 +147,16 @@ class RemoteModeTests(unittest.TestCase):
         self.clock.advance(1.011)
         self.assertAlmostEqual(self.mode.expires_at, first + 60)
 
+    def test_input_selecting_tv_from_running_projector_never_wakes_tv(self) -> None:
+        self.observe(tv=False, projector=True)
+        self.input()
+        self.clock.advance(1.011)
+        self.assertEqual(self.mode.target, "chromecast")
+        self.assertEqual(self.wakes, [])
+        self.double()
+        self.assertEqual(self.mode.target, "tv")
+        self.assertEqual(self.wakes, [])
+
     def test_single_wake_keeps_exact_60_seconds(self) -> None:
         self.observe(
             tv=True, projector=False, revisions={"tv": "t:1", "projector": "p:1"}

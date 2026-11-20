@@ -263,12 +263,12 @@ class RemoteMode:
         if pending is None or not self._valid(pending):
             return
         destination = "tv" if pending.pair == "projector" else "projector"
-        other = pending.pair
         wake = (
-            self.displays[destination] is False
-            and self.displays[other] is True
-            and self.targets[destination] is not True
-            and not (destination == "projector" and self.shutting_down)
+            destination == "projector"
+            and self.displays["projector"] is False
+            and self.displays["tv"] is True
+            and self.targets["projector"] is not True
+            and not self.shutting_down
         )
         self.audio = False
         self.select(destination, at=pending.at)

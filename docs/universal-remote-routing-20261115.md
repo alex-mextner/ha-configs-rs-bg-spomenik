@@ -10,7 +10,7 @@ an intermediate projector or native state to announcements.
 The controller uses physical capture timestamps and cancellable callback
 ownership for two independent deadlines: the inclusive one-second INPUT double
 window and exactly sixty seconds of inactivity. Single INPUT retains its original
-pair snapshot and wake policy. The lease starts at the physical action, including
+pair snapshot. Selecting the TV or Chromecast never powers on the TV. The lease starts at the physical action, including
 the first INPUT of a single, and every accepted universal-remote action renews it.
 Display OFF or projector shutdown invalidates stale pending input and affected
 manual focus. Unknown observations never mean OFF.
@@ -28,8 +28,8 @@ the route without reserving or adopting a physical Power request.
 
 Ordinary navigation, text, volume and transport keys are rejected for a busy,
 confirmed-off, or unknown display. A rejection captured during a transition stays
-rejected if YAML runs after confirmation. Explicit source/app selection and single
-INPUT may start their named idle pair; Power remains busy until all active pairs
+rejected if YAML runs after confirmation. Explicit source/app selection may start its named idle pair. Single INPUT may
+wake the projector when the TV is on; Power remains busy until all active pairs
 settle. Independent AC, lighting and speaker controls remain available.
 
 A recognized command rejected by a guard emits the short quiet rejection cue

@@ -1354,13 +1354,10 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.mode.expires_at, 0)
         self.assertEqual(self.appliance_calls(), [])
 
-    async def test_single_input_wakes_only_the_other_off_pair_with_sixty_second_focus(
+    async def test_single_input_selects_either_pair_but_only_wakes_projector(
         self,
     ) -> None:
-        for tv, projector, expected, revision in [
-            ("on", "off", PROJECTOR, "projector:0"),
-            ("off", "on", TV, "tv:0"),
-        ]:
+        for tv, projector in [("on", "off"), ("off", "on")]:
             with self.subTest(tv=tv, projector=projector):
                 self.reset()
                 self.clear_explicit_focus()
@@ -1378,9 +1375,14 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     [
                         (
                             "ekf_appliances.wake_if_current",
-                            {"entity_id": expected, "expected_revision": revision},
+                            {
+                                "entity_id": PROJECTOR,
+                                "expected_revision": "projector:0",
+                            },
                         )
-                    ],
+                    ]
+                    if selected == "projector"
+                    else [],
                 )
                 self.assertLessEqual(self.controller.mode.expires_at - time.time(), 60)
                 self.assertEqual(
