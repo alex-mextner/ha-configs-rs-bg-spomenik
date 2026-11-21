@@ -173,6 +173,11 @@ class ManualVolume:
     previous_levels: frozenset[float]
     before: State | None
     pending_mute_levels: frozenset[float] = frozenset()
+    cleanup_deadline: float = field(
+        default_factory=lambda: time.monotonic() + ATTEMPT_BUDGET + REMUTE_GRACE,
+        compare=False,
+        repr=False,
+    )
     admitted: float = field(default_factory=time.time, compare=False, repr=False)
 
     def confirmed(self, state: State, previous: State | None) -> bool:
@@ -252,7 +257,9 @@ class SpeechPlayback:
         self.budget = ATTEMPT_BUDGET if budget is None else budget
         self.recovery_deadline = self.started + self.budget
         self.cleanup_deadline = self.recovery_deadline + REMUTE_GRACE
+        self.initial_deadline = self.cleanup_deadline
         self.initial_admitted: float | None = None
+        self.initial_preempted = False
         self.initial_feedback = asyncio.Event()
         self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
         self.remute_lock = asyncio.Lock()
@@ -266,6 +273,7 @@ class SpeechPlayback:
         if earlier_levels is not None and self.raised:
             earlier_levels.add(self.applied)
         self.user_changed_volume = True
+        self.initial_preempted = False
         self.initial_feedback.set()
 
     def at_baseline(self, state: State) -> bool:
@@ -298,11 +306,18 @@ class SpeechPlayback:
             and state.last_updated_timestamp >= self.initial_admitted
         ):
             if not self.at_baseline(state) and not self.owns_level(state):
-                self.user_changed_volume = True
-            if self.user_changed_volume or can_restore_volume(
-                state.attributes["volume_level"],
-                self.applied,
-                muted=bool(state.attributes.get("is_volume_muted")),
+                if not self.override_observed and not self.user_changed_volume:
+                    # A queued human choice can arrive before our initial write.
+                    # Preserve the latest observable choice if our write follows.
+                    self.old_volume = state.attributes["volume_level"]
+                    self.muted_before = bool(state.attributes.get("is_volume_muted"))
+                    self.initial_preempted = True
+                else:
+                    self.user_changed_volume = True
+            if (
+                self.initial_preempted
+                or self.user_changed_volume
+                or self.owns_level(state)
             ):
                 self.initial_feedback.set()
         if (
@@ -678,12 +693,23 @@ class Manager:
         prior = self.late_initials.get(entity)
         if prior is None or self.closing or not reliable_volume(state):
             return
-        if state.last_updated_timestamp < prior.initial_admitted or prior.at_baseline(
-            state
-        ):
+        if prior.at_baseline(state):
+            if requested and time.monotonic() >= prior.cleanup_deadline:
+                # A fresh request may retry after the bounded readback window.
+                # The old command cannot be recalled; no later autonomous write
+                # is allowed to claim this released baseline.
+                self.late_initials.pop(entity)
+            return
+        if state.last_updated_timestamp < prior.initial_admitted:
             return
         if not prior.owns_level(state):
-            self.late_initials.pop(entity)
+            if time.monotonic() >= prior.cleanup_deadline:
+                self.late_initials.pop(entity)
+            else:
+                # The accepted write can still follow this newer human report.
+                prior.old_volume = state.attributes["volume_level"]
+                prior.muted_before = bool(state.attributes.get("is_volume_muted"))
+                prior.initial_preempted = True
             return
         if (
             self.active_label is not None and self.active_label.entity == entity
@@ -733,6 +759,22 @@ class Manager:
             if isinstance(pending, ManualVolume)
             else self.volume_recovered(state, pending)
         )
+        if (
+            not settled
+            and isinstance(pending, ManualVolume)
+            and not self.manual_writes
+            and not self.services.pending
+            and time.monotonic() >= pending.cleanup_deadline
+            and reliable_volume(state)
+            and can_restore_volume(
+                state.attributes["volume_level"],
+                pending.selected,
+                muted=bool(state.attributes.get("is_volume_muted")),
+            )
+        ):
+            # Coalesced writes can leave the chosen audible level unchanged.
+            # A fresh request may use it after the bounded uncertainty window.
+            settled = True
         if settled:
             self.volume_recovery.pop(state.entity_id)
             return
@@ -784,8 +826,13 @@ class Manager:
             if (
                 entity_id == self.config["yandex_entity"]
                 and attrs.get("alice_state") in ("SPEAKING", "NONE")
+                # Match start_wave in packages/music_remote.yaml: an identified
+                # radio/playlist is content even without an item ID or title.
                 and not attrs.get("media_content_id")
                 and not attrs.get("media_title")
+                and not attrs.get("media_content_type")
+                and not attrs.get("media_playlist")
+                and not attrs.get("media_duration")
             ):
                 continue
             return 0.6
@@ -820,6 +867,7 @@ class Manager:
             # Join the same accepted write without dispatching it again.
             playback.raised = True
             playback.initial_admitted = prior.initial_admitted
+            playback.initial_deadline = prior.cleanup_deadline
         return playback
 
     async def prepare_playback(self, playback: SpeechPlayback) -> None:
@@ -970,6 +1018,25 @@ class Manager:
             playback = self.active_label
             remute = self.pending_remutes.get(entity)
             late = self.late_initials.get(entity)
+            current = self.hass.states.get(entity)
+            if (
+                isinstance(pending, VolumeRestore)
+                and remute is None
+                and late is None
+                and (playback is None or playback.entity != entity)
+                and current is not None
+                and self.volume_recovered(current, pending)
+            ):
+                # The restore has already settled. A matching audible digit
+                # needs neither another write nor a new, unconfirmable fence.
+                self.volume_recovery.pop(entity)
+                pending = None
+                if can_restore_volume(
+                    current.attributes["volume_level"],
+                    call.data["volume_level"],
+                    muted=bool(current.attributes.get("is_volume_muted")),
+                ):
+                    return {"status": "kept"}
             if (
                 not pending
                 and not remute
@@ -1062,9 +1129,25 @@ class Manager:
             before = self.hass.states.get(entity)
             if before and reliable_volume(before):
                 previous_levels.add(before.attributes["volume_level"])
+            previous_writes = (
+                pending if isinstance(pending, ManualVolume) else None,
+                late,
+                playback if playback and playback.entity == entity else None,
+                remute[0] if remute else None,
+            )
+            deadline = max(
+                (
+                    time.monotonic() + ATTEMPT_BUDGET + REMUTE_GRACE,
+                    *(write.cleanup_deadline for write in previous_writes if write),
+                )
+            )
             # Admission precedes the user's actual native dispatch, including lost ACKs.
             manual = ManualVolume(
-                selected, frozenset(previous_levels), before, frozenset(mute_levels)
+                selected,
+                frozenset(previous_levels),
+                before,
+                frozenset(mute_levels),
+                cleanup_deadline=deadline,
             )
             self.volume_recovery[entity] = manual
             await self.send_manual_volume(call)
@@ -1307,7 +1390,8 @@ class Manager:
                 )
             ):
                 # The provider accepted the initial write but has not reported it.
-                # Retain the original baseline and the requested temporary level.
+                # A matching new label cannot renew the lost write's bound.
+                playback.cleanup_deadline = playback.initial_deadline
                 self.late_initials[playback.entity] = playback
                 playback.recovery_failed = True
                 playback.recovery_reason = self.recovery_reason(
@@ -1467,6 +1551,7 @@ class Manager:
             return (
                 self.is_current(target, generation)
                 and entity not in self.volume_recovery
+                and not playback.initial_preempted
                 and self.at_label_volume(playback)
             )
 

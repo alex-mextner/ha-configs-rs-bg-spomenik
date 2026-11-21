@@ -342,6 +342,43 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.reject(f"unavailable:{index}")
         self.assertEqual(self.fixture.calls, [])
 
+    async def test_late_quiet_volume_echo_restores_original_level(self) -> None:
+        before = self.hass.states.get(self.entity)
+        attrs = {**before.attributes, "volume_level": 0.8}
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def accept_without_echo(call) -> None:
+            self.fixture.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register(
+            "media_player", "volume_set", accept_without_echo
+        )
+        await self.reject()
+        self.assertEqual(
+            self.manager.public_status["rejection_drop_reason"],
+            "quiet_volume_unconfirmed",
+        )
+        self.assertEqual([name for name, _ in self.fixture.calls], ["volume_set"])
+        self.hass.services.async_register(
+            "media_player", "volume_set", self.fixture.media
+        )
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.1}
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+        self.assertEqual(
+            [
+                data["volume_level"]
+                for name, data in self.fixture.calls
+                if name == "volume_set"
+            ],
+            [0.1, 0.8],
+        )
+
     async def test_missing_quiet_volume_readback_prevents_sound(self) -> None:
         async def ignore_volume(call) -> None:
             self.fixture.calls.append((call.service, dict(call.data)))

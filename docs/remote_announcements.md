@@ -71,7 +71,9 @@ otherwise. At the start of speech, the controller reads the routed Samsung TV
 (active Chromecast, Android TV or Music Assistant session), Kodi on the projector,
 and the living-room Yandex Mini. The controller counts a display only when both the display
 and its selected player report active playback. Native Alice speech without underlying media does
-not count. Each queued label reads current playback after the preceding label or
+not count. A content ID, title, media type, playlist or duration identifies underlying
+Station content, using the same predicate as the remote's Play action. Each queued
+label reads current playback after the preceding label or
 quiet cue completes. Paused, idle, powered-on, buffering, unavailable
 and restored states do not count as playing. An assumed cloud-only speaker state after a
 disconnect does not raise the volume. The same rule applies when the
@@ -115,16 +117,38 @@ shutdown or expiry ends the continuation. A later echo cannot trigger a write.
 Before changing the speaker level, the controller checks that its original level
 and mute still match. Speech starts only after the speaker reports the requested
 level with mute off. If that report misses the speech deadline, the label is
-skipped. Until that accepted write settles, a label needing the same level may
-wait for its report. A conflicting label or quiet cue is deferred. A late report can trigger one guarded return to the original setting
-within the recovery window. After that window a fresh label or cue can request
-the cleanup before taking a new baseline. A distinct human level or mute releases
-the earlier claim.
+skipped. A label needing the same level may share the accepted write and wait for
+its report; this does not renew that write's original uncertainty deadline.
+A conflicting label is rejected and a quiet cue is dropped with the pending
+recovery reason. Neither is automatically retried.
 
-A volume digit can keep the current audible setting before the label changes it.
-If an earlier write is outstanding, each explicit digit can still send its own
-level. A delayed mute report from an older command cannot confirm a newer
-audible selection. Relative volume buttons adjust the current audible level.
+While the initial write remains unobserved, a distinct reliable human level or
+mute becomes the recovery baseline. The interrupted label stays quiet. If our
+accepted write then appears, recovery preserves the latest observable human
+choice, including a change reported after the foreground wait ended. This changes
+only the volume/mute baseline; the original content and pause/resume snapshot stay
+separate. A later explicit remote digit relinquishes that recovery claim.
+
+A late initial report can trigger one guarded recovery within the original
+cleanup window: normally four seconds from the label's start, or five seconds for
+a quiet cue. After that window, a fresh request at the reliable baseline treats
+the missing write as lost and can try again. If the temporary level is already
+visible, the fresh request can first initiate cleanup. No delayed autonomous write
+is admitted after the window. Physical commands cannot be recalled: a report that
+arrives after a lost-write claim was released cannot be safely attributed or
+corrected. An app/voice choice identical to an outstanding command's level is also
+indistinguishable from that command's report.
+
+A volume digit can keep the current audible setting before the label changes it,
+or after a previous restore has already settled. If an earlier write is still
+outstanding, each explicit digit can send its own level. A delayed mute report
+from an older command cannot confirm a newer audible selection. If coalesced
+commands produce no state change, a fresh label/cue request may release the manual
+fence after its uncertainty window only when the reliable current level already
+matches the audible selection and all provider/manual tasks have finished. The
+window normally ends four seconds after the digit and never precedes an inherited
+recovery deadline. A still-muted or different unresolved level remains guarded.
+Relative volume buttons adjust the current audible level.
 
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,
@@ -223,8 +247,10 @@ The selected announcement speaker receives its native short sound:
 
 A cue temporarily lowers a valid nonzero speaker volume to
 `min(current volume, 0.1)`, verifies the resulting HA state before sending audio,
-and restores the prior level only while its ownership checks still hold. A human
-volume or mute change wins. An unavailable, restored, muted or zero-volume speaker
+and restores the prior level only while its ownership checks still hold. An
+accepted quiet-level write remains tracked if its report misses the cue deadline;
+a later report uses the same bounded recovery as a label. A human volume or mute
+change wins. An unavailable, restored, muted or zero-volume speaker
 is left alone and produces a nondelivery diagnostic. Native sounds preserve the
 selected music queue; the cue sends no generic audio URL, pause, play or power
 command. The speakers' firmware may briefly duck music on their native sound
