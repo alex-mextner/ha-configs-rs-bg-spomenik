@@ -711,12 +711,18 @@ class Manager:
         if playback.applied != playback.old_volume or playback.muted_before:
             # Yandex volume_set lifts volume-zero mute and keeps the remembered
             # music level; restore both that level and mute after speech.
-            playback.raised = True
+            def admit_volume() -> bool:
+                if self.closing or playback.user_changed_volume:
+                    return False
+                playback.raised = True
+                return True
+
             await self.call(
                 "volume_set",
                 playback.entity,
                 volume_level=playback.applied,
                 deadline=playback.work_deadline,
+                guard=admit_volume,
             )
 
     async def wait_for_completion(
@@ -755,6 +761,19 @@ class Manager:
             )
         else:
             self.update("ready", **status)
+
+    def at_label_volume(self, playback: SpeechPlayback) -> bool:
+        """Require the configured audible level after a manual selection."""
+        state = self.hass.states.get(playback.entity)
+        return bool(
+            state
+            and reliable_volume(state)
+            and can_restore_volume(
+                state.attributes["volume_level"],
+                playback.applied,
+                muted=state.attributes.get("is_volume_muted", False),
+            )
+        )
 
     def volume_unchanged(self, playback: SpeechPlayback, expected: float) -> bool:
         """Require our temporary volume and preserve later human changes."""
@@ -811,21 +830,16 @@ class Manager:
             if (
                 not pending
                 and not remute
-                and (
-                    playback is None or playback.entity != entity or not playback.raised
-                )
+                and (playback is None or playback.entity != entity)
             ):
                 return {"status": "not_applicable"}
             selected = call.data["volume_level"]
             if playback is not None and playback.entity == entity:
-                state = self.hass.states.get(entity)
                 adopt_current = (
                     pending is None
                     and remute is None
-                    and state is not None
-                    and reliable_volume(state)
                     and can_restore_volume(selected, playback.applied, muted=False)
-                    and self.volume_unchanged(playback, playback.applied)
+                    and self.at_label_volume(playback)
                 )
                 if adopt_current:
                     playback.user_changed_volume = True
@@ -869,7 +883,8 @@ class Manager:
                 raise ProviderNotReadyError(message)
             playback = self.active_label
             if playback and playback.entity == entity:
-                previous_levels.add(playback.applied)
+                if playback.raised:
+                    previous_levels.add(playback.applied)
                 playback.user_changed_volume = True
             if remute:
                 # Its original level may have been dispatched while we waited.
@@ -1238,9 +1253,19 @@ class Manager:
             self.hass, [entity], playback.observe
         )
         self.active_label = playback
+
+        def may_speak() -> bool:
+            return self.is_current(target, generation) and (
+                not playback.user_changed_volume
+                or (
+                    entity not in self.volume_recovery
+                    and self.at_label_volume(playback)
+                )
+            )
+
         try:
             await self.prepare_playback(playback)
-            if not self.is_current(target, generation):
+            if not may_speak():
                 self.update("superseded", target=target)
                 return
             if backend == "yandex":
@@ -1248,7 +1273,7 @@ class Manager:
                     ("yandex_station", "send_command"),
                     {"entity_id": entity, **payload},
                     deadline=playback.work_deadline,
-                    guard=lambda: self.is_current(target, generation),
+                    guard=may_speak,
                     response_validator=validate_native_response,
                 )
             else:
@@ -1261,7 +1286,7 @@ class Manager:
                         "text": clip.marker,
                     },
                     deadline=playback.work_deadline,
-                    guard=lambda: self.is_current(target, generation),
+                    guard=may_speak,
                 )
             if not sent:
                 self.update("superseded", target=target)

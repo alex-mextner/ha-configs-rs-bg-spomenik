@@ -830,6 +830,94 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.get(self.entity).attributes["volume_level"], 0.5
         )
 
+    async def check_digit_preempts_scheduled_label_level(self, selected: float) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=True,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        script = self.music_script("speaker", self.entity)
+        scheduled, release = asyncio.Event(), asyncio.Event()
+        create_task = asyncio.create_task
+
+        def schedule(coro, **kwargs: object) -> asyncio.Task:
+            # Delay only the first actual ServiceCalls.invoke task before it runs.
+            if (
+                kwargs.get("name") != "remote-announcement:media_player.volume_set"
+                or scheduled.is_set()
+            ):
+                return create_task(coro, **kwargs)
+            scheduled.set()
+
+            async def after_digit() -> bool:
+                await release.wait()
+                return await coro
+
+            return create_task(after_digit(), **kwargs)
+
+        with patch.object(asyncio, "create_task", schedule):
+            label = create_task(self.manager.announce("tv"))
+            try:
+                await asyncio.wait_for(scheduled.wait(), 0.5)
+                playback = self.manager.active_label
+                self.assertFalse(self.calls)
+                await script.async_run(
+                    {"command": "volume_set", "volume_level": selected},
+                    context=Context(),
+                )
+            finally:
+                release.set()
+                await asyncio.wait_for(label, 0.8)
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [selected]
+        )
+        self.assertNotIn("volume_mute", [n for n, _ in self.calls])
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], selected
+        )
+        self.assertEqual(
+            [n for n, _ in self.calls].count("send_command"), int(selected == 0.4)
+        )
+        self.assertFalse(playback.raised)
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_digit_during_owned_pause_keeps_volume_and_recovers_music(
+        self,
+    ) -> None:
+        self.manager.config["music_mode"] = "pause"
+        state = self.hass.states.get(self.entity)
+        self.hass.states.async_set(
+            self.entity, "playing", {**state.attributes, "supported_features": 4}
+        )
+        release, entered = asyncio.Event(), asyncio.Event()
+        self.hold_ack["media_pause"] = release
+        self.ack_started["media_pause"] = entered
+        script = self.music_script("speaker", self.entity)
+        label = asyncio.create_task(self.manager.announce("tv"))
+        try:
+            await asyncio.wait_for(entered.wait(), 0.5)
+            await script.async_run(
+                {"command": "volume_set", "volume_level": 0.7}, context=Context()
+            )
+        finally:
+            release.set()
+            await asyncio.wait_for(label, 0.8)
+        self.assertEqual(
+            [n for n, _ in self.calls], ["media_pause", "volume_set", "media_play"]
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.7
+        )
+        self.assertEqual(self.hass.states.get(self.entity).state, "playing")
+
+    async def test_distinct_digit_preempts_scheduled_label_level(self) -> None:
+        await self.check_digit_preempts_scheduled_label_level(0.7)
+
+    async def test_matching_digit_preempts_scheduled_label_level(self) -> None:
+        await self.check_digit_preempts_scheduled_label_level(0.4)
+
     async def test_same_digit_before_label_level_echo_dispatches_once(self) -> None:
         attrs = dict(
             self.hass.states.get(self.entity).attributes,
