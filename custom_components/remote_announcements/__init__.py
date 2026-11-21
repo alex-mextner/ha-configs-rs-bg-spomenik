@@ -694,7 +694,13 @@ class Manager:
         if prior is None or self.closing or not reliable_volume(state):
             return
         if prior.at_baseline(state):
-            if requested and time.monotonic() >= prior.cleanup_deadline:
+            if (
+                prior.override_observed
+                and state.last_updated_timestamp >= prior.initial_admitted
+            ):
+                prior.relinquish_volume()
+                self.late_initials.pop(entity)
+            elif requested and time.monotonic() >= prior.cleanup_deadline:
                 # A fresh request may retry after the bounded readback window.
                 # The old command cannot be recalled; no later autonomous write
                 # is allowed to claim this released baseline.
@@ -703,7 +709,10 @@ class Manager:
         if state.last_updated_timestamp < prior.initial_admitted:
             return
         if not prior.owns_level(state):
-            if time.monotonic() >= prior.cleanup_deadline:
+            if prior.override_observed:
+                prior.relinquish_volume()
+                self.late_initials.pop(entity)
+            elif time.monotonic() >= prior.cleanup_deadline:
                 self.late_initials.pop(entity)
             else:
                 # The accepted write can still follow this newer human report.
@@ -711,21 +720,23 @@ class Manager:
                 prior.muted_before = bool(state.attributes.get("is_volume_muted"))
                 prior.initial_preempted = True
             return
+        # Observing our write does not depend on time left to recover it.
+        prior.override_observed = True
         if (
             self.active_label is not None and self.active_label.entity == entity
         ) or entity in self.pending_remutes:
             return
         now = time.monotonic()
-        if now >= prior.cleanup_deadline:
+        if prior.cleanup_deadline - now <= self.services.limit:
             if not requested:
                 return
-            # A new label/cue requests recovery explicitly. No delayed autonomous
-            # command is dispatched after the original grace window.
+            # Leave a full acknowledgement opportunity; only a fresh request
+            # can grant another recovery window.
             prior.cleanup_deadline = now + ATTEMPT_BUDGET
         prior.recovery_deadline = prior.cleanup_deadline
         prior.applied = state.attributes["volume_level"]
-        prior.override_observed = True
-        self.late_initials.pop(entity)
+        # Keep the accepted initial write until native restore admission creates
+        # its successor. The scheduled task may expire or be cancelled first.
         self.start_recovery(prior, initial=True)
 
     def check_aisis_volume_recovery(self, state: State, *, label: bool = False) -> None:
@@ -1266,11 +1277,18 @@ class Manager:
             async with playback.remute_lock:
 
                 def admit_level() -> bool:
-                    if self.closing or not self.volume_unchanged(
-                        playback, playback.applied
+                    if (
+                        self.closing
+                        or not self.volume_unchanged(playback, playback.applied)
+                        or (
+                            self.late_initials.get(entity) is playback
+                            and time.monotonic() >= playback.recovery_deadline
+                        )
                     ):
                         return False
                     self.volume_recovery[entity] = expected
+                    if self.late_initials.get(entity) is playback:
+                        self.late_initials.pop(entity)
                     return True
 
                 if not await self.call(
@@ -1305,6 +1323,7 @@ class Manager:
                     def admit_mute() -> bool:
                         if (
                             entity in self.selecting_volume
+                            or time.monotonic() >= deadline
                             or not self.remembered_level_observed(playback)
                         ):
                             return False
@@ -1380,15 +1399,20 @@ class Manager:
             state = self.hass.states.get(playback.entity)
             if state and playback.owns_level(state):
                 playback.applied = state.attributes["volume_level"]
-            elif (
-                not playback.override_observed
-                and not self.closing
-                and (
-                    state is None
-                    or not reliable_volume(state)
-                    or playback.at_baseline(state)
-                )
-            ):
+            elif not playback.override_observed and not self.closing:
+                if (
+                    state is not None
+                    and reliable_volume(state)
+                    and state.last_updated_timestamp >= playback.initial_admitted
+                    and not playback.at_baseline(state)
+                ):
+                    # The speech observer is already detached. Preserve a human
+                    # report arriving before this recovery task gets its turn.
+                    playback.old_volume = state.attributes["volume_level"]
+                    playback.muted_before = bool(
+                        state.attributes.get("is_volume_muted")
+                    )
+                    playback.initial_preempted = True
                 # The provider accepted the initial write but has not reported it.
                 # A matching new label cannot renew the lost write's bound.
                 playback.cleanup_deadline = playback.initial_deadline
@@ -1412,10 +1436,19 @@ class Manager:
             expected = VolumeRestore(playback.old_volume, playback.applied)
 
             def admit_restore() -> bool:
-                if not self.volume_unchanged(playback, playback.applied):
+                if (
+                    self.closing
+                    or not self.volume_unchanged(playback, playback.applied)
+                    or (
+                        self.late_initials.get(playback.entity) is playback
+                        and time.monotonic() >= playback.recovery_deadline
+                    )
+                ):
                     return False
                 if verify_volume:
                     self.volume_recovery[playback.entity] = expected
+                    if self.late_initials.get(playback.entity) is playback:
+                        self.late_initials.pop(playback.entity)
                 return True
 
             if not await self.call(

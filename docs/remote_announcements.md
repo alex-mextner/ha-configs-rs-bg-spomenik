@@ -131,10 +131,14 @@ separate. A later explicit remote digit relinquishes that recovery claim.
 
 A late initial report can trigger one guarded recovery within the original
 cleanup window: normally four seconds from the label's start, or five seconds for
-a quiet cue. After that window, a fresh request at the reliable baseline treats
-the missing write as lost and can try again. If the temporary level is already
-visible, the fresh request can first initiate cleanup. No delayed autonomous write
-is admitted after the window. Physical commands cannot be recalled: a report that
+a quiet cue. Autonomous recovery needs at least a full service acknowledgement
+opportunity remaining. The initial write stays tracked until a native restore is
+admitted or reliable feedback confirms settlement; scheduling a recovery task does
+not release ownership. If its budget expires before admission, a fresh request can
+initiate cleanup with a full recovery budget. No delayed autonomous write is
+admitted after the original window. After pending provider/manual requests finish,
+a fresh request at the reliable baseline can treat an expired missing write as
+lost and try again. Physical commands cannot be recalled: a report that
 arrives after a lost-write claim was released cannot be safely attributed or
 corrected. An app/voice choice identical to an outstanding command's level is also
 indistinguishable from that command's report.
@@ -281,9 +285,11 @@ uses `rejection_controller_elapsed_ms`, `rejection_controller_budget_seconds`,
 Failed cue recovery remains `recovery_unconfirmed` with its safe recovery reason,
 including after a delivery failure. That delivery failure retains its
 `rejection_drop_reason` and increments the dropped counter, not the sent counter.
-Shutdown uses the explicit drop reason `closed`. Cue reporting does not replace
-the spoken-label readiness or controller diagnostics. Shared
-recovery ownership and guards still prevent another unsafe attempt.
+Shutdown uses the explicit drop reason `closed`. Ordinary cue reporting stays
+separate from spoken-label readiness and controller diagnostics. A failure in the
+shared late-volume recovery may update the main controller status; that diagnostic
+does not select a target or grant dispatch permission. Shared recovery ownership
+and guards still prevent another unsafe attempt.
 
 A queued service response does not prove playback. `completed` means a native
 Yandex completion event was observed; `sent_unconfirmed` means dispatch completed
@@ -291,8 +297,7 @@ without that event. Neither
 is acoustic proof of audibility. Physical cue level, duration and continuity of
 ongoing music require separate acceptance evidence.
 
-These cue rules preserve the existing spoken-label texts, cache identities and
-volume behavior.
+These cue rules preserve the existing spoken-label texts and cache identities.
 
 ## Silent preparation and checks
 

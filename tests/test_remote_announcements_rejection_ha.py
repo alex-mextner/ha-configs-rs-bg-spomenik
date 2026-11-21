@@ -342,6 +342,65 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.reject(f"unavailable:{index}")
         self.assertEqual(self.fixture.calls, [])
 
+    async def unobserved_quiet_initial(self) -> dict:
+        before = self.hass.states.get(self.entity)
+        attrs = {**before.attributes, "volume_level": 0.8, "is_volume_muted": False}
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def accept_without_echo(call) -> None:
+            self.fixture.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register(
+            "media_player", "volume_set", accept_without_echo
+        )
+        await self.reject()
+        self.assertEqual([name for name, _ in self.fixture.calls], ["volume_set"])
+        self.hass.services.async_register(
+            "media_player", "volume_set", self.fixture.media
+        )
+        return attrs
+
+    async def test_late_quiet_initial_expiry_keeps_ownership(self) -> None:
+        attrs = await self.unobserved_quiet_initial()
+        await self.fixture.check_expired_initial_handoff(attrs)
+
+    async def test_human_level_at_quiet_restore_handoff_survives_late_initial(
+        self,
+    ) -> None:
+        restore = self.manager.restore_playback
+
+        async def report_before_restore(playback, **kwargs: Any) -> dict[str, Any]:
+            self.assertFalse(playback.override_observed)
+            state = self.hass.states.get(self.entity)
+            self.hass.states.async_set(
+                self.entity,
+                state.state,
+                {**state.attributes, "volume_level": 0.9},
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(playback.initial_preempted)
+            return await restore(playback, **kwargs)
+
+        with patch.object(self.manager, "restore_playback", report_before_restore):
+            attrs = await self.unobserved_quiet_initial()
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.1}
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.9
+        )
+        self.assertEqual(
+            [
+                data["volume_level"]
+                for name, data in self.fixture.calls
+                if name == "volume_set"
+            ],
+            [0.1, 0.9],
+        )
+        self.assertFalse(self.manager.late_initials)
+        self.assertFalse(self.manager.volume_recovery)
+
     async def test_late_quiet_volume_echo_restores_original_level(self) -> None:
         before = self.hass.states.get(self.entity)
         attrs = {**before.attributes, "volume_level": 0.8}

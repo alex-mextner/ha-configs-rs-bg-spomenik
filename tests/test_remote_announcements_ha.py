@@ -1237,11 +1237,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_digit_after_inflight_human_level_wins(self) -> None:
         await self.check_human_echo_before_initial(explicit_digit=True)
 
-    async def unobserved_initial(self) -> dict:
+    async def unobserved_initial(self, *, muted: bool = False) -> dict:
         attrs = dict(
             self.hass.states.get(self.entity).attributes,
             volume_level=0.8,
-            is_volume_muted=False,
+            is_volume_muted=muted,
             supported_features=4,
         )
         self.hass.states.async_set(self.entity, "paused", attrs)
@@ -1259,6 +1259,245 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.speech_started, [])
         self.hass.services.async_register("media_player", "volume_set", self.media)
         return attrs
+
+    async def check_expired_initial_handoff(
+        self, attrs: dict, *, before_native_guard: bool = False
+    ) -> None:
+        """Expire the original window between scheduling and native admission."""
+        prior = self.manager.late_initials[self.entity]
+        applied = prior.applied
+        now = [time.monotonic()]
+        prior.cleanup_deadline = now[0] + 1
+        original_deadline = prior.cleanup_deadline
+        clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+        start_recovery = self.manager.start_recovery
+        create_task = asyncio.create_task
+
+        def schedule(playback, *, initial=False) -> asyncio.Task[None]:
+            task = start_recovery(playback, initial=initial)
+            if not before_native_guard:
+                now[0] = original_deadline + 1
+            return task
+
+        def create(coro, *, name=None, **kwargs: Any) -> asyncio.Task:
+            if (
+                before_native_guard
+                and name == "remote-announcement:media_player.volume_set"
+            ):
+                # ServiceCalls has computed a positive budget, but invoke has
+                # not run its admission guard or dispatched the native service.
+                now[0] = original_deadline + 1
+            return create_task(coro, name=name, **kwargs)
+
+        with (
+            patch.object(integration, "time", clock),
+            patch("custom_components.remote_announcements.service_calls.time", clock),
+        ):
+            with (
+                patch.object(self.manager, "start_recovery", schedule),
+                patch.object(asyncio, "create_task", create),
+            ):
+                self.hass.states.async_set(
+                    self.entity,
+                    "paused",
+                    {**attrs, "volume_level": applied, "is_volume_muted": False},
+                )
+                await self.hass.async_block_till_done(wait_background_tasks=True)
+
+            self.assertEqual(
+                [
+                    data["volume_level"]
+                    for name, data in self.calls
+                    if name == "volume_set"
+                ],
+                [applied],
+            )
+            self.assertIs(self.manager.late_initials.get(self.entity), prior)
+            self.assertEqual(prior.cleanup_deadline, original_deadline)
+            self.assertFalse(self.manager.pending_remutes)
+            self.assertFalse(self.manager.volume_recovery)
+
+            # This real new request may initiate cleanup with a full budget.
+            with self.assertRaisesRegex(ProviderNotReadyError, "recovery_pending"):
+                await self.manager.announce("tv")
+            self.assertEqual(
+                prior.cleanup_deadline, now[0] + integration.ATTEMPT_BUDGET
+            )
+            await self.hass.async_block_till_done(wait_background_tasks=True)
+            self.assertEqual(
+                self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+            )
+            self.assertEqual(
+                self.hass.states.get(self.entity).attributes["is_volume_muted"],
+                attrs["is_volume_muted"],
+            )
+            self.assertFalse(self.manager.late_initials)
+            self.assertFalse(self.manager.volume_recovery)
+
+            await self.manager.announce("tv")
+            self.assertEqual(
+                [
+                    data["volume_level"]
+                    for name, data in self.calls
+                    if name == "volume_set"
+                ],
+                [applied, 0.8, 0.4, 0.8],
+            )
+            self.assertEqual(len(self.speech_started), 1)
+
+    async def test_late_initial_expiry_before_restore_task_keeps_ownership(
+        self,
+    ) -> None:
+        attrs = await self.unobserved_initial()
+        await self.check_expired_initial_handoff(attrs)
+
+    async def test_muted_late_initial_expiry_keeps_ownership(self) -> None:
+        attrs = await self.unobserved_initial(muted=True)
+        await self.check_expired_initial_handoff(attrs)
+
+    async def test_late_initial_expiry_before_native_guard_keeps_ownership(
+        self,
+    ) -> None:
+        attrs = await self.unobserved_initial()
+        await self.check_expired_initial_handoff(attrs, before_native_guard=True)
+
+    async def check_human_volume_at_restore_handoff(
+        self, *, explicit_digit: bool = False, human_muted: bool = False
+    ) -> None:
+        """Report the queued human level after the speech observer unsubscribes."""
+        restore = self.manager.restore_playback
+        snapshots = []
+
+        async def report_before_restore(playback, **kwargs: Any) -> dict[str, Any]:
+            self.assertFalse(playback.override_observed)
+            state = self.hass.states.get(self.entity)
+            self.hass.states.async_set(
+                self.entity,
+                state.state,
+                {
+                    **state.attributes,
+                    "volume_level": 0.9,
+                    "is_volume_muted": human_muted,
+                },
+            )
+            await asyncio.sleep(0)
+            # The old observer really is gone; recovery must sample this state.
+            self.assertFalse(playback.initial_preempted)
+            snapshots.append(playback)
+            return await restore(playback, **kwargs)
+
+        with patch.object(self.manager, "restore_playback", report_before_restore):
+            attrs = await self.unobserved_initial()
+        if explicit_digit:
+            await self.music_script("speaker", self.entity).async_run(
+                {"command": "volume_set", "volume_level": 0.4}, context=Context()
+            )
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.4, "is_volume_muted": False},
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        expected = 0.4 if explicit_digit else 0.9
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], expected
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["is_volume_muted"],
+            human_muted and not explicit_digit,
+        )
+        self.assertEqual(
+            [data["volume_level"] for name, data in self.calls if name == "volume_set"],
+            [0.4, expected],
+        )
+        self.assertEqual(snapshots[0].old_content, "original-track")
+        self.assertFalse(snapshots[0].paused)
+        self.assertFalse(self.manager.late_initials)
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_human_level_at_restore_handoff_survives_late_initial(self) -> None:
+        await self.check_human_volume_at_restore_handoff()
+
+    async def test_human_mute_at_restore_handoff_survives_late_initial(self) -> None:
+        await self.check_human_volume_at_restore_handoff(human_muted=True)
+
+    async def test_explicit_digit_after_restore_handoff_human_level_wins(self) -> None:
+        await self.check_human_volume_at_restore_handoff(explicit_digit=True)
+
+    async def test_observed_initial_near_deadline_yields_to_later_human_levels(
+        self,
+    ) -> None:
+        attrs = await self.unobserved_initial()
+        prior = self.manager.late_initials[self.entity]
+        now = time.monotonic()
+        prior.cleanup_deadline = now + self.manager.services.limit / 2
+        clock = SimpleNamespace(monotonic=lambda: now, time=time.time)
+        failure = None
+
+        with (
+            patch.object(integration, "time", clock),
+            patch("custom_components.remote_announcements.service_calls.time", clock),
+        ):
+            for level in (0.4, 0.9, 0.4):
+                self.hass.states.async_set(
+                    self.entity, "paused", {**attrs, "volume_level": level}
+                )
+                await self.hass.async_block_till_done(wait_background_tasks=True)
+            try:
+                await self.manager.announce("tv")
+            except ProviderNotReadyError as error:
+                failure = error
+            await self.hass.async_block_till_done(wait_background_tasks=True)
+
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.4
+        )
+        self.assertIsNone(failure)
+        self.assertEqual(
+            [data["volume_level"] for name, data in self.calls if name == "volume_set"],
+            [0.4],
+        )
+        self.assertEqual(len(self.speech_started), 1)
+        self.assertFalse(self.manager.late_initials)
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_final_remute_expiry_at_native_guard_does_not_dispatch(self) -> None:
+        attrs = await self.unobserved_initial(muted=True)
+        prior = self.manager.late_initials[self.entity]
+        now = [time.monotonic()]
+        prior.cleanup_deadline = now[0] + 1
+        deadline = prior.cleanup_deadline
+        clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+        create_task = asyncio.create_task
+
+        def create(coro, *, name=None, **kwargs: Any) -> asyncio.Task:
+            if name == "remote-announcement:media_player.volume_mute":
+                # The positive level was restored and its record replaced the
+                # initial claim. Only final mute admission remains pending.
+                self.assertNotIn(self.entity, self.manager.late_initials)
+                now[0] = deadline + 1
+            return create_task(coro, name=name, **kwargs)
+
+        with (
+            patch.object(integration, "time", clock),
+            patch("custom_components.remote_announcements.service_calls.time", clock),
+            patch.object(asyncio, "create_task", create),
+        ):
+            self.hass.states.async_set(
+                self.entity,
+                "paused",
+                {**attrs, "volume_level": 0.4, "is_volume_muted": False},
+            )
+            await self.hass.async_block_till_done(wait_background_tasks=True)
+
+        self.assertEqual([name for name, _ in self.calls], ["volume_set", "volume_set"])
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+        self.assertFalse(
+            self.hass.states.get(self.entity).attributes["is_volume_muted"]
+        )
+        self.assertFalse(self.manager.pending_remutes)
 
     async def test_late_initial_echo_runs_one_bounded_restore(self) -> None:
         attrs = await self.unobserved_initial()
