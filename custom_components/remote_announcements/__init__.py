@@ -1398,7 +1398,7 @@ class Manager:
         report_status: bool = True,
         background: bool = False,
     ) -> None:
-        """Restore within budget; allow only foreground cleanup during close."""
+        """Restore within budget; allow unmuted foreground cleanup during close."""
         if playback.initial_admitted is not None and not playback.user_changed_volume:
             state = self.hass.states.get(playback.entity)
             if state and playback.owns_level(state):
@@ -1440,11 +1440,19 @@ class Manager:
             expected = VolumeRestore(playback.old_volume, playback.applied)
 
             def admit_restore() -> bool:
-                if (
-                    (self.closing and background)
-                    or not self.volume_unchanged(playback, playback.applied)
-                    or time.monotonic() >= playback.recovery_deadline
+                if (self.closing and background) or not self.volume_unchanged(
+                    playback, playback.applied
                 ):
+                    return False
+                if time.monotonic() >= playback.recovery_deadline:
+                    playback.recovery_failed = True
+                    playback.recovery_reason = self.recovery_reason(
+                        playback.entity, "unconfirmed"
+                    )
+                    if report_status:
+                        self.update(
+                            "recovery_unconfirmed", reason=playback.recovery_reason
+                        )
                     return False
                 if verify_volume:
                     self.volume_recovery[playback.entity] = expected

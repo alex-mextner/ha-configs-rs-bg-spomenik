@@ -2016,6 +2016,80 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 playing=False, restore_expected=False
             )
         self.assertEqual(len(expired), 1)
+        self.assertEqual(self.manager.status, "recovery_unconfirmed")
+        self.assertEqual(
+            self.manager.public_status["reason"],
+            "yandex_volume_recovery_unconfirmed",
+        )
+        self.assertFalse(self.manager.volume_recovery)
+        self.assertFalse(self.manager.late_initials)
+
+    async def check_expired_native_restore_yields(self, *, human: bool) -> None:
+        playback = self.manager.playback("yandex", self.entity)
+        await self.manager.prepare_playback(playback)
+        self.assertTrue(playback.raised)
+        before = self.manager.status, dict(self.manager.public_status)
+        before_calls = list(self.calls)
+        now = [time.monotonic()]
+        clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+        dispatch = self.manager.services.call
+        sampled = []
+        guarded = []
+
+        async def changed_before_admission(service, data, **kwargs: Any) -> bool:
+            if (
+                service == ("media_player", "volume_set")
+                and data["volume_level"] == playback.old_volume
+            ):
+                guard = kwargs["guard"]
+                deadline = kwargs["deadline"]
+                sampled.append((now[0], deadline))
+
+                def change_before_guard() -> bool:
+                    if human:
+                        state = self.hass.states.get(self.entity)
+                        self.hass.states.async_set(
+                            self.entity,
+                            state.state,
+                            {**state.attributes, "volume_level": 0.9},
+                        )
+                    else:
+                        self.manager.closing = True
+                    now[0] = deadline + 1
+                    guarded.append(deadline)
+                    return guard()
+
+                kwargs["guard"] = change_before_guard
+            return await dispatch(service, data, **kwargs)
+
+        with (
+            patch.object(integration, "time", clock),
+            patch("custom_components.remote_announcements.service_calls.time", clock),
+            patch.object(self.manager.services, "call", changed_before_admission),
+        ):
+            await self.manager.restore_volume(playback, background=not human)
+
+        self.assertEqual(len(guarded), 1)
+        self.assertEqual(len(sampled), 1)
+        self.assertLess(*sampled[0])
+        self.assertEqual(self.calls, before_calls)
+        self.assertFalse(playback.recovery_failed)
+        self.assertIsNone(playback.recovery_reason)
+        self.assertEqual((self.manager.status, self.manager.public_status), before)
+        self.assertFalse(self.manager.volume_recovery)
+        self.assertFalse(self.manager.late_initials)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"],
+            0.9 if human else playback.applied,
+        )
+
+    async def test_human_change_at_expired_restore_admission_is_silent(self) -> None:
+        await self.check_expired_native_restore_yields(human=True)
+
+    async def test_background_close_at_expired_restore_admission_is_silent(
+        self,
+    ) -> None:
+        await self.check_expired_native_restore_yields(human=False)
 
     async def test_close_refuses_scheduled_late_initial_restore(self) -> None:
         attrs = await self.unobserved_initial()

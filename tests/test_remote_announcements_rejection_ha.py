@@ -8,6 +8,7 @@ import time
 import unittest
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -108,6 +109,69 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.public_status["rejection_dropped"], 0)
         self.assertIsNone(self.manager.public_status["rejection_drop_reason"])
         self.assertNotIn("private provider response", str(self.manager.public_status))
+
+    async def test_native_restore_deadline_reports_cue_recovery_unconfirmed(
+        self,
+    ) -> None:
+        await self.manager.announce("tv")
+        before = self.spoken_status()
+        old_level = self.hass.states.get(self.entity).attributes["volume_level"]
+        self.fixture.calls.clear()
+        now = [time.monotonic()]
+        clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+        dispatch = self.manager.services.call
+        sampled = []
+        expired = []
+
+        async def late_native_admission(service, data, **kwargs: Any) -> bool:
+            if (
+                service == ("media_player", "volume_set")
+                and data["volume_level"] == old_level
+            ):
+                guard = kwargs["guard"]
+                deadline = kwargs["deadline"]
+                sampled.append((now[0], deadline))
+
+                def expire_before_guard() -> bool:
+                    now[0] = deadline + 1
+                    expired.append(deadline)
+                    return guard()
+
+                kwargs["guard"] = expire_before_guard
+            return await dispatch(service, data, **kwargs)
+
+        with (
+            patch.object(integration, "time", clock),
+            patch("custom_components.remote_announcements.service_calls.time", clock),
+            patch.object(self.manager.services, "call", late_native_admission),
+            patch.object(rejection, "CUE_SETTLE_SECONDS", 0.001),
+        ):
+            await self.reject("native-restore-deadline")
+
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(len(sampled), 1)
+        self.assertLess(*sampled[0])
+        self.assertEqual(
+            [
+                data["volume_level"]
+                for name, data in self.fixture.calls
+                if name == "volume_set"
+            ],
+            [0.1],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.1
+        )
+        self.assertFalse(self.manager.volume_recovery)
+        self.assertFalse(self.manager.late_initials)
+        self.assertEqual(self.spoken_status(), before)
+        self.assertEqual(
+            self.manager.public_status["rejection_status"], "recovery_unconfirmed"
+        )
+        self.assertEqual(
+            self.manager.public_status["rejection_recovery_reason"],
+            "yandex_volume_recovery_unconfirmed",
+        )
 
     async def test_delivery_and_restore_failure_reports_recovery_unconfirmed(
         self,
