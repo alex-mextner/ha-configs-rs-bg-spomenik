@@ -22,6 +22,7 @@ from homeassistant.core import (
     SupportsResponse,
 )
 from homeassistant.core_config import async_process_ha_core_config
+from homeassistant.exceptions import Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -228,12 +229,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             supports_response=SupportsResponse.ONLY,
         )
         self.hass.services.async_register("input_text", "set_value", no_op)
-        self.hass.services.async_register(
-            integration.DOMAIN,
-            "adopt_label_volume",
-            self.manager.adopt_label_volume,
-            supports_response=SupportsResponse.ONLY,
-        )
+        self.manager.register_volume_service()
         music = yaml.safe_load((ROOT / "packages/music_remote.yaml").read_text())
         return Script(
             self.hass,
@@ -556,9 +552,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         first_restore, waiting = asyncio.Event(), asyncio.Event()
         original_check = self.manager.confirm_restored_volume
 
-        async def observe_check(playback) -> None:
+        async def observe_check(playback, expected) -> None:
             waiting.set()
-            await original_check(playback)
+            await original_check(playback, expected)
 
         async def delayed_restore(call) -> None:
             if call.data["volume_level"] == 0.2 and not first_restore.is_set():
@@ -723,6 +719,282 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.4, 0.7]
         )
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_new_digits_survive_lost_restore_and_selection_echoes(self) -> None:
+        attrs = await self.start_delayed_restore(muted=False)
+        script = self.music_script("speaker", self.entity)
+        for level in (0.7, 0.5):
+            await asyncio.wait_for(
+                script.async_run(
+                    {"command": "volume_set", "volume_level": level}, context=Context()
+                ),
+                0.8,
+            )
+        levels = [d["volume_level"] for n, d in self.calls if n == "volume_set"]
+        self.assertEqual(levels, [0.4, 0.8, 0.7, 0.5])
+        for stale in (0.8, 0.4, 0.7):
+            self.hass.states.async_set(
+                self.entity, "paused", {**attrs, "volume_level": stale}
+            )
+            await self.hass.async_block_till_done()
+            with self.assertRaisesRegex(ProviderNotReadyError, "recovery_pending"):
+                self.manager.check_aisis_volume_recovery(
+                    self.hass.states.get(self.entity)
+                )
+        # There is no intervening label or digit to sample the requested echo.
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.5}
+        )
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.8, "is_volume_muted": True},
+        )
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.manager.volume_recovery)
+        self.assertEqual(len(self.calls), 5)
+
+    async def test_different_digit_before_restore_admission_has_priority(self) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            supported_features=4,
+            is_volume_muted=True,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        script = self.music_script("speaker", self.entity)
+
+        async def silent_manual(call) -> None:
+            if call.data["volume_level"] == 0.7:
+                self.calls.append((call.service, dict(call.data)))
+                return
+            await self.media(call)
+
+        async def before_recovery(call) -> dict[str, str]:
+            await script.async_run(
+                {"command": "volume_set", "volume_level": 0.7}, context=Context()
+            )
+            return await self.native(call)
+
+        self.hass.services.async_register("media_player", "volume_set", silent_manual)
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            before_recovery,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+        await self.manager.announce("tv")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.4, 0.7]
+        )
+        self.assertNotIn("volume_mute", [n for n, _ in self.calls])
+
+    async def test_stalled_native_digit_ack_allows_next_explicit_digit(self) -> None:
+        await self.start_delayed_restore(muted=False)
+        release = asyncio.Event()
+
+        async def stalled(call) -> None:
+            if call.data["volume_level"] != 0.7:
+                await self.media(call)
+                return
+            self.calls.append((call.service, dict(call.data)))
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        script = self.music_script("speaker", self.entity)
+        self.hass.services.async_register("media_player", "volume_set", stalled)
+        try:
+            with patch.object(integration, "ATTEMPT_BUDGET", 0.05):
+                with self.assertRaises(integration.ServiceTimeoutError):
+                    await script.async_run(
+                        {"command": "volume_set", "volume_level": 0.7},
+                        context=Context(),
+                    )
+                await asyncio.wait_for(
+                    script.async_run(
+                        {"command": "volume_set", "volume_level": 0.5},
+                        context=Context(),
+                    ),
+                    0.5,
+                )
+        finally:
+            release.set()
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.8, 0.7, 0.5],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.5
+        )
+
+    async def test_same_digit_before_label_level_echo_dispatches_once(self) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        script = self.music_script("speaker", self.entity)
+
+        async def no_echo(call) -> None:
+            self.calls.append((call.service, dict(call.data)))
+
+        async def digit(call) -> dict[str, str]:
+            await script.async_run(
+                {"command": "volume_set", "volume_level": 0.4}, context=Context()
+            )
+            return await self.native(call)
+
+        self.hass.services.async_register("media_player", "volume_set", no_echo)
+        self.hass.services.async_register(
+            "yandex_station",
+            "send_command",
+            digit,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+        await self.manager.announce("tv")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.4, 0.4]
+        )
+        self.assertTrue(self.manager.volume_recovery)
+
+    async def test_aisis_remote_digit_supersedes_discarded_native_restore(self) -> None:
+        entity = self.prepare_aisis_native_volume(0.0)
+        self.aisis_restore_ack_only = True
+        state = self.hass.states.get(entity)
+        self.hass.states.async_set(
+            entity, state.state, {**state.attributes, "supported_features": 4}
+        )
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.15),
+            patch.object(integration, "RECOVERY_RESERVE", 0.08),
+        ):
+            await self.manager.announce("tv")
+        await self.music_script("speaker", entity).async_run(
+            {"command": "volume_set", "volume_level": 0.8}, context=Context()
+        )
+        self.assertEqual(self.aisis_native_levels, [4, 0, 8])
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_volume_service_optional_response_schema_and_permission(self) -> None:
+        self.manager.register_volume_service()
+        data = {"entity_id": self.entity, "volume_level": 0.7}
+
+        async def call(*, response=False, context=None, payload=None) -> dict | None:
+            return await self.hass.services.async_call(
+                integration.DOMAIN,
+                "adopt_label_volume",
+                data if payload is None else payload,
+                blocking=True,
+                return_response=response,
+                context=context,
+            )
+
+        self.assertIsNone(await call())
+        self.assertEqual(await call(response=True), {"status": "not_applicable"})
+        with self.assertRaises(cv.vol.Invalid):
+            await call(payload={**data, "volume_level": 1.1})
+        self.hass.auth = SimpleNamespace(async_get_user=AsyncMock(return_value=None))
+        context = Context(user_id="missing-user")
+        with self.assertRaises(UnknownUser):
+            await call(context=context)
+        self.hass.auth.async_get_user.return_value = SimpleNamespace(
+            is_admin=False, permissions=SimpleNamespace(check_entity=lambda *_: False)
+        )
+        with self.assertRaises(Unauthorized):
+            await call(context=context)
+        self.assertFalse(self.calls)
+        playback = self.manager.playback("yandex", self.entity)
+        state = self.hass.states.get(self.entity)
+        self.hass.states.async_set(
+            self.entity,
+            state.state,
+            {**state.attributes, "volume_level": playback.applied},
+        )
+        playback.raised = True
+        self.manager.active_label = playback
+        self.assertEqual(
+            await call(
+                response=True, payload={**data, "volume_level": playback.applied}
+            ),
+            {"status": "kept"},
+        )
+        self.assertFalse(self.calls)
+        self.assertEqual(await call(response=True), {"status": "sent"})
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.7]
+        )
+
+    async def test_digit_waiting_on_remute_lock_fences_restore_admitted_inside(
+        self,
+    ) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=True,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        before_admission, entered, release = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+        dispatch = self.manager.call
+        handoff = self.manager.handoff_volume
+        script = self.music_script("speaker", self.entity)
+
+        async def delay_admission(service, entity, **kwargs: object) -> bool:
+            if service == "volume_set" and kwargs.get("volume_level") == 0.8:
+                before_admission.set()
+                await release.wait()
+            return await dispatch(service, entity, **kwargs)
+
+        async def selected(*args: object) -> None:
+            entered.set()
+            await handoff(*args)
+
+        async def native(call) -> None:
+            if call.data["volume_level"] == 0.4:
+                await self.media(call)
+                return
+            self.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register("media_player", "volume_set", native)
+        with (
+            patch.object(self.manager, "call", delay_admission),
+            patch.object(self.manager, "handoff_volume", selected),
+        ):
+            label = asyncio.create_task(self.manager.announce("tv"))
+            await asyncio.wait_for(before_admission.wait(), 0.5)
+            self.assertFalse(self.manager.volume_recovery)
+            digit = asyncio.create_task(
+                script.async_run(
+                    {"command": "volume_set", "volume_level": 0.7}, context=Context()
+                )
+            )
+            await asyncio.wait_for(entered.wait(), 0.5)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(digit, label), 0.8)
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.8, 0.7],
+        )
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "is_volume_muted": False}
+        )
+        await self.hass.async_block_till_done()
+        with self.assertRaisesRegex(ProviderNotReadyError, "recovery_pending"):
+            self.manager.check_aisis_volume_recovery(self.hass.states.get(self.entity))
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.7, "is_volume_muted": False},
+        )
+        await self.hass.async_block_till_done()
         self.assertFalse(self.manager.volume_recovery)
 
     async def test_digit_protects_new_choice_after_unmuted_restore(self) -> None:

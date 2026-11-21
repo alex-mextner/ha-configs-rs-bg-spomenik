@@ -17,8 +17,8 @@ reject:
       selector:
         text:
 adopt_label_volume:
-  name: Keep the current label volume
-  description: Keep an explicitly selected speaker level during a label or order its volume command after a pending restore.
+  name: Select speaker volume during an announcement
+  description: Keep an already observed level or send the explicit speaker choice during announcement recovery. The optional status is kept, sent, or not_applicable.
   fields:
     entity_id:
       name: Speaker

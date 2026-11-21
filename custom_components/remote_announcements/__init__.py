@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
-from dataclasses import dataclass
+from contextlib import nullcontext, suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +18,7 @@ from homeassistant.components.tts import async_get_media_source_audio
 from homeassistant.components.tts.media_source import generate_media_source_id
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import SupportsResponse, callback, valid_entity_id
+from homeassistant.exceptions import Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry, discovery, entity_registry
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -45,7 +46,7 @@ from .providers import (
     validate_native_response,
 )
 from .rejection import CUE_BUDGET, RejectionQueue, play_rejection
-from .service_calls import ServiceCalls
+from .service_calls import ServiceCalls, ServiceTimeoutError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -132,20 +133,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supports_response=SupportsResponse.OPTIONAL,
     )
 
-    hass.services.async_register(
-        DOMAIN,
-        "adopt_label_volume",
-        manager.adopt_label_volume,
-        schema=vol.Schema(
-            {
-                vol.Required("entity_id"): cv.entity_id,
-                vol.Required("volume_level"): vol.All(
-                    vol.Coerce(float), vol.Range(min=0, max=1)
-                ),
-            }
-        ),
-        supports_response=SupportsResponse.ONLY,
-    )
+    manager.register_volume_service()
 
     async def start(_event: Event | None = None) -> None:
         """Seed the initial target before enabling change announcements."""
@@ -174,7 +162,54 @@ class VolumeRestore:
     original: float
     applied: float
     expect_mute: bool = False
-    explicit_selection: bool = False
+    admitted: float = field(default_factory=time.time, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class ManualVolume:
+    """Fence automatic playback until a human level is observed."""
+
+    selected: float
+    previous_levels: frozenset[float]
+    before: State | None
+    admitted: float = field(default_factory=time.time, compare=False, repr=False)
+
+    def confirmed(self, state: State, previous: State | None) -> bool:
+        """Ignore cached, unrelated and older write echoes."""
+        if state.last_updated_timestamp < self.admitted:
+            return False
+        level = state.attributes.get("volume_level")
+        if not reliable_volume(state):
+            return False
+        previous = previous or self.before
+        if (
+            previous
+            and reliable_volume(previous)
+            and (
+                can_restore_volume(
+                    level, previous.attributes["volume_level"], muted=False
+                )
+                and state.attributes.get("is_volume_muted")
+                == previous.attributes.get("is_volume_muted")
+            )
+        ):
+            return False
+        return can_restore_volume(level, self.selected, muted=False) or not any(
+            can_restore_volume(level, stale, muted=False)
+            for stale in self.previous_levels
+        )
+
+
+def reliable_volume(state: State) -> bool:
+    """Check for actual local level feedback before retiring ownership."""
+    volume = state.attributes.get("volume_level")
+    return (
+        state.state not in ("unknown", "unavailable")
+        and not state.attributes.get("assumed_state")
+        and not state.attributes.get("restored")
+        and type(volume) in (float, int)
+        and 0 <= volume <= 1
+    )
 
 
 class SpeechPlayback:
@@ -263,15 +298,27 @@ class Manager:
         self.generation = 0
         self.closing = False
         self.services = ServiceCalls(hass)
-        self.volume_recovery: dict[str, VolumeRestore] = {}
+        self.volume_recovery: dict[str, VolumeRestore | ManualVolume] = {}
         self.active_label: SpeechPlayback | None = None
+        self.selection_lock = asyncio.Lock()
+        self.manual_writes: set[asyncio.Task] = set()
         self.selecting_volume: set[str] = set()
+        self.unsubscribe_volume = async_track_state_change_event(
+            hass,
+            [config["yandex_entity"], config["aisis_entity"]],
+            self.observe_recovery,
+        )
         self.volume_waiters: set[asyncio.Event] = set()
         self.pending_remutes: dict[str, tuple[SpeechPlayback, asyncio.Task[None]]] = {}
 
     async def close(self) -> None:
         """Stop target listening while retaining unfinished provider ownership."""
         self.closing = True
+        if self.unsubscribe_volume:
+            self.unsubscribe_volume()
+            self.unsubscribe_volume = None
+        for task in self.manual_writes:
+            task.cancel()
         for waiter in self.volume_waiters:
             waiter.set()
         if self.unsubscribe:
@@ -523,24 +570,34 @@ class Manager:
     def volume_recovered(state: State, pending: VolumeRestore) -> bool:
         """Accept a confirmed restore or a user's distinct level or mute."""
         volume = state.attributes.get("volume_level")
-        if (
-            state.state in ("unknown", "unavailable")
-            or type(volume) not in (int, float)
-            or not 0.0 <= volume <= 1.0
-        ):
+        if not reliable_volume(state):
             return False
         at_original = can_restore_volume(volume, pending.original, muted=False)
         at_override = can_restore_volume(volume, pending.applied, muted=False)
         muted = state.attributes.get("is_volume_muted") is True
-        if pending.explicit_selection:
-            # Ignore the old remembered level/mute until the later user write echoes.
-            return (at_original and (not muted or pending.original == 0)) or (
-                not at_original and not at_override
-            )
         if pending.expect_mute:
             # Yandex may report mute before its remembered volume echo.
             return (muted and at_original) or (not at_original and not at_override)
         return muted or at_original or not at_override
+
+    @callback
+    def observe_recovery(self, event: Event[EventStateChangedData]) -> None:
+        """Retire a proven write even when no next label or remote key samples it."""
+        state = event.data["new_state"]
+        if state is None:
+            return
+        entity = state.entity_id
+        pending = self.volume_recovery.get(entity)
+        if pending is None or state.last_updated_timestamp < pending.admitted:
+            return
+        if isinstance(pending, ManualVolume):
+            settled = pending.confirmed(state, event.data["old_state"])
+        else:
+            settled = entity not in self.pending_remutes and self.volume_recovered(
+                state, pending
+            )
+        if settled:
+            self.volume_recovery.pop(entity)
 
     def check_aisis_volume_recovery(self, state: State) -> None:
         """Check pending speech restores before either labels or quiet cues."""
@@ -554,7 +611,12 @@ class Manager:
         pending = self.volume_recovery.get(state.entity_id)
         if pending is None:
             return
-        if self.volume_recovered(state, pending):
+        settled = (
+            pending.confirmed(state, None)
+            if isinstance(pending, ManualVolume)
+            else self.volume_recovered(state, pending)
+        )
+        if settled:
             self.volume_recovery.pop(state.entity_id)
             return
         raise ProviderNotReadyError(self.recovery_reason(state.entity_id, "pending"))
@@ -708,101 +770,165 @@ class Manager:
             )
         )
 
-    async def adopt_label_volume(self, call: ServiceCall) -> dict[str, bool]:
+    def register_volume_service(self) -> None:
+        """Register the authorized speaker-volume action and its optional result."""
+        self.hass.services.async_register(
+            DOMAIN,
+            "adopt_label_volume",
+            self.adopt_label_volume,
+            schema=vol.Schema(
+                {
+                    vol.Required("entity_id"): cv.entity_id,
+                    vol.Required("volume_level"): vol.All(
+                        vol.Coerce(float), vol.Range(min=0, max=1)
+                    ),
+                }
+            ),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+
+    async def adopt_label_volume(self, call: ServiceCall) -> dict[str, str]:
         """Transfer an observed temporary label level to the matching remote digit."""
         entity = call.data["entity_id"]
         if call.context.user_id:
             user = await self.hass.auth.async_get_user(call.context.user_id)
-            if user is None or not user.permissions.check_entity(
+            if user is None:
+                raise UnknownUser(context=call.context)
+            if not user.is_admin and not user.permissions.check_entity(
                 entity, POLICY_CONTROL
             ):
-                return {"adopted": False}
+                raise Unauthorized(
+                    context=call.context, entity_id=entity, permission=POLICY_CONTROL
+                )
         if self.closing or call.data["volume_level"] <= 0:
-            return {"adopted": False}
-        if pending := self.volume_recovery.get(entity):
-            if entity in self.selecting_volume:
-                raise ProviderNotReadyError(self.recovery_reason(entity, "pending"))
+            return {"status": "not_applicable"}
+        async with self.selection_lock:
+            if self.closing:
+                return {"status": "not_applicable"}
+            pending = self.volume_recovery.get(entity)
+            playback = self.active_label
+            remute = self.pending_remutes.get(entity)
+            if (
+                not pending
+                and not remute
+                and (
+                    playback is None or playback.entity != entity or not playback.raised
+                )
+            ):
+                return {"status": "not_applicable"}
+            selected = call.data["volume_level"]
+            if playback is not None and playback.entity == entity:
+                state = self.hass.states.get(entity)
+                adopt_current = (
+                    pending is None
+                    and remute is None
+                    and state is not None
+                    and reliable_volume(state)
+                    and can_restore_volume(selected, playback.applied, muted=False)
+                    and self.volume_unchanged(playback, playback.applied)
+                )
+                if adopt_current:
+                    playback.user_changed_volume = True
+                    return {"status": "kept"}
+            if not self.hass.services.has_service("media_player", "volume_set"):
+                message = "speaker_volume_service_unavailable"
+                raise ProviderNotReadyError(message)
             self.selecting_volume.add(entity)
             try:
-                return {"adopted": await self.handoff_volume(call, pending)}
+                await self.handoff_volume(call, pending)
+                return {"status": "sent"}
             finally:
                 self.selecting_volume.discard(entity)
-        playback = self.active_label
-        state = self.hass.states.get(entity)
-        if (
-            state is None
-            or state.state in {"unknown", "unavailable"}
-            or state.attributes.get("restored")
-            or state.attributes.get("assumed_state")
-            or "volume_level" not in state.attributes
-            or not isinstance(state.attributes["volume_level"], (int, float))
-            or playback is None
-            or playback.entity != call.data["entity_id"]
-            or playback.applied != call.data["volume_level"]
-            or playback.entity in self.volume_recovery
-            or not self.volume_unchanged(playback, playback.applied)
-        ):
-            return {"adopted": False}
-        playback.user_changed_volume = True
-        return {"adopted": True}
 
-    async def handoff_volume(self, call: ServiceCall, pending: VolumeRestore) -> bool:
-        """Order the remote choice after the prior acknowledged speaker write."""
+    async def handoff_volume(
+        self, call: ServiceCall, pending: VolumeRestore | ManualVolume | None
+    ) -> None:
+        """Dispatch each user choice once, independently of a missing earlier echo."""
         entity, selected = call.data["entity_id"], call.data["volume_level"]
+        previous_levels: set[float] = set()
+        if isinstance(pending, VolumeRestore):
+            previous_levels.update((pending.original, pending.applied))
+            if can_restore_volume(selected, pending.applied, muted=False):
+                # When selecting the still-visible temporary level, give the previous
+                # restore one ACK window to distinguish a later equal-volume echo.
+                with suppress(ProviderNotReadyError):
+                    await self.wait_volume_echo(
+                        entity, pending, time.monotonic() + self.services.limit
+                    )
+        elif isinstance(pending, ManualVolume):
+            previous_levels.update(pending.previous_levels)
+            previous_levels.add(pending.selected)
         remute = self.pending_remutes.get(entity)
-        deadline = time.monotonic() + REMUTE_GRACE
-        if remute:
-            deadline = min(deadline, remute[0].recovery_deadline + REMUTE_GRACE)
-        lock = remute[0].remute_lock if remute else nullcontext()
-        async with asyncio.timeout(max(0, deadline - time.monotonic())):
-            async with lock:
-                # Mute admission could precede the lock. Wait for that newer write.
-                expected = self.volume_recovery.get(entity, pending)
-                initial = self.hass.states.get(entity)
-                state = await self.wait_volume_echo(entity, expected, deadline)
-                if self.closing:
-                    message = "speaker_recovery_stopped"
-                    raise ProviderNotReadyError(message)
-                if not can_restore_volume(
-                    state.attributes.get("volume_level"), expected.original, muted=False
-                ):
-                    if self.volume_recovery.get(entity) is expected:
-                        self.volume_recovery.pop(entity)
-                    if remute:
-                        remute[0].user_changed_volume = True
-                        remute[1].cancel()
-                    if state is initial:
-                        # This newer digit follows a previous manual change.
-                        return False
-                    message = "speaker_volume_changed_during_remote_selection"
-                    raise ProviderNotReadyError(message)
-                if not self.hass.services.has_service("media_player", "volume_set"):
-                    message = "speaker_volume_service_unavailable"
-                    raise ProviderNotReadyError(message)
-                # From this dispatch onward a provider error or lost acknowledgement
-                # cannot prove that the user's command stayed on this host.
-                self.volume_recovery[entity] = VolumeRestore(
-                    selected, expected.original, explicit_selection=True
-                )
-                if remute:
-                    remute[0].user_changed_volume = True
-                    remute[1].cancel()
-                await self.hass.services.async_call(
-                    "media_player",
-                    "volume_set",
-                    {"entity_id": entity, "volume_level": selected},
-                    blocking=True,
-                    context=call.context,
-                )
-                return True
+        # An admitted native restore holds this lock only for its bounded ACK.
+        async with remute[0].remute_lock if remute else nullcontext():
+            if self.closing:
+                message = "speaker_recovery_stopped"
+                raise ProviderNotReadyError(message)
+            if not self.hass.services.has_service("media_player", "volume_set"):
+                message = "speaker_volume_service_unavailable"
+                raise ProviderNotReadyError(message)
+            playback = self.active_label
+            if playback and playback.entity == entity:
+                previous_levels.add(playback.applied)
+                playback.user_changed_volume = True
+            if remute:
+                # Its original level may have been dispatched while we waited.
+                previous_levels.update((remute[0].old_volume, remute[0].applied))
+                remute[0].user_changed_volume = True
+                remute[1].cancel()
+            before = self.hass.states.get(entity)
+            if before and reliable_volume(before):
+                previous_levels.add(before.attributes["volume_level"])
+            # Admission precedes the user's actual native dispatch, including lost ACKs.
+            manual = ManualVolume(selected, frozenset(previous_levels), before)
+            self.volume_recovery[entity] = manual
+            await self.send_manual_volume(call)
+        current = self.hass.states.get(entity)
+        if (
+            self.volume_recovery.get(entity) is manual
+            and current
+            and manual.confirmed(current, None)
+        ):
+            self.volume_recovery.pop(entity)
 
-    async def confirm_restored_volume(self, playback: SpeechPlayback) -> None:
-        """Wait for actual readback within the shared recovery deadline."""
-        await self.wait_volume_echo(
-            playback.entity,
-            self.volume_recovery[playback.entity],
-            playback.recovery_deadline,
+    async def send_manual_volume(self, call: ServiceCall) -> None:
+        """Bound this command's own ACK independently of previous writes."""
+        task = self.hass.async_create_background_task(
+            self.hass.services.async_call(
+                "media_player",
+                "volume_set",
+                dict(call.data),
+                blocking=True,
+                context=call.context,
+            ),
+            "remote-manual-speaker-volume",
+            eager_start=True,
         )
+        self.manual_writes.add(task)
+
+        def finished(done: asyncio.Task) -> None:
+            self.manual_writes.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finished)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=ATTEMPT_BUDGET)
+            if not done:
+                raise ServiceTimeoutError
+            task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+
+    async def confirm_restored_volume(
+        self, playback: SpeechPlayback, expected: VolumeRestore
+    ) -> None:
+        """Wait only while this transaction still owns the restore."""
+        if self.volume_recovery.get(playback.entity) is expected:
+            await self.wait_volume_echo(
+                playback.entity, expected, playback.recovery_deadline
+            )
 
     async def wait_volume_echo(
         self, entity: str, expected: VolumeRestore, deadline: float
@@ -867,6 +993,7 @@ class Manager:
         """Restore volume, then dispatch zero only after its positive local echo."""
         entity = playback.entity
         deadline = playback.recovery_deadline + REMUTE_GRACE
+        expected = VolumeRestore(playback.old_volume, playback.applied)
         try:
             async with playback.remute_lock:
 
@@ -875,9 +1002,7 @@ class Manager:
                         playback, playback.applied
                     ):
                         return False
-                    self.volume_recovery[entity] = VolumeRestore(
-                        playback.old_volume, playback.applied
-                    )
+                    self.volume_recovery[entity] = expected
                     return True
 
                 if not await self.call(
@@ -888,9 +1013,11 @@ class Manager:
                     guard=admit_level,
                 ):
                     return
-            observed = await self.wait_volume_echo(
-                entity, self.volume_recovery[entity], deadline
-            )
+            if self.volume_recovery.get(entity) is not expected:
+                return
+            observed = await self.wait_volume_echo(entity, expected, deadline)
+            if self.volume_recovery.get(entity) is not expected:
+                return
             if not can_restore_volume(
                 observed.attributes.get("volume_level"),
                 playback.old_volume,
@@ -903,12 +1030,17 @@ class Manager:
                     if self.closing or playback.user_changed_volume:
                         return
 
+                    expected = VolumeRestore(
+                        playback.old_volume, playback.applied, expect_mute=True
+                    )
+
                     def admit_mute() -> bool:
-                        if not self.remembered_level_observed(playback):
+                        if (
+                            entity in self.selecting_volume
+                            or not self.remembered_level_observed(playback)
+                        ):
                             return False
-                        self.volume_recovery[entity] = VolumeRestore(
-                            playback.old_volume, playback.applied, expect_mute=True
-                        )
+                        self.volume_recovery[entity] = expected
                         return True
 
                     if self.remembered_level_observed(playback):
@@ -919,8 +1051,13 @@ class Manager:
                             deadline=deadline,
                             guard=admit_mute,
                         )
-            await self.wait_volume_echo(entity, self.volume_recovery[entity], deadline)
-            if not playback.user_changed_volume:
+            if self.volume_recovery.get(entity) is not expected:
+                return
+            await self.wait_volume_echo(entity, expected, deadline)
+            if (
+                self.volume_recovery.get(entity) is expected
+                and not playback.user_changed_volume
+            ):
                 self.volume_recovery.pop(entity, None)
         finally:
             self.pending_remutes.pop(entity, None)
@@ -982,7 +1119,7 @@ class Manager:
             ):
                 return
             if verify_volume:
-                await self.confirm_restored_volume(playback)
+                await self.confirm_restored_volume(playback, expected)
                 if self.volume_recovery.get(playback.entity) is expected:
                     self.volume_recovery.pop(playback.entity, None)
         except Exception as error:

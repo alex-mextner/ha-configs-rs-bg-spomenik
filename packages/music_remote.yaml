@@ -396,9 +396,13 @@ script:
                   entity_id: "{{ target_entity }}"
                   volume_level: "{{ volume_level | float }}"
                 response_variable: label_volume
-              - if: "{{ label_volume.adopted }}"
+              - if: "{{ label_volume.status == 'kept' }}"
                 then:
                   - stop: "Выбранная громкость уже установлена на колонке."
+                    response_variable: result
+              - if: "{{ label_volume.status == 'sent' }}"
+                then:
+                  - stop: "Выбранная громкость передана колонке."
                     response_variable: result
       - if: >-
           {{ cmd == 'mute_toggle'
