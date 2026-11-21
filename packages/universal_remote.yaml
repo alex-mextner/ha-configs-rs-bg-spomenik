@@ -974,7 +974,7 @@ script:
       button:
         description: Button name (e.g. 'left', 'volume_up', 'info')
       captured:
-        description: The receiver has already renewed this physical press
+        description: The receiver owns this physical press's activity timing
     sequence:
       - variables:
           digit_num: "{{ button | int(-1) }}"
@@ -1145,7 +1145,9 @@ automation:
               - action: script.audio_mode_dispatch
                 data:
                   button: "{{ button }}"
-                  captured: "{{ route.speaker is defined }}"
+                  # Physical timing stays receiver-owned even if its capture
+                  # has expired; fallback routing is not standalone activity.
+                  captured: true
           - conditions: "{{ button in ['volume_up','volume_down','mute'] }}"
             sequence:
               - action: script.remote_volume

@@ -1347,6 +1347,50 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         self.assertAlmostEqual(self.controller.mode.audio_expires_at, now + 60)
 
+    async def test_missing_physical_capture_never_extends_speaker_focus(self) -> None:
+        for evicted in (False, True):
+            with self.subTest(evicted=evicted):
+                self.reset()
+                await self.hass.async_block_till_done()
+                clock = SimpleNamespace(now=time.time() - 30)
+                self.controller.mode.clock = lambda clock=clock: clock.now
+                self.controller.physical_press("audio", clock.now - 0.5)
+                self.controller.physical_press("audio", clock.now)
+                deadline = clock.now + 60
+                # Still inside the dispatcher's five-second freshness window,
+                # but a late dispatch must not become new speaker activity.
+                received = clock.now + 28
+                if evicted:
+                    self.controller.physical_press("play", received)
+                    deadline = received + 60
+                    # Real, independent light captures evict this old Play without
+                    # renewing speaker activity or dispatching any hardware action.
+                    for index in range(controller_module._CAPTURED_ROUTE_LIMIT):
+                        self.controller.physical_press(
+                            "red", received + (index + 1) / 1000
+                        )
+                await self.controller.async_mirror()
+                await self.hass.async_block_till_done()
+                self.assertNotIn(
+                    self.controller._capture_key("play", received * 1000),
+                    self.controller._captured_routes,
+                )
+                self.calls.clear()
+                clock.now += 30
+                await self.dispatch_captured("play", received)
+                await self.hass.async_block_till_done()
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("script.music_remote_command", {"command": "play_pause"})],
+                )
+                clock.now = deadline + 0.01
+                self.controller.refresh()
+                await self.controller.async_mirror()
+                self.assertFalse(self.controller.mode.audio)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+
     async def test_audio_double_tap_has_no_single_play_side_effect_and_needs_no_hold(
         self,
     ) -> None:

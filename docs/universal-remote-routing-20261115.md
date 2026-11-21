@@ -66,6 +66,9 @@ The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded
 256-entry cache and cannot replay the press. Only that receiver supplies trusted
 physical timestamps; unknown or evicted event timestamps never renew a lease.
+Physical speaker dispatch keeps that ownership when it falls back to the current
+speaker mode. Direct `audio_mode_dispatch` calls without a physical marker still
+renew speaker activity through their compatibility pulse.
 Before an INPUT or inactivity callback commits, the controller drains already
 ready native input, so a second capture at exactly 1000 ms wins even when HA
 processes it after the callback was due. A capture just before lease expiry is
