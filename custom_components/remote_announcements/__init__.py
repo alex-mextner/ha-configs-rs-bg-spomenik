@@ -1360,7 +1360,7 @@ class Manager:
     ) -> asyncio.Task[None]:
         """Release only the completed task, even if cancelled before startup."""
         task = self.hass.async_create_background_task(
-            self.restore_volume(playback)
+            self.restore_volume(playback, background=True)
             if initial and not playback.muted_before
             else self.restore_remembered_mute(playback),
             "remote-announcements-volume-recovery",
@@ -1392,9 +1392,13 @@ class Manager:
         )
 
     async def restore_volume(
-        self, playback: SpeechPlayback, *, report_status: bool = True
+        self,
+        playback: SpeechPlayback,
+        *,
+        report_status: bool = True,
+        background: bool = False,
     ) -> None:
-        """Restore volume and mute only while the original guards hold."""
+        """Restore within budget; allow only foreground cleanup during close."""
         if playback.initial_admitted is not None and not playback.user_changed_volume:
             state = self.hass.states.get(playback.entity)
             if state and playback.owns_level(state):
@@ -1437,12 +1441,9 @@ class Manager:
 
             def admit_restore() -> bool:
                 if (
-                    self.closing
+                    (self.closing and background)
                     or not self.volume_unchanged(playback, playback.applied)
-                    or (
-                        self.late_initials.get(playback.entity) is playback
-                        and time.monotonic() >= playback.recovery_deadline
-                    )
+                    or time.monotonic() >= playback.recovery_deadline
                 ):
                     return False
                 if verify_volume:

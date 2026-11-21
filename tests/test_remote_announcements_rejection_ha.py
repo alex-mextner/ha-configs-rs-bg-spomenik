@@ -585,6 +585,45 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "original-track",
         )
 
+    async def test_close_restores_observed_quiet_cue_volume(self) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=False,
+        )
+        self.hass.states.async_set(self.entity, "playing", attrs)
+        release = self.fixture.hold_ack["volume_set"] = asyncio.Event()
+        started = self.fixture.ack_started["volume_set"] = asyncio.Event()
+        self.manager.rejections.submit("device_off", "close-observed-cue")
+        closing = None
+        try:
+            await asyncio.wait_for(started.wait(), 0.5)
+            await asyncio.sleep(0)
+            self.assertEqual(
+                self.hass.states.get(self.entity).attributes["volume_level"], 0.1
+            )
+            closing = asyncio.create_task(self.manager.close())
+            await asyncio.sleep(0)
+            self.assertTrue(self.manager.closing)
+        finally:
+            release.set()
+            if closing is not None:
+                await asyncio.wait_for(closing, 0.5)
+            else:
+                await self.manager.rejections.drain()
+        self.assertEqual(
+            [
+                data["volume_level"]
+                for name, data in self.fixture.calls
+                if name == "volume_set"
+            ],
+            [0.1, 0.8],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+        self.assertEqual(self.fixture.speech_started, [])
+
     async def test_stop_reports_failed_recovery_without_changing_speech_status(
         self,
     ) -> None:

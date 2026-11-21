@@ -1929,6 +1929,118 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 3)
         self.assertFalse(self.manager.volume_recovery)
 
+    async def check_close_restores_active_label(
+        self, *, playing: bool, restore_expected: bool = True
+    ) -> None:
+        applied = 0.6 if playing else 0.4
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=False,
+        )
+        self.hass.states.async_set(
+            self.entity, "playing" if playing else "paused", attrs
+        )
+        release = self.hold_ack["volume_set"] = asyncio.Event()
+        started = self.ack_started["volume_set"] = asyncio.Event()
+        self.manager.queue.debounce = 0
+        self.manager.queue.submit("tv")
+        closing = None
+        try:
+            await asyncio.wait_for(started.wait(), 0.5)
+            await asyncio.sleep(0)
+            playback = self.manager.active_label
+            assert playback is not None
+            self.assertTrue(playback.override_observed)
+            self.assertEqual(
+                self.hass.states.get(self.entity).attributes["volume_level"],
+                applied,
+            )
+            closing = asyncio.create_task(self.manager.close())
+            await asyncio.sleep(0)
+            self.assertTrue(self.manager.closing)
+        finally:
+            release.set()
+            if closing is not None:
+                await asyncio.wait_for(closing, 0.5)
+            else:
+                await self.manager.queue.drain()
+        self.assertEqual(
+            [data["volume_level"] for name, data in self.calls if name == "volume_set"],
+            [applied, 0.8] if restore_expected else [applied],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"],
+            0.8 if restore_expected else applied,
+        )
+        self.assertEqual(self.speech_started, [])
+
+    async def test_close_restores_observed_idle_label_volume(self) -> None:
+        await self.check_close_restores_active_label(playing=False)
+
+    async def test_close_restores_observed_playing_label_volume(self) -> None:
+        await self.check_close_restores_active_label(playing=True)
+
+    async def test_close_refuses_foreground_restore_after_native_deadline(
+        self,
+    ) -> None:
+        now = [time.monotonic()]
+        clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+        dispatch = self.manager.services.call
+        expired = []
+
+        async def late_native_admission(service, data, **kwargs: Any) -> bool:
+            if (
+                service == ("media_player", "volume_set")
+                and data["volume_level"] == 0.8
+            ):
+                guard = kwargs["guard"]
+                deadline = kwargs["deadline"]
+                self.assertLess(now[0], deadline)
+
+                def expire_before_guard() -> bool:
+                    # ServiceCalls already sampled its positive remaining budget.
+                    now[0] = deadline + 1
+                    expired.append(deadline)
+                    return guard()
+
+                kwargs["guard"] = expire_before_guard
+            return await dispatch(service, data, **kwargs)
+
+        with (
+            patch.object(integration, "time", clock),
+            patch("custom_components.remote_announcements.service_calls.time", clock),
+            patch.object(self.manager.services, "call", late_native_admission),
+        ):
+            await self.check_close_restores_active_label(
+                playing=False, restore_expected=False
+            )
+        self.assertEqual(len(expired), 1)
+
+    async def test_close_refuses_scheduled_late_initial_restore(self) -> None:
+        attrs = await self.unobserved_initial()
+        prior = self.manager.late_initials[self.entity]
+        prior.cleanup_deadline = time.monotonic() + 1
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": prior.applied}
+        )
+        self.manager.reconcile_initial(self.hass.states.get(self.entity))
+        task = self.manager.pending_remutes[self.entity][1]
+        self.assertFalse(task.done())
+
+        await asyncio.wait_for(self.manager.close(), 0.5)
+
+        self.assertTrue(task.done())
+        self.assertFalse(self.manager.late_initials)
+        self.assertFalse(self.manager.pending_remutes)
+        self.assertEqual(
+            [data["volume_level"] for name, data in self.calls if name == "volume_set"],
+            [0.4],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.4
+        )
+
     async def test_shutdown_cancels_late_remute_before_echo(self) -> None:
         attrs = await self.start_delayed_restore()
         task = self.manager.pending_remutes[self.entity][1]
