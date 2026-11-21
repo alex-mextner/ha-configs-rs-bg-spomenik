@@ -288,7 +288,8 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             changed=self.controller._changed,
             wake=self.controller._wake,
         )
-        self.controller._clear_audio = False
+        self.controller._audio_mirror = None
+        self.controller._pending_audio = None
         self.controller._captured_routes.clear()
         self.controller._captured_press_ids.clear()
         self.controller._context_press_ids.clear()
@@ -1226,6 +1227,108 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.appliance_calls(), [])
 
+    async def test_physical_audio_bursts_keep_the_capture_order(self) -> None:
+        for dismissal in ("audio", "back", "exit"):
+            with self.subTest(dismissal=dismissal):
+                self.reset(("tv", "on", "off"))
+                self.hass.states.async_set(TV, "on")
+                at = time.time() - 1
+                self.controller.physical_press(dismissal, at)
+                self.controller.physical_press("play", at + 0.1)
+                self.assertFalse(self.controller.mode.audio)
+                # Dispatch in reverse: neither press can adopt the other's owner.
+                await self.dispatch_captured("play", at + 0.1)
+                await self.dispatch_captured(dismissal, at)
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("media_player.media_play_pause", {"entity_id": [TV]})],
+                )
+        self.reset()
+        at = time.time() - 1
+        with patch.object(self.controller, "async_mirror", return_value=None):
+            for button, offset in (("audio", 0), ("audio", 0.3), ("play", 0.4)):
+                self.controller.physical_press(button, at + offset)
+        self.assertTrue(self.controller.mode.audio)
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "off")
+        for button, offset in (("play", 0.4), ("audio", 0.3), ("audio", 0)):
+            await self.dispatch_captured(button, at + offset)
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+        self.assertTrue(self.controller.mode.audio)
+        # A later Home must not reinterpret Audio's already captured dismissal.
+        self.hass.states.async_set(TV, "on")
+        self.controller.physical_press("audio", at + 0.5)
+        self.controller.physical_press("home", at + 0.6)
+        await self.dispatch_captured("home", at + 0.6)
+        await self.dispatch_captured("audio", at + 0.5)
+        self.assertFalse(self.controller.mode.audio)
+        self.assertEqual(
+            sum(name == "script.music_remote_command" for name, _ in self.calls), 1
+        )
+
+    async def test_physical_single_audio_waits_for_the_window_then_runs_once(
+        self,
+    ) -> None:
+        self.reset()
+        await self.run_automation("universal_remote_dispatcher", "audio")
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+        self.assertFalse(self.controller.mode.audio)
+        self.assertEqual(
+            await self.controller.async_prepare({"button": "audio"}),
+            {"pair": "tv", "native": False},
+        )
+
+    async def test_speaker_capture_renews_before_expiry_and_ignores_a_stale_ack(
+        self,
+    ) -> None:
+        self.reset()
+        now = time.time()
+        self.controller.mode.clock = lambda: now
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_on(_call: ServiceCall) -> None:
+            entered.set()
+            await release.wait()
+            self.capture_boolean("turn_on", "input_boolean.audio_mode", None, {})
+            self.controller.refresh()
+
+        self.hass.services.async_register("input_boolean", "turn_on", delayed_on)
+        self.controller.physical_press("audio", now - 0.5)
+        self.controller.physical_press("audio", now)
+        old_deadline = self.controller.mode.audio_expires_at
+        self.controller.physical_press("play", now + 59.9)
+        # A timer processing a ready receiver burst sees the renewed lease prior
+        # to the delayed YAML/control helper writing anything.
+        now = old_deadline + 0.01
+        self.controller.refresh()
+        self.assertTrue(self.controller.mode.audio)
+        self.assertAlmostEqual(
+            self.controller.mode.audio_expires_at, old_deadline + 59.9
+        )
+        # An in-flight ON projection returns after capture already dismissed.
+        mirror = asyncio.create_task(self.controller.async_mirror())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.controller.physical_press("back", now)
+        finally:
+            release.set()
+            await mirror
+        await self.controller.async_mirror()
+        self.assertFalse(self.controller.mode.audio)
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "off")
+        # External compatibility selection starts its own bounded lease.
+        self.hass.states.async_set("input_boolean.audio_mode", "on")
+        self.controller.refresh()
+        self.assertTrue(self.controller.mode.audio)
+        now += 60
+        self.controller.refresh()
+        self.assertFalse(self.controller.mode.audio)
+
     async def test_audio_double_tap_has_no_single_play_side_effect_and_needs_no_hold(
         self,
     ) -> None:
@@ -1463,6 +1566,33 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             ),
             (stock, "idle", {"alice_state": "IDLE"}, "play_media"),
             (stock, "idle", {"alice_state": "SPEAKING"}, "play_media"),
+            (stock, "playing", {"alice_state": "SPEAKING"}, "play_media"),
+            (stock, "playing", {"alice_state": "NONE"}, "play_media"),
+            (stock, "playing", {"alice_state": "IDLE"}, "media_pause"),
+            (
+                stock,
+                "playing",
+                {"alice_state": "NONE", "media_content_type": "radio"},
+                "media_pause",
+            ),
+            (
+                stock,
+                "playing",
+                {"alice_state": "SPEAKING", "media_title": "Track"},
+                "media_pause",
+            ),
+            (
+                stock,
+                "playing",
+                {"alice_state": "SPEAKING", "assumed_state": True},
+                "media_pause",
+            ),
+            (
+                stock,
+                "paused",
+                {"alice_state": "NONE", "media_content_type": "music"},
+                "media_play",
+            ),
             (stock, "paused", {"assumed_state": True}, "media_play"),
             (stock, "paused", {}, "media_play"),
             (stock, "idle", {"assumed_state": True}, "media_play"),

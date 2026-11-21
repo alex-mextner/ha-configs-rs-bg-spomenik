@@ -38,6 +38,23 @@ _SERVICE_CONTEXT = ContextVar("universal_remote_service_context", default=None)
 
 
 _CAPTURED_ROUTE_LIMIT = 256
+_AUDIO_DOUBLE_SECONDS = 0.8
+_SPEAKER_CONTROLS = {
+    "left",
+    "prev",
+    "right",
+    "next",
+    "play",
+    "mute",
+    "ok",
+    "volume_up",
+    "up",
+    "volume_down",
+    "down",
+    "info",
+    "apple_tv",
+    *map(str, range(10)),
+}
 _POWER_CAPTURE_TIMEOUT = 5.0
 _POWER_OPERATION_TIMEOUT = (
     150.0  # Longer than the paired/native confirmation deadlines.
@@ -104,7 +121,8 @@ class RemoteController:
         self._power_operations: dict[str, object] = {}
         self._mirror_lock = asyncio.Lock()
         self._closed = False
-        self._clear_audio = False
+        self._audio_mirror: bool | None = None
+        self._pending_audio: tuple[str, float] | None = None
         self._unsubscribe = None
         self.mode = RemoteMode(
             clock=time.time,
@@ -135,8 +153,10 @@ class RemoteController:
 
     def _changed(self) -> None:
         audio = self.hass.states.get("input_boolean.audio_mode")
-        if not self.mode.audio and audio is not None and audio.state == "on":
-            self._clear_audio = True
+        if self._audio_mirror is not None or (
+            audio is not None and (audio.state == "on") != self.mode.audio
+        ):
+            self._audio_mirror = self.mode.audio
         for listener in tuple(self.listeners):
             listener()
         self._spawn(self.async_mirror())
@@ -226,10 +246,9 @@ class RemoteController:
 
     def _audio_mode_active(self) -> bool:
         audio = self.hass.states.get("input_boolean.audio_mode")
-        audio_on = audio is not None and audio.state == "on"
-        if not audio_on:
-            self._clear_audio = False
-        return audio_on and not self._clear_audio
+        if self._audio_mirror is not None:
+            return self._audio_mirror
+        return audio is not None and audio.state == "on"
 
     async def async_start(self, _hass: HomeAssistant | None = None) -> None:
         """Subscribe to HA observations and publish the initialized target."""
@@ -290,8 +309,11 @@ class RemoteController:
                     "value",
                 ),
             ]
-            if self._clear_audio:
-                values.append(("input_boolean.audio_mode", "off", None, None))
+            audio = self._audio_mirror
+            if audio is not None:
+                values.append(
+                    ("input_boolean.audio_mode", "on" if audio else "off", None, None)
+                )
             for entity_id, wanted, service, field in values:
                 state = self.hass.states.get(entity_id)
                 if state is None or state.state == wanted:
@@ -306,6 +328,13 @@ class RemoteController:
                         blocking=True,
                         context=_SERVICE_CONTEXT.get(),
                     )
+
+            # Earlier helper writes can complete after the opposite physical
+            # capture. Only acknowledge the value that is still requested.
+            if audio is not None and self._audio_mirror == audio:
+                state = self.hass.states.get("input_boolean.audio_mode")
+                if state is not None and state.state == ("on" if audio else "off"):
+                    self._audio_mirror = None
 
     def _wake(self, pair: str, revision: str) -> None:
         async def wake() -> None:
@@ -340,6 +369,33 @@ class RemoteController:
     def _capture_key(button: str, received_ms: float) -> tuple[str, float]:
         return button, round(received_ms, 3)
 
+    def _capture_speaker(
+        self, button: str, at: float, key: tuple[str, float], route: RemoteRoute
+    ) -> RemoteRoute:
+        if button == "audio":
+            previous = self._pending_audio
+            self._pending_audio = None
+            if self.mode.audio:
+                self.mode.set_audio(active=False, at=at)
+            elif (
+                previous is not None
+                and self._captured_routes.get(previous, {}).get("audio_action")
+                == "pending"
+                and 0 < key[1] - previous[1] < _AUDIO_DOUBLE_SECONDS * 1000
+            ):
+                self._captured_routes[previous]["audio_action"] = "handled"
+                self.mode.set_audio(active=True, at=at)
+            else:
+                self._pending_audio = key
+                return {**route, "audio_action": "pending"}
+            return {**route, "audio_action": "handled"}
+        if self.mode.audio and button in {"back", "exit"}:
+            self.mode.set_audio(active=False, at=at)
+            return {**route, "speaker": True, "audio_action": "handled"}
+        if self.mode.audio and button in _SPEAKER_CONTROLS:
+            self.mode.set_audio(active=True, at=at)
+        return route
+
     def physical_press(
         self, name: str, received_at: float, *, press_id: str | None = None
     ) -> None:
@@ -358,6 +414,7 @@ class RemoteController:
                 return
             self.refresh(physical_at=received_at)
             route = self.mode.press(button, received_at)
+            route = self._capture_speaker(button, received_at, key, route)
             if button == "ok_hold" and press_id is not None:
                 # Both events from one physical OK share the first event's owner
                 # even if focus changes between separate receiver frames.
@@ -405,6 +462,15 @@ class RemoteController:
                 self._context_press_ids[context_id] = identity
                 if len(self._context_press_ids) > _CAPTURED_ROUTE_LIMIT:
                     del self._context_press_ids[next(iter(self._context_press_ids))]
+            if (
+                route is not None
+                and route.get("audio_action") == "pending"
+                and self.mode.clock() >= received / 1000 + _AUDIO_DOUBLE_SECONDS
+            ):
+                # Drain any already-received second tap before committing a single.
+                self.refresh()
+                if route.get("audio_action") == "pending":
+                    route["audio_action"] = "play_pause"
             if route is None:
                 route = self.resolve({})
                 if data["button"] == "power":

@@ -35,9 +35,11 @@ settle. Independent AC, lighting and speaker controls remain available.
 
 A single Audio press toggles playback. On the living-room Yandex Station,
 Play resumes the current track or starts My Wave when the local Station reports
-no current item. In cloud-only mode it requests resume, since
+no current item, including when Alice is speaking with no track, radio or
+playlist context. In cloud-only mode it requests resume, since
 the missing track information cannot establish whether the queue is empty.
-Double Audio selects speaker controls. Playback, track and volume buttons keep
+The receiver recognizes double Audio within 800 ms, even when both presses
+and the following Play reach it before the automation runs. Playback, track and volume buttons keep
 the speaker selected for sixty seconds after the latest press. Audio, Back and
 Exit dismiss speaker mode immediately. Colour lights work without extending
 speaker focus. Paired display Power also leaves speaker focus in place. Menu,

@@ -923,7 +923,7 @@ script:
             - input_boolean.audio_was_playing
       # Never resume music here: it would undo a requested Pause or Power action.
 
-  # Handler for the 'audio' button itself. Detects double-tap, toggles mode,
+  # Compatibility script for callers without a physical capture. Detects double-tap, toggles mode,
   # and falls back to single-press play/pause on the speaker otherwise.
   audio_mode_handle_press:
     alias: Audio button handler
@@ -1114,6 +1114,26 @@ automation:
                   rgbw_color: >-
                     {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
                   brightness: 255
+          - conditions: "{{ button == 'audio' or route.audio_action | default('') == 'handled' }}"
+            sequence:
+              - if: "{{ route.audio_action | default('') == 'pending' }}"
+                then:
+                  # Wait in this event's parallel automation, outside the shared
+                  # prepare queue. Re-read the same capture after the double window.
+                  - delay:
+                      milliseconds: >-
+                        {{ [0, (trigger.to_state.attributes.last_received | float * 1000
+                              + 801 - as_timestamp(now()) * 1000) | round(0, 'ceil') | int] | max }}
+                  - action: script.remote_modes_prepare
+                    data:
+                      button: audio
+                      received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+                    response_variable: route
+              - if: "{{ route.audio_action | default('') == 'play_pause' }}"
+                then:
+                  - action: script.music_remote_command
+                    data: { command: play_pause }
+              - stop: Physical Audio gesture or speaker dismissal handled
           - conditions: >-
               {{ button != 'audio' and
                  route.speaker | default(is_state('input_boolean.audio_mode', 'on')) }}
@@ -1190,9 +1210,6 @@ automation:
                 data:
                   activity: >-
                     {{ {'netflix':'com.netflix.ninja','youtube':'com.google.android.youtube.tv','apple_tv':'com.ionitech.airscreen'}[button] }}
-          - conditions: "{{ button == 'audio' }}"
-            sequence:
-              - action: script.audio_mode_handle_press
           - conditions: "{{ t9_mode in ['add','cycle'] }}"
             sequence:
               - action: script.t9_send_char
@@ -1361,27 +1378,7 @@ automation:
           text: "Ищу {{ trigger.event.data.query }}"
           end_session: true
 
-  # ===== Audio mode safety timeout — 60s of inactivity =====
-  # Activation and accepted speaker controls restart the inactivity timer.
-  - alias: Audio mode inactivity timeout
-    id: audio_mode_timeout
-    mode: restart
-    trigger:
-      - platform: state
-        entity_id: input_boolean.audio_mode
-        to: "on"
-      - platform: state
-        entity_id: input_text.audio_last_press_ms
-    condition:
-      - condition: state
-        entity_id: input_boolean.audio_mode
-        state: "on"
-    action:
-      - delay: "00:01:00"
-      - if: "{{ is_state('input_boolean.audio_mode', 'on') }}"
-        then:
-          - action: script.audio_mode_deactivate
-
+  # The controller expires speaker focus from the physical capture timestamp.
 
   # Compatibility automations only refresh the canonical owner. They do not
   # own focus deadlines, wake tasks or helper-based selection anymore.

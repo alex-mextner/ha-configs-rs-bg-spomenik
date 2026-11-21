@@ -345,12 +345,17 @@ script:
           start_wave: >-
             {{ cmd == 'play_pause' and route.owner == 'speaker'
                and route.speaker_backend == 'yandex'
-               and states(target_entity) in ['idle', 'paused', 'standby', 'off']
+               and (states(target_entity) in ['idle', 'paused', 'standby', 'off']
+                    or (states(target_entity) == 'playing'
+                        and state_attr(target_entity, 'alice_state') in ['SPEAKING', 'NONE']))
                and state_attr(target_entity, 'alice_state') not in [none, '', 'unknown', 'unavailable']
                and not state_attr(target_entity, 'assumed_state')
                and not state_attr(target_entity, 'restored')
                and not state_attr(target_entity, 'media_content_id')
-               and not state_attr(target_entity, 'media_title') }}
+               and not state_attr(target_entity, 'media_title')
+               and not state_attr(target_entity, 'media_content_type')
+               and not state_attr(target_entity, 'media_playlist')
+               and not state_attr(target_entity, 'media_duration') }}
       - variables:
           service_name: >-
             {% if start_wave %}
