@@ -1329,6 +1329,24 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.controller.refresh()
         self.assertFalse(self.controller.mode.audio)
 
+    async def test_direct_speaker_activity_renews_but_delayed_physical_dispatch_does_not(
+        self,
+    ) -> None:
+        self.reset(("tv", "on", "off"))
+        now = time.time()
+        self.controller.mode.clock = lambda: now
+        captured = now - 0.4
+        self.controller.physical_press("play", captured)
+        now += 10
+        await self.dispatch_captured("play", captured)
+        await self.hass.async_block_till_done()
+        self.assertAlmostEqual(self.controller.mode.audio_expires_at, captured + 60)
+        await self.scripts["audio_mode_dispatch"].async_run(
+            {"button": "play"}, context=Context()
+        )
+        await self.hass.async_block_till_done()
+        self.assertAlmostEqual(self.controller.mode.audio_expires_at, now + 60)
+
     async def test_audio_double_tap_has_no_single_play_side_effect_and_needs_no_hold(
         self,
     ) -> None:

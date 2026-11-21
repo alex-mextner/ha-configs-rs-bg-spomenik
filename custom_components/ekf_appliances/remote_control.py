@@ -259,6 +259,7 @@ class RemoteController:
                 PROJECTOR,
                 self.runtime.projector_power_entity_id,
                 "input_boolean.audio_mode",
+                "input_text.audio_last_press_ms",
             ],
             self._state_changed,
         )
@@ -269,8 +270,15 @@ class RemoteController:
             listener()
 
     @callback
-    def _state_changed(self, _event: Event) -> None:
+    def _state_changed(self, event: Event) -> None:
         self.refresh()
+        if (
+            event.data["entity_id"] == "input_text.audio_last_press_ms"
+            and self.mode.audio
+        ):
+            # Standalone script callers have no receiver timestamp. Physical
+            # dispatch does not write this compatibility activity pulse.
+            self.mode.set_audio(active=True, at=self.mode.clock())
 
     async def async_mirror(self) -> None:
         """Update legacy helpers from the complete committed controller state."""

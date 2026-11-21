@@ -973,6 +973,8 @@ script:
     fields:
       button:
         description: Button name (e.g. 'left', 'volume_up', 'info')
+      captured:
+        description: The receiver has already renewed this physical press
     sequence:
       - variables:
           digit_num: "{{ button | int(-1) }}"
@@ -1000,10 +1002,12 @@ script:
           - action: ekf_appliances.remote_reject
             data: { reason: unsupported_speaker_button }
           - stop: Unsupported speaker control
-      - action: input_text.set_value
-        target: { entity_id: input_text.audio_last_press_ms }
-        data:
-          value: "{{ (now().timestamp() * 1000) | int }}"
+      - if: "{{ not captured | default(false) }}"
+        then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.audio_last_press_ms }
+            data:
+              value: "{{ (now().timestamp() * 1000) | int }}"
       - choose:
           - conditions: "{{ button in music_commands }}"
             sequence:
@@ -1141,6 +1145,7 @@ automation:
               - action: script.audio_mode_dispatch
                 data:
                   button: "{{ button }}"
+                  captured: "{{ route.speaker is defined }}"
           - conditions: "{{ button in ['volume_up','volume_down','mute'] }}"
             sequence:
               - action: script.remote_volume
