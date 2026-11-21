@@ -365,6 +365,10 @@ class RemoteController:
                     if previous[0] == "ok" and identity == press_id:
                         route = self._captured_routes[previous]
                         break
+            if button != "power" and button not in INTERNAL_KEYS:
+                # Bind the speaker owner only for captured keys. Power callers
+                # forward the routing response to a service with its own schema.
+                route = {**route, "speaker": route.get("speaker", self.mode.audio)}
             self._captured_routes[key] = self._prepare_press(button, route=route)
             self._captured_press_ids[key] = press_id or f"{key[0]}:{key[1]:.3f}"
             if len(self._captured_routes) > _CAPTURED_ROUTE_LIMIT:
@@ -473,11 +477,7 @@ class RemoteController:
         reserve_power: bool = True,
     ) -> RemoteRoute:
         route = self.mode.press(button, at) if route is None else route
-        if button in INTERNAL_KEYS:
-            return route
-        # Freeze ownership before another physical key or timeout changes focus.
-        # An OK hold reuses the already prepared route of the same physical press.
-        route = {**route, "speaker": route.get("speaker", self.mode.audio)}
+        speaker = route.get("speaker", self.mode.audio)
         reason = None
         if button == "power":
             reason = self._power_transition() or self._pair_transition(route["pair"])
@@ -489,9 +489,9 @@ class RemoteController:
                     asyncio.get_running_loop().time() + _POWER_CAPTURE_TIMEOUT,
                 )
                 return {**route, "power_request_id": request_id}
-        elif button in _MEDIA_BUTTONS and not route["speaker"]:
+        elif button in _MEDIA_BUTTONS and not speaker:
             reason = self._ordinary_command_blocked(route["pair"])
-        elif button in {"netflix", "youtube", "apple_tv"} and not route["speaker"]:
+        elif button in {"netflix", "youtube", "apple_tv"} and not speaker:
             reason = self._pair_transition("tv")
         elif button in {"disney", "disney_hold"}:
             reason = self._pair_transition("projector")
