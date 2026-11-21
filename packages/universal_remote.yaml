@@ -54,7 +54,8 @@ input_boolean:
     initial: false
     icon: mdi:remote-tv
   audio_mode:
-    # Double Audio selects the speaker. Audio, Back, Exit or 60s idle dismisses it.
+    # Double Audio selects the speaker. Explicit display selection, Audio, Back,
+    # Exit or 60 seconds without a speaker control dismisses it.
     name: Audio mode (Yandex speaker)
     initial: false
     icon: mdi:speaker
@@ -1115,7 +1116,7 @@ automation:
                   brightness: 255
           - conditions: >-
               {{ button != 'audio' and
-                 route.speaker_ok | default(is_state('input_boolean.audio_mode', 'on')) }}
+                 route.speaker | default(is_state('input_boolean.audio_mode', 'on')) }}
             sequence:
               - action: script.audio_mode_dispatch
                 data:
@@ -1361,9 +1362,7 @@ automation:
           end_session: true
 
   # ===== Audio mode safety timeout — 60s of inactivity =====
-  # Restarts on activation AND on every dispatched in-mode press (which
-  # bumps audio_last_press_ms). Speaker controls keep the mode
-  # alive across taps this way.
+  # Activation and accepted speaker controls restart the inactivity timer.
   - alias: Audio mode inactivity timeout
     id: audio_mode_timeout
     mode: restart

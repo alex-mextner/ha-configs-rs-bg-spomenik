@@ -413,6 +413,29 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             {"trigger": trigger, **variables}, context=Context()
         )
 
+    async def dispatch_captured(self, button: str, at: float) -> None:
+        current = State(
+            "event.ekf_universal_remote",
+            str(at),
+            {
+                "event_type": button,
+                "last_received": at,
+                "receiver_enabled": True,
+            },
+        )
+        await self.run_automation(
+            "universal_remote_dispatcher",
+            button,
+            trigger_override={
+                "platform": "state",
+                "entity_id": current.entity_id,
+                "from_state": State(
+                    current.entity_id, "previous", {"event_type": "info"}
+                ),
+                "to_state": current,
+            },
+        )
+
     def appliance_calls(self) -> Any:
         return [
             item
@@ -704,32 +727,46 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.hass.states.async_set("input_boolean.audio_mode", "off")
                 self.hass.states.async_set(TV, "off")
         for button, at in mapper.event_times:
-            current = State(
-                "event.ekf_universal_remote",
-                str(at),
-                {
-                    "event_type": button,
-                    "last_received": at,
-                    "receiver_enabled": True,
-                },
-            )
-            await self.run_automation(
-                "universal_remote_dispatcher",
-                button,
-                trigger_override={
-                    "platform": "state",
-                    "entity_id": current.entity_id,
-                    "from_state": State(
-                        current.entity_id, "previous", {"event_type": "info"}
-                    ),
-                    "to_state": current,
-                },
-            )
+            await self.dispatch_captured(button, at)
         self.assertEqual(
             self.appliance_calls(),
             [("script.music_remote_command", {"command": "play_pause"})],
         )
         self.assertEqual(reasons, [])
+
+    async def test_play_keeps_its_captured_owner_when_focus_changes_before_dispatch(
+        self,
+    ) -> None:
+        for speaker_first in (True, False):
+            with self.subTest(speaker_first=speaker_first):
+                self.reset(("tv", "on" if speaker_first else "off", "off"))
+                self.hass.states.async_set(TV, "on")
+                now = time.time()
+                self.controller.physical_press("play", now)
+                if speaker_first:
+                    self.controller.physical_press("home", now + 0.001)
+                    await self.controller.async_prepare(
+                        {"button": "home", "received_ms": (now + 0.001) * 1000}
+                    )
+                else:
+                    self.hass.states.async_set("input_boolean.audio_mode", "on")
+                    self.controller.refresh()
+                await self.dispatch_captured("play", now)
+                expected = (
+                    ("script.music_remote_command", {"command": "play_pause"})
+                    if speaker_first
+                    else ("media_player.media_play_pause", {"entity_id": [TV]})
+                )
+                self.assertEqual(self.appliance_calls(), [expected])
+
+    async def test_disney_projector_short_and_hold_leave_speaker_focus(self) -> None:
+        for button in ("disney", "disney_hold"):
+            with self.subTest(button=button):
+                self.reset(("tv", "on", "off"))
+                await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
 
     async def test_speaker_display_key_keeps_receive_time_power_rejection(self) -> None:
         for button in ("home", "netflix"):

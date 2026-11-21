@@ -473,6 +473,9 @@ class RemoteController:
         reserve_power: bool = True,
     ) -> RemoteRoute:
         route = self.mode.press(button, at) if route is None else route
+        # Freeze ownership before another physical key or timeout changes focus.
+        # An OK hold reuses the already prepared route of the same physical press.
+        route = {**route, "speaker": route.get("speaker", self.mode.audio)}
         reason = None
         if button == "power":
             reason = self._power_transition() or self._pair_transition(route["pair"])
@@ -484,9 +487,9 @@ class RemoteController:
                     asyncio.get_running_loop().time() + _POWER_CAPTURE_TIMEOUT,
                 )
                 return {**route, "power_request_id": request_id}
-        elif button in _MEDIA_BUTTONS and not route.get("speaker_ok", self.mode.audio):
+        elif button in _MEDIA_BUTTONS and not route["speaker"]:
             reason = self._ordinary_command_blocked(route["pair"])
-        elif button in {"netflix", "youtube", "apple_tv"} and not self.mode.audio:
+        elif button in {"netflix", "youtube", "apple_tv"} and not route["speaker"]:
             reason = self._pair_transition("tv")
         elif button in {"disney", "disney_hold"}:
             reason = self._pair_transition("projector")

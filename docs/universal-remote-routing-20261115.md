@@ -40,9 +40,12 @@ the missing track information cannot establish whether the queue is empty.
 Double Audio selects speaker controls. Playback, track and volume buttons keep
 the speaker selected for sixty seconds after the latest press. Audio, Back and
 Exit dismiss speaker mode immediately. Colour lights work without extending
-speaker focus. Display navigation and app buttons leave speaker focus and use
-their normal power guards on the same press. Apple TV in speaker mode enables
-Bluetooth on the speaker. A short or held OK toggles music once.
+speaker focus. Paired display Power also leaves speaker focus in place. Menu,
+Home, Guide, Dash, Netflix, YouTube and Disney leave speaker focus and use the
+normal display guard on the same press. Disney also does so on a hold. Playback,
+arrows, OK and volume are routed to the owner selected at physical reception,
+even if another button changes focus before dispatch. Apple TV in speaker mode
+enables Bluetooth on the speaker. A short or held OK toggles music once.
 
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable
