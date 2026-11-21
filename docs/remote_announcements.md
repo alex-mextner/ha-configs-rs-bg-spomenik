@@ -115,7 +115,8 @@ shutdown or expiry ends the continuation. A later echo cannot trigger a write.
 Before changing the speaker level, the controller checks that its original level
 and mute still match. Speech starts only after the speaker reports the requested
 level with mute off. If that report misses the speech deadline, the label is
-skipped. A late report can trigger one guarded return to the original setting
+skipped. Until that accepted write settles, a label needing the same level may
+wait for its report. A conflicting label or quiet cue is deferred. A late report can trigger one guarded return to the original setting
 within the recovery window. After that window a fresh label or cue can request
 the cleanup before taking a new baseline. A distinct human level or mute releases
 the earlier claim.

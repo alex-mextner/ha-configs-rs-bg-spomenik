@@ -1066,6 +1066,87 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.speech_started), 1)
 
+    async def test_unsettled_initial_defers_real_cue_then_cue_restores_original(
+        self,
+    ) -> None:
+        attrs = await self.unobserved_initial()
+        self.manager.rejections.submit("device_off", "before-initial-echo")
+        await self.manager.rejections.drain()
+        self.assertEqual(
+            self.manager.public_status["rejection_drop_reason"],
+            "yandex_volume_recovery_pending",
+        )
+        self.assertEqual(len(self.calls), 1)
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.4}
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        self.manager.rejections.submit("device_off", "after-initial-recovery")
+        await self.manager.rejections.drain()
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.8, 0.1, 0.8],
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+
+    async def test_explicit_digit_can_supersede_initial_with_no_echo(self) -> None:
+        attrs = await self.unobserved_initial()
+        self.hass.states.async_set(self.entity, "playing", attrs)
+        with self.assertRaisesRegex(ProviderNotReadyError, "recovery_pending"):
+            await self.manager.announce("tv")
+        self.assertEqual(len(self.calls), 1)
+
+        async def ack_only(call) -> None:
+            self.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register("media_player", "volume_set", ack_only)
+        await self.music_script("speaker", self.entity).async_run(
+            {"command": "volume_set", "volume_level": 0.7}, context=Context()
+        )
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.4}
+        )
+        await self.hass.async_block_till_done()
+        with self.assertRaisesRegex(ProviderNotReadyError, "recovery_pending"):
+            await self.manager.announce("tv")
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.7}
+        )
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.manager.volume_recovery)
+        self.assertFalse(self.manager.late_initials)
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.4, 0.7]
+        )
+
+    async def test_same_level_label_joins_initial_without_duplicate_native_write(
+        self,
+    ) -> None:
+        attrs = await self.unobserved_initial()
+        joined = asyncio.Event()
+        prepare = self.manager.prepare_playback
+
+        async def entered(playback) -> None:
+            joined.set()
+            await prepare(playback)
+
+        with patch.object(self.manager, "prepare_playback", entered):
+            attempt = asyncio.create_task(self.manager.announce("tv"))
+            await asyncio.wait_for(joined.wait(), 0.5)
+            self.assertEqual(len(self.calls), 1)
+            self.hass.states.async_set(
+                self.entity, "paused", {**attrs, "volume_level": 0.4}
+            )
+            await asyncio.wait_for(attempt, 0.8)
+        self.assertEqual(
+            [n for n, _ in self.calls], ["volume_set", "send_command", "volume_set"]
+        )
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.4, 0.8]
+        )
+
     async def test_new_human_mute_without_an_older_mute_releases_selection(
         self,
     ) -> None:

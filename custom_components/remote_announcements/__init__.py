@@ -253,7 +253,6 @@ class SpeechPlayback:
         self.recovery_deadline = self.started + self.budget
         self.cleanup_deadline = self.recovery_deadline + REMUTE_GRACE
         self.initial_admitted: float | None = None
-        self.initial_levels: set[float] = set()
         self.initial_feedback = asyncio.Event()
         self.work_deadline = self.recovery_deadline - RECOVERY_RESERVE
         self.remute_lock = asyncio.Lock()
@@ -261,6 +260,13 @@ class SpeechPlayback:
         self.recovery_reason: str | None = None
         self.speaking, self.ended = asyncio.Event(), asyncio.Event()
         self.override_observed, self.user_changed_volume = False, False
+
+    def relinquish_volume(self, earlier_levels: set[float] | None = None) -> None:
+        """Yield to the digit and retain any earlier admitted write in its fence."""
+        if earlier_levels is not None and self.raised:
+            earlier_levels.add(self.applied)
+        self.user_changed_volume = True
+        self.initial_feedback.set()
 
     def at_baseline(self, state: State) -> bool:
         """Compare the actual level and mute with the original snapshot."""
@@ -273,14 +279,11 @@ class SpeechPlayback:
         )
 
     def owns_level(self, state: State) -> bool:
-        """Match any audible initial write still outstanding for this baseline."""
-        return reliable_volume(state) and any(
-            can_restore_volume(
-                state.attributes["volume_level"],
-                level,
-                muted=bool(state.attributes.get("is_volume_muted")),
-            )
-            for level in self.initial_levels
+        """Match the audible initial write for this baseline."""
+        return reliable_volume(state) and can_restore_volume(
+            state.attributes["volume_level"],
+            self.applied,
+            muted=bool(state.attributes.get("is_volume_muted")),
         )
 
     @callback
@@ -682,7 +685,9 @@ class Manager:
         if not prior.owns_level(state):
             self.late_initials.pop(entity)
             return
-        if self.active_label is not None or entity in self.pending_remutes:
+        if (
+            self.active_label is not None and self.active_label.entity == entity
+        ) or entity in self.pending_remutes:
             return
         now = time.monotonic()
         if now >= prior.cleanup_deadline:
@@ -697,11 +702,24 @@ class Manager:
         self.late_initials.pop(entity)
         self.start_recovery(prior, initial=True)
 
-    def check_aisis_volume_recovery(self, state: State) -> None:
+    def check_aisis_volume_recovery(self, state: State, *, label: bool = False) -> None:
         """Check pending speech restores before either labels or quiet cues."""
         self.reconcile_initial(state, requested=True)
+        prior = self.late_initials.get(state.entity_id)
         if (
-            state.entity_id in self.pending_remutes
+            (
+                prior is not None
+                and not (
+                    label
+                    and prior.at_baseline(state)
+                    and can_restore_volume(
+                        self.label_volume(state.attributes["volume_level"]),
+                        prior.applied,
+                        muted=False,
+                    )
+                )
+            )
+            or state.entity_id in self.pending_remutes
             or state.entity_id in self.selecting_volume
         ):
             raise ProviderNotReadyError(
@@ -779,7 +797,7 @@ class Manager:
         if before is None:
             message = "speaker_unavailable"
             raise ProviderNotReadyError(message)
-        self.check_aisis_volume_recovery(before)
+        self.check_aisis_volume_recovery(before, label=True)
         muted_before = bool(before.attributes.get("is_volume_muted"))
         if backend == "yandex" and "alice_state" not in before.attributes:
             message = "yandex_local_speech_connection_unavailable"
@@ -796,7 +814,13 @@ class Manager:
         if pause and not before.attributes.get("media_content_id"):
             message = "cannot_restore_unknown_music"
             raise ProviderNotReadyError(message)
-        return SpeechPlayback(before, applied, pause=pause, verify_volume=True)
+        playback = SpeechPlayback(before, applied, pause=pause, verify_volume=True)
+        prior = self.late_initials.pop(entity, None)
+        if prior is not None:
+            # Join the same accepted write without dispatching it again.
+            playback.raised = True
+            playback.initial_admitted = prior.initial_admitted
+        return playback
 
     async def prepare_playback(self, playback: SpeechPlayback) -> None:
         """Apply the optional pause and temporary speech volume."""
@@ -820,15 +844,11 @@ class Manager:
                 ):
                     playback.user_changed_volume = True
                     return False
-                prior = self.late_initials.pop(playback.entity, None)
-                if prior is not None and prior.at_baseline(state):
-                    playback.initial_levels.update(prior.initial_levels)
-                playback.initial_levels.add(playback.applied)
                 playback.initial_admitted = time.time()
                 playback.raised = True
                 return True
 
-            admitted = await self.call(
+            admitted = playback.raised or await self.call(
                 "volume_set",
                 playback.entity,
                 volume_level=playback.applied,
@@ -977,8 +997,7 @@ class Manager:
                     )
                 )
                 if adopt_current:
-                    playback.user_changed_volume = True
-                    playback.initial_feedback.set()
+                    playback.relinquish_volume()
                     return {"status": "kept"}
             if not self.hass.services.has_service("media_player", "volume_set"):
                 message = "speaker_volume_service_unavailable"
@@ -1023,7 +1042,7 @@ class Manager:
                 raise ProviderNotReadyError(message)
             late = self.late_initials.pop(entity, None)
             if late:
-                previous_levels.update(late.initial_levels)
+                previous_levels.add(late.applied)
                 previous_levels.add(late.old_volume)
             current_recovery = self.volume_recovery.get(entity)
             if isinstance(current_recovery, VolumeRestore) and (
@@ -1034,9 +1053,7 @@ class Manager:
                 )
             playback = self.active_label
             if playback and playback.entity == entity:
-                previous_levels.update(playback.initial_levels)
-                playback.user_changed_volume = True
-                playback.initial_feedback.set()
+                playback.relinquish_volume(previous_levels)
             if remute:
                 # Its original level may have been dispatched while we waited.
                 previous_levels.update((remute[0].old_volume, remute[0].applied))
@@ -1290,7 +1307,7 @@ class Manager:
                 )
             ):
                 # The provider accepted the initial write but has not reported it.
-                # Keep only the original baseline and its possible late levels.
+                # Retain the original baseline and the requested temporary level.
                 self.late_initials[playback.entity] = playback
                 playback.recovery_failed = True
                 playback.recovery_reason = self.recovery_reason(
