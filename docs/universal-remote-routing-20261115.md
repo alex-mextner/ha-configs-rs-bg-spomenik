@@ -56,11 +56,18 @@ service itself sends no power or wake command; a previously captured press keeps
 its original owner.
 
 Physical app/source scripts carry their original `received_ms` through named
-calls, including Disney's hold wait. Selection uses that time for its lease and
-ignores an expired request or one superseded by newer focus, display activity or
-pending INPUT. Malformed, nonpositive or future timestamps are rejected. Direct
-calls without this internal metadata retain immediate explicit selection; it is
-not a new user-facing selector. Power and app dispatch keep their existing guards.
+calls, including Disney's hold wait. A delayed explicit selection ignores an
+expired request or one superseded by newer speaker focus, an explicit display
+choice or pending INPUT. Other keys, including lights and A/C, do not cancel it.
+An accepted request retains its original intent time and the later of its own
+sixty-second deadline or the current lease renewed by a real key. It publishes
+that deadline with the new route. Malformed, nonpositive or future timestamps are
+rejected. This admission check applies only at the received-source service
+boundary; internal INPUT completion keeps its captured route/time even when the
+speaker lease expires during the gesture. Direct calls without this metadata
+retain immediate explicit selection, and `explicit: false` reflection keeps speaker
+focus unchanged. The metadata is not a user-facing selector. Power and app
+dispatch keep their existing guards.
 
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable

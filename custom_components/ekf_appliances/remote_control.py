@@ -652,6 +652,7 @@ class RemoteController:
             native=data.get("native", False),
             explicit=data.get("explicit", True),
             at=received / 1000 if received is not None else None,
+            received=received is not None and data.get("explicit", True),
         )
         await self.async_mirror()
         return route

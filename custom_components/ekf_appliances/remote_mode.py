@@ -266,6 +266,7 @@ class RemoteMode:
         native: bool = False,
         at: float | None = None,
         explicit: bool = True,
+        received: bool = False,
     ) -> RemoteRoute:
         """Commit one explicit group and native-target selection."""
         if pair not in {"tv", "projector"}:
@@ -275,12 +276,12 @@ class RemoteMode:
         # YAML milliseconds can round-trip one epoch-clock ULP earlier. Use
         # the existing capture precision only for causal ordering.
         if (
-            explicit
+            received
+            and explicit
             and at is not None
             and (
                 at + CAPTURE_EPSILON < self._audio_at
                 or at + LEASE_SECONDS <= now
-                or at + LEASE_SECONDS + CAPTURE_EPSILON < self.expires_at
                 or (self.pending is not None and at + CAPTURE_EPSILON < self.pending.at)
             )
         ):
@@ -295,7 +296,10 @@ class RemoteMode:
             self._automatic()
         else:
             self.pair, self.native = pair, bool(native)
-            self.expires_at = at + LEASE_SECONDS if explicit else 0.0
+            deadline = at + LEASE_SECONDS if explicit else 0.0
+            self.expires_at = (
+                max(self.expires_at, deadline) if received and explicit else deadline
+            )
             self._arm_lease()
         self._publish()
         return self.resolve()
