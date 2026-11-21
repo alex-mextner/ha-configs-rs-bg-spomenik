@@ -355,6 +355,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.weather(18.3)
         self.controller.refresh()
         self.controller.mode.select(source, native=navigation == "on")
+        self.controller.mode.set_audio(active=audio == "on", at=time.time())
 
     def weather(self, value, unit="°C", state="sunny") -> None:
         self.hass.states.async_set(
@@ -634,6 +635,125 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     {"trigger": trigger, "now": lambda: now}, context=Context()
                 )
         self.assertEqual([x for x in self.calls if x[0].startswith("climate.")], [])
+
+    async def test_explicit_display_service_moves_next_navigation_off_speaker(
+        self,
+    ) -> None:
+        for pair, explicit in product(("tv", "projector"), (None, True)):
+            with self.subTest(pair=pair, explicit=explicit):
+                other = "projector" if pair == "tv" else "tv"
+                self.reset((other, "on", "off"))
+                self.hass.states.async_set(TV if pair == "tv" else PROJECTOR, "on")
+                data = {"pair": pair}
+                if explicit is not None:
+                    data["explicit"] = explicit
+                route = await self.hass.services.async_call(
+                    "ekf_appliances",
+                    "remote_select",
+                    data,
+                    blocking=True,
+                    return_response=True,
+                )
+                self.assertEqual(route, {"pair": pair, "native": False})
+                self.assertEqual(self.appliance_calls(), [])
+                await self.run_automation("universal_remote_dispatcher", "right")
+                expected = (
+                    (
+                        "remote.send_command",
+                        {
+                            "entity_id": ["remote.televizor"],
+                            "command": "KEYCODE_DPAD_RIGHT",
+                            "delay_secs": 0,
+                        },
+                    )
+                    if pair == "tv"
+                    else (
+                        "kodi.call_method",
+                        {"entity_id": "media_player.home", "method": "Input.Right"},
+                    )
+                )
+                self.assertEqual(self.appliance_calls(), [expected])
+                self.assertFalse(self.controller.mode.audio)
+                self.assertEqual(self.controller.mode.audio_expires_at, 0)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+
+    async def test_observed_display_service_keeps_speaker_focus(self) -> None:
+        for pair in ("tv", "projector"):
+            with self.subTest(pair=pair):
+                self.reset((pair, "on", "off"))
+                self.hass.states.async_set(TV if pair == "tv" else PROJECTOR, "on")
+                deadline = self.controller.mode.audio_expires_at
+                await self.hass.services.async_call(
+                    "ekf_appliances",
+                    "remote_select",
+                    {"pair": pair, "explicit": False},
+                    blocking=True,
+                )
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertTrue(self.controller.mode.audio)
+                self.assertEqual(self.controller.mode.audio_expires_at, deadline)
+                await self.run_automation("universal_remote_dispatcher", "right")
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("script.music_remote_command", {"command": "next"})],
+                )
+
+    async def test_explicit_display_service_keeps_captured_speaker_and_power_routes(
+        self,
+    ) -> None:
+        self.reset(("tv", "on", "off"))
+        self.hass.states.async_set(TV, "on")
+        self.hass.states.async_set(PROJECTOR, "on")
+        at = time.time()
+        self.controller.physical_press("play", at)
+        self.controller.physical_press("power", at + 0.001)
+        await self.hass.services.async_call(
+            "ekf_appliances", "remote_select", {"pair": "projector"}, blocking=True
+        )
+        power = await self.hass.services.async_call(
+            "ekf_appliances",
+            "remote_prepare",
+            {"button": "power", "received_ms": (at + 0.001) * 1000},
+            blocking=True,
+            return_response=True,
+        )
+        self.assertEqual(set(power), {"pair", "native", "power_request_id"})
+        self.assertEqual(power["pair"], "tv")
+        self.assertFalse(power["native"])
+        self.assertTrue(power["power_request_id"])
+        self.assertEqual(self.appliance_calls(), [])
+        await self.dispatch_captured("play", at)
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+
+    async def test_explicit_display_service_keeps_pending_audio_double_tap(
+        self,
+    ) -> None:
+        self.reset()
+        at = time.time()
+        self.controller.mode.clock = lambda: at
+        self.controller.physical_press("audio", at)
+        await self.hass.services.async_call(
+            "ekf_appliances", "remote_select", {"pair": "projector"}, blocking=True
+        )
+        first = await self.hass.services.async_call(
+            "ekf_appliances",
+            "remote_prepare",
+            {"button": "audio", "received_ms": at * 1000},
+            blocking=True,
+            return_response=True,
+        )
+        self.assertEqual(first["pair"], "tv")
+        self.assertEqual(first["audio_action"], "pending")
+        self.controller.physical_press("audio", at + 0.3)
+        await self.dispatch_captured("audio", at)
+        await self.dispatch_captured("audio", at + 0.3)
+        self.assertTrue(self.controller.mode.audio)
+        self.assertEqual(self.appliance_calls(), [])
 
     async def test_audio_controls_use_the_music_owner_router(self) -> None:
         for button, command, extra in [

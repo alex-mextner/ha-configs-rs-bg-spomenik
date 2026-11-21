@@ -49,6 +49,11 @@ arrows, OK and volume are routed to the owner selected at physical reception,
 even if another button changes focus before dispatch. Apple TV in speaker mode
 enables Bluetooth on the speaker. A short or held OK toggles music once.
 
+Explicit `remote_select` calls (the default `explicit: true`) dismiss speaker
+focus before subsequent navigation. Calls with `explicit: false` follow observed
+display power without taking speaker focus. The selection service itself sends
+no power or wake command; a previously captured press keeps its original owner.
+
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable
 mute or climate data, and failed native text responses use the same cue.

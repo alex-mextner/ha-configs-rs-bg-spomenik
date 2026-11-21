@@ -269,6 +269,8 @@ class RemoteMode:
         if pair not in {"tv", "projector"}:
             error_message = "Unknown remote pair"
             raise ValueError(error_message)
+        if explicit:
+            self._set_audio(active=False, at=self.clock() if at is None else at)
         self._cancel_pending()
         if pair == "projector" and self.shutting_down:
             self._automatic()
