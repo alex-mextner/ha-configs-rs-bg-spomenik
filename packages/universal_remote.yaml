@@ -165,6 +165,7 @@ script:
           pair: "{{ pair }}"
           native: "{{ native | default(false) }}"
           explicit: "{{ explicit | default(true) }}"
+          received_ms: "{{ received_ms | default(none) }}"
         response_variable: route
       - stop: Return the canonical mode
         response_variable: route
@@ -561,7 +562,9 @@ script:
     mode: single
     sequence:
       - action: script.remote_mode_select_pair
-        data: { pair: tv }
+        data:
+          pair: tv
+          received_ms: "{{ received_ms | default(none) }}"
       - action: ekf_appliances.remote_dispatch
         data:
           domain: media_player
@@ -577,6 +580,8 @@ script:
     mode: single
     sequence:
       - action: script.source_to_projector
+        data:
+          received_ms: "{{ received_ms | default(none) }}"
         response_variable: result
       - stop: Return the named projector source admission
         response_variable: result
@@ -585,7 +590,9 @@ script:
     mode: single
     sequence:
       - action: script.remote_mode_select_pair
-        data: { pair: projector }
+        data:
+          pair: projector
+          received_ms: "{{ received_ms | default(none) }}"
       - action: ekf_appliances.remote_dispatch
         data:
           domain: media_player
@@ -605,6 +612,8 @@ script:
         description: Android package or deep-link URL
     sequence:
       - action: script.source_to_chromecast
+        data:
+          received_ms: "{{ received_ms | default(none) }}"
         response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:
@@ -1215,6 +1224,7 @@ automation:
             sequence:
               - action: script.app_launch_on_chromecast
                 data:
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                   activity: >-
                     {{ {'netflix':'com.netflix.ninja','youtube':'com.google.android.youtube.tv','apple_tv':'com.ionitech.airscreen'}[button] }}
           - conditions: "{{ t9_mode in ['add','cycle'] }}"
@@ -1334,6 +1344,8 @@ automation:
           - conditions: "{{ ev == 'disney_hold' }}"
             sequence:
               - action: script.source_to_pc
+                data:
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                 response_variable: source_result
           - conditions: "{{ ev == 'disney' }}"
             sequence:
@@ -1349,6 +1361,8 @@ automation:
                 then:
                   - stop: "hold detected, disney short suppressed"
               - action: script.source_to_pc
+                data:
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                 response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:

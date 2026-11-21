@@ -86,6 +86,7 @@ class RemoteMode:
         )
         self.pair, self.native, self.audio = "tv", False, False
         self.audio_expires_at = 0.0
+        self._audio_at = float("-inf")
         self._audio_handle = None
         self.expires_at = 0.0
         self.shutting_down = False
@@ -189,6 +190,7 @@ class RemoteMode:
             self._audio_handle.cancel()
             self._audio_handle = None
         self.audio = active
+        self._audio_at = max(self._audio_at, at)
         self.audio_expires_at = at + LEASE_SECONDS if active else 0.0
         if active:
             self._arm_audio()
@@ -269,18 +271,31 @@ class RemoteMode:
         if pair not in {"tv", "projector"}:
             error_message = "Unknown remote pair"
             raise ValueError(error_message)
+        now = self.clock()
+        # YAML milliseconds can round-trip one epoch-clock ULP earlier. Use
+        # the existing capture precision only for causal ordering.
+        if (
+            explicit
+            and at is not None
+            and (
+                at + CAPTURE_EPSILON < self._audio_at
+                or at + LEASE_SECONDS <= now
+                or at + LEASE_SECONDS + CAPTURE_EPSILON < self.expires_at
+                or (self.pending is not None and at + CAPTURE_EPSILON < self.pending.at)
+            )
+        ):
+            # A delayed physical source script cannot replace a newer choice,
+            # cancel its pending INPUT, or extend an expired source lease.
+            return self.resolve()
+        at = now if at is None else at
         if explicit:
-            self._set_audio(active=False, at=self.clock() if at is None else at)
+            self._set_audio(active=False, at=at)
         self._cancel_pending()
         if pair == "projector" and self.shutting_down:
             self._automatic()
         else:
             self.pair, self.native = pair, bool(native)
-            self.expires_at = (
-                ((self.clock() if at is None else at) + LEASE_SECONDS)
-                if explicit
-                else 0.0
-            )
+            self.expires_at = at + LEASE_SECONDS if explicit else 0.0
             self._arm_lease()
         self._publish()
         return self.resolve()
@@ -318,7 +333,6 @@ class RemoteMode:
             and self.targets["projector"] is not True
             and not self.shutting_down
         )
-        self._set_audio(active=False, at=pending.at)
         self.select(destination, at=pending.at)
         if wake:
             self.wake(destination, pending.revisions[destination])
@@ -362,7 +376,6 @@ class RemoteMode:
         ):
             self._cancel_pending()
             if self._valid(pending):
-                self._set_audio(active=False, at=at)
                 self.select(pending.pair, native=not pending.native, at=at)
             return self.resolve()
         if pending:

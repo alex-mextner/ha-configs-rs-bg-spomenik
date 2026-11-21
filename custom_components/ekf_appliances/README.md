@@ -193,6 +193,10 @@ speaker focus in place. Menu, Home, Guide, Dash, Netflix, YouTube and Disney
 return controls to the display on the same press. Disney also does so on a hold.
 Playback, arrow, OK and volume controls retain the owner selected when pressed,
 including when another button changes focus before the command runs.
+Explicit display selection also dismisses speaker focus; following observed power
+with `explicit: false` keeps it. Delayed physical app/source selection retains the
+original press time, so it cannot replace a newer speaker/display choice or restart
+its sixty-second lease. Direct source-script calls still select immediately.
 
 
 Queued INPUT wakes call `ekf_appliances.wake_if_current` on the canonical media

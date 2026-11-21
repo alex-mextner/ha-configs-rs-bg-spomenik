@@ -49,10 +49,18 @@ arrows, OK and volume are routed to the owner selected at physical reception,
 even if another button changes focus before dispatch. Apple TV in speaker mode
 enables Bluetooth on the speaker. A short or held OK toggles music once.
 
-Explicit `remote_select` calls (the default `explicit: true`) dismiss speaker
+Direct `remote_select` calls (the default `explicit: true`) dismiss speaker
 focus before subsequent navigation. Calls with `explicit: false` follow observed
-display power without taking speaker focus. The selection service itself sends
-no power or wake command; a previously captured press keeps its original owner.
+display power and keep speaker focus and its deadline unchanged. The selection
+service itself sends no power or wake command; a previously captured press keeps
+its original owner.
+
+Physical app/source scripts carry their original `received_ms` through named
+calls, including Disney's hold wait. Selection uses that time for its lease and
+ignores an expired request or one superseded by newer focus, display activity or
+pending INPUT. Malformed, nonpositive or future timestamps are rejected. Direct
+calls without this internal metadata retain immediate explicit selection; it is
+not a new user-facing selector. Power and app dispatch keep their existing guards.
 
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable

@@ -636,6 +636,210 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual([x for x in self.calls if x[0].startswith("climate.")], [])
 
+    async def test_delayed_source_selection_keeps_newer_speaker_focus(self) -> None:
+        for identity, button, evicted in (
+            ("universal_remote_disney", "disney", False),
+            ("universal_remote_dispatcher", "netflix", False),
+            ("universal_remote_dispatcher", "youtube", False),
+            ("universal_remote_dispatcher", "apple_tv", False),
+            ("universal_remote_disney", "disney", True),
+        ):
+            with self.subTest(button=button, evicted=evicted):
+                self.reset()
+                self.set_power_pair("on", "on")
+                selection_ready, release_selection = asyncio.Event(), asyncio.Event()
+
+                async def delayed_selection(
+                    call, ready=selection_ready, release=release_selection
+                ) -> Any:
+                    ready.set()
+                    await release.wait()
+                    # Preserve the real named-script Context through the pause.
+                    if stack := script_stack_cv.get():
+                        script_stack_cv.set(stack.copy())
+                    result = await self.scripts["remote_mode_select_pair"].async_run(
+                        dict(call.data), context=call.context
+                    )
+                    return (result.service_response if result else None) or {}
+
+                self.hass.services.async_register(
+                    "script",
+                    "remote_mode_select_pair",
+                    delayed_selection,
+                    supports_response=SupportsResponse.OPTIONAL,
+                )
+                source = asyncio.create_task(self.run_automation(identity, button))
+                try:
+                    await asyncio.wait_for(selection_ready.wait(), 1)
+                    if evicted:
+                        original = set(self.controller._captured_routes)
+                        for _ in range(256):
+                            self.controller.physical_press("red", time.time())
+                        self.assertTrue(
+                            original.isdisjoint(self.controller._captured_routes)
+                        )
+                    first = time.time()
+                    self.controller.physical_press("audio", first)
+                    second = time.time()
+                    self.controller.physical_press("audio", second)
+                    await self.dispatch_captured("audio", first)
+                    await self.dispatch_captured("audio", second)
+                    self.assertTrue(self.controller.mode.audio)
+                    deadline = self.controller.mode.audio_expires_at
+                    release_selection.set()
+                    await asyncio.wait_for(source, 1)
+                    await self.hass.async_block_till_done()
+                    self.assertTrue(self.controller.mode.audio)
+                    self.assertEqual(self.controller.mode.audio_expires_at, deadline)
+                    self.calls.clear()
+                    await self.run_automation("universal_remote_dispatcher", "right")
+                    self.assertEqual(
+                        self.appliance_calls(),
+                        [("script.music_remote_command", {"command": "next"})],
+                    )
+                finally:
+                    release_selection.set()
+                    await asyncio.gather(source, return_exceptions=True)
+
+    async def test_standalone_source_scripts_still_dismiss_speaker_focus(self) -> None:
+        for name in ("source_to_pc", "source_to_projector", "source_to_chromecast"):
+            with self.subTest(script=name):
+                self.reset(("tv", "on", "off"))
+                self.set_power_pair("on", "on")
+                await self.scripts[name].async_run({}, context=Context())
+                await self.hass.async_block_till_done()
+                self.assertFalse(self.controller.mode.audio)
+                self.assertEqual(self.controller.mode.audio_expires_at, 0)
+
+    async def test_current_source_selection_keeps_its_physical_timestamp(self) -> None:
+        for at, speaker in product(
+            (1795270000.0000153, 1795280400.000056), (True, False)
+        ):
+            with self.subTest(at=at, speaker=speaker):
+                clock = {"now": at - 1}
+                with patch("time.time", side_effect=lambda clock=clock: clock["now"]):
+                    self.reset(("tv", "on" if speaker else "off", "off"))
+                self.controller.mode.clock = lambda clock=clock: clock["now"]
+                self.set_power_pair("on", "on")
+                await self.hass.async_block_till_done()
+                if speaker:
+                    # Isolate speaker-exit ordering from an existing display lease.
+                    await self.hass.services.async_call(
+                        "ekf_appliances",
+                        "remote_select",
+                        {"pair": "tv", "explicit": False},
+                        blocking=True,
+                    )
+                clock["now"] = at
+                received_ms = at * 1000
+                self.assertLess(received_ms / 1000, at)
+                self.controller.physical_press("disney", at)
+                self.assertFalse(self.controller.mode.audio)
+                await self.hass.services.async_call(
+                    "script",
+                    "source_to_pc",
+                    {"received_ms": received_ms},
+                    blocking=True,
+                )
+                self.assertEqual(self.controller.mode.pair, "projector")
+                self.assertEqual(
+                    self.controller.mode.expires_at, received_ms / 1000 + 60
+                )
+                # A distinct newer intent must still beat the delayed source.
+                clock["now"] = at + 0.00001
+                await self.hass.services.async_call(
+                    "ekf_appliances",
+                    "remote_select",
+                    {"pair": "tv"},
+                    blocking=True,
+                )
+                deadline = self.controller.mode.expires_at
+                await self.hass.services.async_call(
+                    "script",
+                    "source_to_pc",
+                    {"received_ms": received_ms},
+                    blocking=True,
+                )
+                self.assertEqual(self.controller.mode.pair, "tv")
+                self.assertEqual(self.controller.mode.expires_at, deadline)
+
+    async def test_source_selection_timestamp_does_not_replace_newer_intent(
+        self,
+    ) -> None:
+        self.reset(("tv", "on", "off"))
+        self.set_power_pair("on", "on")
+        now = time.time()
+        clock = {"now": now}
+        self.controller.mode.clock = lambda: clock["now"]
+
+        async def select(received_ms: float) -> Any:
+            return await self.hass.services.async_call(
+                "ekf_appliances",
+                "remote_select",
+                {"pair": "projector", "received_ms": received_ms},
+                blocking=True,
+                return_response=True,
+            )
+
+        def snapshot() -> tuple[Any, ...]:
+            mode = self.controller.mode
+            return (
+                mode.pair,
+                mode.native,
+                mode.audio,
+                mode.expires_at,
+                mode.audio_expires_at,
+                mode.pending,
+            )
+
+        await select(now * 1000)
+        self.assertFalse(self.controller.mode.audio)
+        self.assertEqual(self.controller.mode.pair, "projector")
+        clock["now"] = now + 1
+        await self.hass.services.async_call(
+            "ekf_appliances",
+            "remote_select",
+            {"pair": "tv", "native": True},
+            blocking=True,
+        )
+        clock["now"] = now + 2
+        self.controller.physical_press("audio", now + 1.9)
+        self.controller.physical_press("audio", now + 1.95)
+        self.assertTrue(self.controller.mode.audio)
+        before = snapshot()
+        self.assertEqual(await select(now * 1000), {"pair": "tv", "native": True})
+        self.assertEqual(snapshot(), before)
+        self.controller.physical_press("audio", now + 2)
+        self.assertFalse(self.controller.mode.audio)
+        before = snapshot()
+        await select(now * 1000)
+        await select((now - 61) * 1000)
+        self.assertEqual(snapshot(), before)
+        clock["now"] = now + 3
+        await select((now + 2.5) * 1000)
+        self.assertEqual(self.controller.mode.pair, "projector")
+        self.assertAlmostEqual(self.controller.mode.expires_at, now + 62.5, places=3)
+        clock["now"] = now + 4.1
+        self.controller.physical_press("input", now + 4)
+        before = snapshot()
+        await select((now + 2.5) * 1000)
+        self.assertEqual(snapshot(), before)
+        for invalid in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            0,
+            -1,
+            (clock["now"] + 1) * 1000,
+        ):
+            with (
+                self.subTest(received_ms=invalid),
+                self.assertRaises(HomeAssistantError),
+            ):
+                await select(invalid)
+            self.assertEqual(snapshot(), before)
+        self.assertEqual(self.appliance_calls(), [])
+
     async def test_explicit_display_service_moves_next_navigation_off_speaker(
         self,
     ) -> None:

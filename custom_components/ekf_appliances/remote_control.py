@@ -641,12 +641,17 @@ class RemoteController:
         return await asyncio.shield(task)
 
     async def async_select(self, data: Mapping[str, Any]) -> RemoteRoute:
-        """Commit an explicit route selection and update compatibility helpers."""
+        """Commit a route selection at its physical reception, when supplied."""
+        received = data.get("received_ms")
+        if received is not None and not 0 < received <= self.mode.clock() * 1000:
+            error_message = "Invalid remote selection timestamp"
+            raise HomeAssistantError(error_message)
         self.refresh()
         route = self.mode.select(
             data["pair"],
             native=data.get("native", False),
             explicit=data.get("explicit", True),
+            at=received / 1000 if received is not None else None,
         )
         await self.async_mirror()
         return route
@@ -877,6 +882,7 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
                 vol.Required("pair"): vol.In(["tv", "projector"]),
                 vol.Optional("native", default=False): cv.boolean,
                 vol.Optional("explicit", default=True): cv.boolean,
+                vol.Optional("received_ms"): vol.Any(None, vol.Coerce(float)),
             },
         ),
         "remote_resolve": (resolve, pair),
