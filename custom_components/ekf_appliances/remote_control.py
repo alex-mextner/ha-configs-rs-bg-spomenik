@@ -26,7 +26,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import DOMAIN
-from .remote_mode import PowerObservations, RemoteMode
+from .remote_mode import INTERNAL_KEYS, PowerObservations, RemoteMode
 from .runtime import PROJECTOR_SHUTDOWN_TIMEOUT, UNIVERSAL_PROJECTOR_COMMAND
 
 _LOGGER = logging.getLogger(__name__)
@@ -473,6 +473,8 @@ class RemoteController:
         reserve_power: bool = True,
     ) -> RemoteRoute:
         route = self.mode.press(button, at) if route is None else route
+        if button in INTERNAL_KEYS:
+            return route
         # Freeze ownership before another physical key or timeout changes focus.
         # An OK hold reuses the already prepared route of the same physical press.
         route = {**route, "speaker": route.get("speaker", self.mode.audio)}
