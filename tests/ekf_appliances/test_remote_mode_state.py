@@ -147,6 +147,16 @@ class RemoteModeTests(unittest.TestCase):
         self.clock.advance(1.011)
         self.assertAlmostEqual(self.mode.expires_at, first + 60)
 
+    def test_input_selecting_tv_from_running_projector_never_wakes_tv(self) -> None:
+        self.observe(tv=False, projector=True)
+        self.input()
+        self.clock.advance(1.011)
+        self.assertEqual(self.mode.target, "chromecast")
+        self.assertEqual(self.wakes, [])
+        self.double()
+        self.assertEqual(self.mode.target, "tv")
+        self.assertEqual(self.wakes, [])
+
     def test_single_wake_keeps_exact_60_seconds(self) -> None:
         self.observe(
             tv=True, projector=False, revisions={"tv": "t:1", "projector": "p:1"}
@@ -158,6 +168,69 @@ class RemoteModeTests(unittest.TestCase):
         self.assertAlmostEqual(self.mode.expires_at, first + 60)
         self.clock.advance(60 - 1.011)
         self.assertEqual(self.mode.target, "chromecast")
+
+    def check_single_input_after_audio_expiry(
+        self, *, observed: bool, from_projector: bool
+    ) -> None:
+        self.observe(
+            tv=not from_projector,
+            projector=from_projector,
+            revisions={"tv": "t:1", "projector": "p:1"},
+        )
+        self.mode.set_audio(active=True, at=self.clock.now - 59.5)
+        received = self.clock.now
+        self.input()
+        self.assertTrue(self.mode.audio)
+        self.assertIsNotNone(self.mode.pending)
+
+        if observed:
+            # Refresh may observe expiry before the scheduled audio timer runs.
+            self.clock.now += 0.501
+            self.observe(tv=not from_projector, projector=from_projector, audio=True)
+        else:
+            self.clock.advance(0.501)
+        self.assertFalse(self.mode.audio)
+        self.assertIsNotNone(self.mode.pending)
+        self.assertEqual(self.wakes, [])
+
+        self.clock.advance(0.510)
+        self.assertIsNone(self.mode.pending)
+        self.assertEqual(
+            (
+                self.mode.pair,
+                self.mode.target,
+                self.mode.native,
+                self.wakes,
+                self.mode.expires_at,
+            ),
+            (
+                "tv" if from_projector else "projector",
+                "chromecast" if from_projector else "kodi",
+                False,
+                [] if from_projector else [("projector", "p:1")],
+                received + 60,
+            ),
+        )
+
+    def test_single_input_after_audio_timer_expiry_selects_and_wakes_projector(
+        self,
+    ) -> None:
+        self.check_single_input_after_audio_expiry(observed=False, from_projector=False)
+
+    def test_single_input_after_observed_audio_expiry_selects_and_wakes_projector(
+        self,
+    ) -> None:
+        self.check_single_input_after_audio_expiry(observed=True, from_projector=False)
+
+    def test_single_input_after_audio_timer_expiry_selects_off_tv_without_wake(
+        self,
+    ) -> None:
+        self.check_single_input_after_audio_expiry(observed=False, from_projector=True)
+
+    def test_single_input_after_observed_audio_expiry_selects_off_tv_without_wake(
+        self,
+    ) -> None:
+        self.check_single_input_after_audio_expiry(observed=True, from_projector=True)
 
     def test_native_expires_proactively_at_fractional_deadline(self) -> None:
         self.observe(tv=False, projector=True)

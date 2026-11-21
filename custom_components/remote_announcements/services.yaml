@@ -16,3 +16,21 @@ reject:
       description: Reuse this identity across nested guards to produce one cue per rejected press.
       selector:
         text:
+adopt_label_volume:
+  name: Select speaker volume during an announcement
+  description: Keep an already observed level or send the explicit speaker choice during announcement recovery. The optional status is kept, sent, or not_applicable.
+  fields:
+    entity_id:
+      name: Speaker
+      required: true
+      selector:
+        entity:
+          domain: media_player
+    volume_level:
+      name: Selected volume
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.1

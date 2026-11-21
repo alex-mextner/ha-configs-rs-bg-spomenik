@@ -1152,7 +1152,7 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         route = await self.controller.async_prepare(
             {"button": "up", "received_ms": 1059900.0}
         )
-        self.assertEqual(route, {"pair": "tv", "native": True})
+        self.assertEqual(route, {"pair": "tv", "native": True, "speaker": False})
         self.assertAlmostEqual(self.controller.mode.expires_at, 1119.9)
 
     async def test_unrecognized_timestamp_cannot_replay_or_backdate_a_press(

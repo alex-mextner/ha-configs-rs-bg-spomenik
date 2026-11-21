@@ -32,6 +32,11 @@ input_text:
     max: 16
     initial: "0"
     icon: mdi:gesture-double-tap
+  audio_pending_tap_ms:
+    name: Audio pending first tap (ms)
+    max: 16
+    initial: "0"
+    icon: mdi:gesture-double-tap
   ac_last_mode:
     # Kept for external references; Amazon uses the outdoor temperature.
     name: AC last used mode
@@ -49,8 +54,8 @@ input_boolean:
     initial: false
     icon: mdi:remote-tv
   audio_mode:
-    # Double AUDIO within 800ms enters; another AUDIO exits. One action exits,
-    # except volume/up/down which keep it active until 3s of inactivity.
+    # Double Audio selects the speaker. Explicit display selection, Audio, Back,
+    # Exit or 60 seconds without a speaker control dismisses it.
     name: Audio mode (Yandex speaker)
     initial: false
     icon: mdi:speaker
@@ -125,10 +130,9 @@ script:
                     data: { reason: ac_weather_unavailable }
                   - stop: "Outdoor temperature from weather.forecast_home_assistant is unavailable in Celsius; AC remains off"
                     error: true
-              - action: climate.set_temperature
+              - action: climate.set_hvac_mode
                 target: { entity_id: climate.kondei_1 }
                 data:
-                  temperature: 24
                   hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
           - conditions: "{{ states('climate.kondei_1') in ['unknown', 'unavailable'] }}"
             sequence:
@@ -161,6 +165,7 @@ script:
           pair: "{{ pair }}"
           native: "{{ native | default(false) }}"
           explicit: "{{ explicit | default(true) }}"
+          received_ms: "{{ received_ms | default(none) }}"
         response_variable: route
       - stop: Return the canonical mode
         response_variable: route
@@ -557,7 +562,9 @@ script:
     mode: single
     sequence:
       - action: script.remote_mode_select_pair
-        data: { pair: tv }
+        data:
+          pair: tv
+          received_ms: "{{ received_ms | default(none) }}"
       - action: ekf_appliances.remote_dispatch
         data:
           domain: media_player
@@ -573,6 +580,8 @@ script:
     mode: single
     sequence:
       - action: script.source_to_projector
+        data:
+          received_ms: "{{ received_ms | default(none) }}"
         response_variable: result
       - stop: Return the named projector source admission
         response_variable: result
@@ -581,7 +590,9 @@ script:
     mode: single
     sequence:
       - action: script.remote_mode_select_pair
-        data: { pair: projector }
+        data:
+          pair: projector
+          received_ms: "{{ received_ms | default(none) }}"
       - action: ekf_appliances.remote_dispatch
         data:
           domain: media_player
@@ -601,6 +612,8 @@ script:
         description: Android package or deep-link URL
     sequence:
       - action: script.source_to_chromecast
+        data:
+          received_ms: "{{ received_ms | default(none) }}"
         response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:
@@ -919,11 +932,11 @@ script:
             - input_boolean.audio_was_playing
       # Never resume music here: it would undo a requested Pause or Power action.
 
-  # Handler for the 'audio' button itself. Detects double-tap, toggles mode,
+  # Compatibility script for callers without a physical capture. Detects double-tap, toggles mode,
   # and falls back to single-press play/pause on the speaker otherwise.
   audio_mode_handle_press:
     alias: Audio button handler
-    # `mode: restart`: second press within the 500ms debounce cancels the
+    # A second press within 800ms cancels the
     # pending single-tap play/pause and activates audio mode instead.
     # So a double-tap produces a clean activation, no pause side-effect.
     mode: restart
@@ -934,22 +947,29 @@ script:
           - stop: dismissed via audio press
       - variables:
           now_ms: "{{ (now().timestamp() * 1000) | int }}"
-          last_ms: "{{ states('input_text.audio_last_press_ms') | int(0) }}"
+          last_ms: "{{ states('input_text.audio_pending_tap_ms') | int(0) }}"
           dt: "{{ now_ms - last_ms }}"
-      - action: input_text.set_value
-        target: { entity_id: input_text.audio_last_press_ms }
-        data: { value: "{{ now_ms }}" }
+
       # Second tap within 800ms of a previous one → activate audio mode.
       # Wider window (500→800) because user was missing it — NEC auto-
       # repeat + human reaction put real double-taps at ~400-700ms.
       - if: "{{ 0 < dt < 800 }}"
         then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.audio_pending_tap_ms }
+            data: { value: "0" }
           - action: script.audio_mode_activate
           - stop: activated via double tap
       # First tap — wait for a possible second tap. If one arrives,
       # mode:restart cancels this delay. Otherwise fall through to
       # play/pause as the single-press action.
+      - action: input_text.set_value
+        target: { entity_id: input_text.audio_pending_tap_ms }
+        data: { value: "{{ now_ms }}" }
       - delay: "00:00:00.8"
+      - action: input_text.set_value
+        target: { entity_id: input_text.audio_pending_tap_ms }
+        data: { value: "0" }
       - action: script.music_remote_command
         data: { command: play_pause }
 
@@ -962,10 +982,11 @@ script:
     fields:
       button:
         description: Button name (e.g. 'left', 'volume_up', 'info')
+      captured:
+        description: The receiver owns this physical press's activity timing
     sequence:
       - variables:
           digit_num: "{{ button | int(-1) }}"
-          sticky: "{{ button in ['volume_up', 'volume_down', 'up', 'down'] }}"
           music_commands:
             left: previous
             prev: previous
@@ -980,10 +1001,22 @@ script:
             down: volume_down
             info: info
             apple_tv: bluetooth_enable
-      - action: input_text.set_value
-        target: { entity_id: input_text.audio_last_press_ms }
-        data:
-          value: "{{ (now().timestamp() * 1000) | int }}"
+      - if: "{{ button == 'ok_hold' }}"
+        then:
+          - stop: The initial OK already handled this speaker gesture
+      - if: >-
+          {{ button not in music_commands and button not in ['back', 'exit']
+             and not 0 <= digit_num <= 9 }}
+        then:
+          - action: ekf_appliances.remote_reject
+            data: { reason: unsupported_speaker_button }
+          - stop: Unsupported speaker control
+      - if: "{{ not captured | default(false) }}"
+        then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.audio_last_press_ms }
+            data:
+              value: "{{ (now().timestamp() * 1000) | int }}"
       - choose:
           - conditions: "{{ button in music_commands }}"
             sequence:
@@ -999,13 +1032,9 @@ script:
                 data:
                   command: volume_set
                   volume_level: "{{ digit_num / 10 }}"
-      # Back and other non-sticky keys only leave the mode when unmapped.
-      - if: "{{ not sticky }}"
-        then:
-          - if: "{{ button == 'info' }}"
-            then:
-              - delay: "00:00:02.5"
-          - action: script.audio_mode_deactivate
+          - conditions: "{{ button in ['back', 'exit'] }}"
+            sequence:
+              - action: script.audio_mode_deactivate
 
 automation:
   - alias: Universal Remote Dispatcher
@@ -1089,12 +1118,45 @@ automation:
               {{ button in ['prime','prime_hold','disney','disney_hold'] or (button | string).startswith('samsung_ir_') }}
             sequence:
               - stop: Handled by a dedicated appliance automation or direct physical remote
+          - conditions: "{{ button in ['red','green','yellow'] }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: light.rgbw_lamp_rgbw
+                data:
+                  rgbw_color: >-
+                    {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
+                  brightness: 255
+          - conditions: "{{ button == 'audio' or route.audio_action | default('') == 'handled' }}"
+            sequence:
+              - if: "{{ route.audio_action | default('') == 'pending' }}"
+                then:
+                  # Wait in this event's parallel automation, outside the shared
+                  # prepare queue. Re-read the same capture after the double window.
+                  - delay:
+                      milliseconds: >-
+                        {{ [0, (trigger.to_state.attributes.last_received | float * 1000
+                              + 801 - as_timestamp(now()) * 1000) | round(0, 'ceil') | int] | max }}
+                  - action: script.remote_modes_prepare
+                    data:
+                      button: audio
+                      received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+                    response_variable: route
+              - if: "{{ route.audio_action | default('') == 'play_pause' }}"
+                then:
+                  - action: script.music_remote_command
+                    data: { command: play_pause }
+              - stop: Physical Audio gesture or speaker dismissal handled
           - conditions: >-
-              {{ is_state('input_boolean.audio_mode', 'on') and button != 'audio' }}
+              {{ button != 'audio' and
+                 route.speaker | default(is_state('input_boolean.audio_mode', 'on')) }}
             sequence:
               - action: script.audio_mode_dispatch
                 data:
                   button: "{{ button }}"
+                  # Physical timing stays receiver-owned even if its capture
+                  # has expired; fallback routing is not standalone activity.
+                  captured: true
           - conditions: "{{ button in ['volume_up','volume_down','mute'] }}"
             sequence:
               - action: script.remote_volume
@@ -1158,24 +1220,13 @@ automation:
                   action: >-
                     {{ {'play':'play_pause','prev':'previous','next':'next'}[button] }}
                   pair: "{{ route.pair }}"
-          - conditions: "{{ button in ['red','green','yellow'] }}"
-            sequence:
-              - action: light.turn_on
-                target:
-                  entity_id: light.rgbw_lamp_rgbw
-                data:
-                  rgbw_color: >-
-                    {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
-                  brightness: 255
           - conditions: "{{ button in ['netflix','youtube','apple_tv'] }}"
             sequence:
               - action: script.app_launch_on_chromecast
                 data:
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                   activity: >-
                     {{ {'netflix':'com.netflix.ninja','youtube':'com.google.android.youtube.tv','apple_tv':'com.ionitech.airscreen'}[button] }}
-          - conditions: "{{ button == 'audio' }}"
-            sequence:
-              - action: script.audio_mode_handle_press
           - conditions: "{{ t9_mode in ['add','cycle'] }}"
             sequence:
               - action: script.t9_send_char
@@ -1293,6 +1344,8 @@ automation:
           - conditions: "{{ ev == 'disney_hold' }}"
             sequence:
               - action: script.source_to_pc
+                data:
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                 response_variable: source_result
           - conditions: "{{ ev == 'disney' }}"
             sequence:
@@ -1308,6 +1361,8 @@ automation:
                 then:
                   - stop: "hold detected, disney short suppressed"
               - action: script.source_to_pc
+                data:
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                 response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:
@@ -1344,29 +1399,7 @@ automation:
           text: "Ищу {{ trigger.event.data.query }}"
           end_session: true
 
-  # ===== Audio mode safety timeout — 3s of inactivity =====
-  # Restarts on activation AND on every dispatched in-mode press (which
-  # bumps audio_last_press_ms). Sticky keys (vol/up/down) keep the mode
-  # alive across taps this way.
-  - alias: Audio mode inactivity timeout
-    id: audio_mode_timeout
-    mode: restart
-    trigger:
-      - platform: state
-        entity_id: input_boolean.audio_mode
-        to: "on"
-      - platform: state
-        entity_id: input_text.audio_last_press_ms
-    condition:
-      - condition: state
-        entity_id: input_boolean.audio_mode
-        state: "on"
-    action:
-      - delay: "00:00:03"
-      - if: "{{ is_state('input_boolean.audio_mode', 'on') }}"
-        then:
-          - action: script.audio_mode_deactivate
-
+  # The controller expires speaker focus from the physical capture timestamp.
 
   # Compatibility automations only refresh the canonical owner. They do not
   # own focus deadlines, wake tasks or helper-based selection anymore.
