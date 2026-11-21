@@ -112,11 +112,18 @@ waits for that report before sending mute. A late report has at most two extra
 seconds beyond the label’s two-second foreground budget. Losing ownership,
 shutdown or expiry ends the continuation. A later echo cannot trigger a write.
 
-A remote volume digit matching the observed label level adopts that level. If
-an earlier restore is already in flight, the explicit command waits for its
-readback before setting the requested level once. While the native write is
-unconfirmed, the previous level cannot become a new label’s baseline.
-Relative volume buttons continue adjusting the current audible level.
+Before changing the speaker level, the controller checks that its original level
+and mute still match. Speech starts only after the speaker reports the requested
+level with mute off. If that report misses the speech deadline, the label is
+skipped. A late report can trigger one guarded return to the original setting
+within the recovery window. After that window a fresh label or cue can request
+the cleanup before taking a new baseline. A distinct human level or mute releases
+the earlier claim.
+
+A volume digit can keep the current audible setting before the label changes it.
+If an earlier write is outstanding, each explicit digit can still send its own
+level. A delayed mute report from an older command cannot confirm a newer
+audible selection. Relative volume buttons adjust the current audible level.
 
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,

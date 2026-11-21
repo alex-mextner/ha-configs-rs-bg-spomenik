@@ -830,11 +830,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.get(self.entity).attributes["volume_level"], 0.5
         )
 
-    async def check_digit_preempts_scheduled_label_level(self, selected: float) -> None:
+    async def check_digit_preempts_scheduled_label_level(
+        self, selected: float, *, muted: bool = True, source: str = "digit"
+    ) -> None:
         attrs = dict(
             self.hass.states.get(self.entity).attributes,
             volume_level=0.8,
-            is_volume_muted=True,
+            is_volume_muted=muted,
             supported_features=4,
         )
         self.hass.states.async_set(self.entity, "paused", attrs)
@@ -863,15 +865,38 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(scheduled.wait(), 0.5)
                 playback = self.manager.active_label
                 self.assertFalse(self.calls)
-                await script.async_run(
-                    {"command": "volume_set", "volume_level": selected},
-                    context=Context(),
-                )
+                if source == "digit":
+                    await script.async_run(
+                        {"command": "volume_set", "volume_level": selected},
+                        context=Context(),
+                    )
+                elif source == "relative":
+
+                    async def volume_up(call) -> None:
+                        self.calls.append((call.service, dict(call.data)))
+                        self.hass.states.async_set(
+                            self.entity, "paused", {**attrs, "volume_level": selected}
+                        )
+
+                    self.hass.services.async_register(
+                        "media_player", "volume_up", volume_up
+                    )
+                    await self.hass.services.async_call(
+                        "media_player",
+                        "volume_up",
+                        {"entity_id": self.entity},
+                        blocking=True,
+                    )
+                else:
+                    self.hass.states.async_set(
+                        self.entity, "paused", {**attrs, "volume_level": selected}
+                    )
             finally:
                 release.set()
                 await asyncio.wait_for(label, 0.8)
         self.assertEqual(
-            [d["volume_level"] for n, d in self.calls if n == "volume_set"], [selected]
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [selected] if source == "digit" and (muted or selected != 0.8) else [],
         )
         self.assertNotIn("volume_mute", [n for n, _ in self.calls])
         self.assertEqual(
@@ -882,6 +907,242 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(playback.raised)
         self.assertFalse(self.manager.volume_recovery)
+
+    async def test_already_audible_digit_preempts_scheduled_label_level(self) -> None:
+        await self.check_digit_preempts_scheduled_label_level(0.8, muted=False)
+        await self.manager.announce("tv")
+        self.assertEqual(len(self.speech_started), 1)
+
+    async def test_external_level_preempts_scheduled_label_level(self) -> None:
+        await self.check_digit_preempts_scheduled_label_level(
+            0.9, muted=False, source="external"
+        )
+
+    async def test_relative_level_preempts_scheduled_label_level(self) -> None:
+        await self.check_digit_preempts_scheduled_label_level(
+            0.9, muted=False, source="relative"
+        )
+
+    async def test_cancel_remute_before_first_instruction_releases_owner(self) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=True,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        self.manager.register_volume_service()
+        create = self.hass.async_create_background_task
+        digit = None
+        started = False
+        original = self.manager.restore_remembered_mute
+
+        async def remute(playback) -> None:
+            nonlocal started
+            started = True
+            await original(playback)
+
+        def order(coro, name, **kwargs: object) -> asyncio.Task:
+            nonlocal digit
+            if (
+                name
+                in (
+                    "remote-announcements-remute",
+                    "remote-announcements-volume-recovery",
+                )
+                and digit is None
+            ):
+                digit = self.hass.async_create_task(
+                    self.hass.services.async_call(
+                        integration.DOMAIN,
+                        "adopt_label_volume",
+                        {"entity_id": self.entity, "volume_level": 0.7},
+                        blocking=True,
+                        return_response=True,
+                    ),
+                    eager_start=False,
+                )
+            return create(coro, name, **kwargs)
+
+        with (
+            patch.object(self.manager, "restore_remembered_mute", remute),
+            patch.object(self.hass, "async_create_background_task", order),
+        ):
+            await self.manager.announce("tv")
+            self.assertEqual(await digit, {"status": "sent"})
+        self.assertFalse(started)
+        self.assertFalse(self.manager.pending_remutes)
+        await self.manager.announce("tv")
+        self.assertEqual(len(self.speech_started), 2)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.7
+        )
+
+    async def test_old_mute_echo_cannot_settle_audible_selection(self) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=True,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def ack_only(call) -> None:
+            self.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register("media_player", "volume_mute", ack_only)
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.15),
+            patch.object(integration, "RECOVERY_RESERVE", 0.08),
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(self.calls[-1][0], "volume_mute")
+        self.hass.services.async_register("media_player", "volume_set", ack_only)
+        await self.music_script("speaker", self.entity).async_run(
+            {"command": "volume_set", "volume_level": 0.8}, context=Context()
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        await self.hass.async_block_till_done()
+        with self.assertRaisesRegex(ProviderNotReadyError, "recovery_pending"):
+            await self.manager.announce("tv")
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "is_volume_muted": False}
+        )
+        await self.hass.async_block_till_done()
+        self.hass.services.async_register("media_player", "volume_set", self.media)
+        await self.manager.announce("tv")
+        self.assertEqual([n for n, _ in self.calls].count("volume_mute"), 1)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+        self.assertFalse(
+            self.hass.states.get(self.entity).attributes["is_volume_muted"]
+        )
+
+    async def unobserved_initial(self) -> dict:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=False,
+            supported_features=4,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def delayed(call) -> None:
+            self.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register("media_player", "volume_set", delayed)
+        with (
+            patch.object(integration, "ATTEMPT_BUDGET", 0.12),
+            patch.object(integration, "RECOVERY_RESERVE", 0.04),
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual([n for n, _ in self.calls], ["volume_set"])
+        self.assertEqual(self.speech_started, [])
+        self.hass.services.async_register("media_player", "volume_set", self.media)
+        return attrs
+
+    async def test_late_initial_echo_runs_one_bounded_restore(self) -> None:
+        attrs = await self.unobserved_initial()
+        sent = asyncio.Event()
+
+        async def restored(call) -> None:
+            await self.media(call)
+            sent.set()
+
+        self.hass.services.async_register("media_player", "volume_set", restored)
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.4}
+        )
+        await asyncio.wait_for(sent.wait(), 0.5)
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+        await self.manager.announce("tv")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.8, 0.4, 0.8],
+        )
+        self.assertEqual(len(self.speech_started), 1)
+
+    async def test_new_human_mute_without_an_older_mute_releases_selection(
+        self,
+    ) -> None:
+        attrs = await self.start_delayed_restore(muted=False)
+        await self.music_script("speaker", self.entity).async_run(
+            {"command": "volume_set", "volume_level": 0.7}, context=Context()
+        )
+        self.hass.states.async_set(
+            self.entity,
+            "paused",
+            {**attrs, "volume_level": 0.4, "is_volume_muted": True},
+        )
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.manager.volume_recovery)
+        self.hass.services.async_register("media_player", "volume_set", self.media)
+        await self.manager.announce("tv")
+        self.assertTrue(self.hass.states.get(self.entity).attributes["is_volume_muted"])
+
+    async def test_delayed_initial_echo_precedes_native_speech(self) -> None:
+        attrs = dict(
+            self.hass.states.get(self.entity).attributes,
+            volume_level=0.8,
+            is_volume_muted=False,
+        )
+        self.hass.states.async_set(self.entity, "paused", attrs)
+        accepted = asyncio.Event()
+
+        async def initial(call) -> None:
+            if call.data["volume_level"] == 0.4:
+                self.calls.append((call.service, dict(call.data)))
+                accepted.set()
+                return
+            await self.media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", initial)
+        attempt = asyncio.create_task(self.manager.announce("tv"))
+        await asyncio.wait_for(accepted.wait(), 0.5)
+        self.assertFalse(self.speech_started)
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.4}
+        )
+        await asyncio.wait_for(attempt, 0.8)
+        self.assertEqual(
+            [n for n, _ in self.calls], ["volume_set", "send_command", "volume_set"]
+        )
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+
+    async def test_expired_initial_echo_waits_for_next_real_request(self) -> None:
+        attrs = await self.unobserved_initial()
+        self.manager.late_initials[self.entity].cleanup_deadline = time.monotonic() - 1
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.4}
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        self.assertEqual(len(self.calls), 1)
+        with self.assertRaisesRegex(ProviderNotReadyError, "recovery_pending"):
+            await self.manager.announce("tv")
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        await self.manager.announce("tv")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.8, 0.4, 0.8],
+        )
+
+    async def test_late_initial_yields_to_external_volume(self) -> None:
+        attrs = await self.unobserved_initial()
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.9}
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        await self.manager.announce("tv")
+        self.assertEqual(
+            [d["volume_level"] for n, d in self.calls if n == "volume_set"],
+            [0.4, 0.4, 0.9],
+        )
 
     async def test_digit_during_owned_pause_keeps_volume_and_recovers_music(
         self,
@@ -930,20 +1191,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def no_echo(call) -> None:
             self.calls.append((call.service, dict(call.data)))
 
-        async def digit(call) -> dict[str, str]:
-            await script.async_run(
-                {"command": "volume_set", "volume_level": 0.4}, context=Context()
-            )
-            return await self.native(call)
+        initial = asyncio.Event()
 
-        self.hass.services.async_register("media_player", "volume_set", no_echo)
-        self.hass.services.async_register(
-            "yandex_station",
-            "send_command",
-            digit,
-            supports_response=SupportsResponse.OPTIONAL,
+        async def delayed_initial(call) -> None:
+            await no_echo(call)
+            initial.set()
+
+        self.hass.services.async_register("media_player", "volume_set", delayed_initial)
+        label = asyncio.create_task(self.manager.announce("tv"))
+        await asyncio.wait_for(initial.wait(), 0.5)
+        await script.async_run(
+            {"command": "volume_set", "volume_level": 0.4}, context=Context()
         )
-        await self.manager.announce("tv")
+        await label
+        self.assertFalse(self.speech_started)
         self.assertEqual(
             [d["volume_level"] for n, d in self.calls if n == "volume_set"], [0.4, 0.4]
         )
