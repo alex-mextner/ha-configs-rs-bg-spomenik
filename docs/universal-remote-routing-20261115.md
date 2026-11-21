@@ -10,7 +10,8 @@ an intermediate projector or native state to announcements.
 The controller uses physical capture timestamps and cancellable callback
 ownership for two independent deadlines: the inclusive one-second INPUT double
 window and exactly sixty seconds of inactivity. Single INPUT retains its original
-pair snapshot and wake policy. The lease starts at the physical action, including
+pair snapshot. When INPUT selects the TV pair, an off TV stays off. Explicit app
+and source commands can still wake it. The lease starts at the physical action, including
 the first INPUT of a single, and every accepted universal-remote action renews it.
 Display OFF or projector shutdown invalidates stale pending input and affected
 manual focus. Unknown observations never mean OFF.
@@ -28,9 +29,30 @@ the route without reserving or adopting a physical Power request.
 
 Ordinary navigation, text, volume and transport keys are rejected for a busy,
 confirmed-off, or unknown display. A rejection captured during a transition stays
-rejected if YAML runs after confirmation. Explicit source/app selection and single
-INPUT may start their named idle pair; Power remains busy until all active pairs
+rejected if YAML runs after confirmation. Explicit source/app selection may start its named idle pair. Single INPUT may
+wake the projector when the TV is on; Power remains busy until all active pairs
 settle. Independent AC, lighting and speaker controls remain available.
+
+A single Audio press toggles playback. On the living-room Yandex Station,
+Play resumes the current track or starts My Wave when the local Station reports
+no current item, including when Alice is speaking with no track, radio or
+playlist context. In cloud-only mode it requests resume, since
+the missing track information cannot establish whether the queue is empty.
+The receiver recognizes double Audio within 800 ms, even when both presses
+and the following Play reach it before the automation runs. Playback, track and volume buttons keep
+the speaker selected for sixty seconds after the latest press. Audio, Back and
+Exit dismiss speaker mode immediately. Colour lights work without extending
+speaker focus. Paired display Power also leaves speaker focus in place. Menu,
+Home, Guide, Dash, Netflix, YouTube and Disney leave speaker focus and use the
+normal display guard on the same press. Disney also does so on a hold. Playback,
+arrows, OK and volume are routed to the owner selected at physical reception,
+even if another button changes focus before dispatch. Apple TV in speaker mode
+enables Bluetooth on the speaker. A short or held OK toggles music once.
+
+Explicit `remote_select` calls (the default `explicit: true`) dismiss speaker
+focus before subsequent navigation. Calls with `explicit: false` follow observed
+display power without taking speaker focus. The selection service itself sends
+no power or wake command; a previously captured press keeps its original owner.
 
 A recognized command rejected by a guard emits the short quiet rejection cue
 through remote_announcements.reject. Unsupported keys/text operations, unavailable
@@ -49,6 +71,9 @@ The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded
 256-entry cache and cannot replay the press. Only that receiver supplies trusted
 physical timestamps; unknown or evicted event timestamps never renew a lease.
+Physical speaker dispatch keeps that ownership when it falls back to the current
+speaker mode. Direct `audio_mode_dispatch` calls without a physical marker still
+renew speaker activity through their compatibility pulse.
 Before an INPUT or inactivity callback commits, the controller drains already
 ready native input, so a second capture at exactly 1000 ms wins even when HA
 processes it after the callback was due. A capture just before lease expiry is
@@ -94,7 +119,34 @@ Focused checks use isolated source and in-memory hardware boundaries. Full
 repository suites, coverage and heavier matrices belong to genuine CI/RunPod.
 No test should toggle physical appliances or inject a live remote event.
 
-## Deployment and rollback
+## Issue 159 deployment and rollback
+
+Install the following eight runtime files together from the reviewed merged commit.
+
+- `packages/universal_remote.yaml`
+- `packages/music_remote.yaml`
+- `packages/remote_announcements.yaml`
+- `custom_components/ekf_appliances/remote_mode.py`
+- `custom_components/ekf_appliances/remote_control.py`
+- `custom_components/remote_announcements/__init__.py`
+- `custom_components/remote_announcements/rejection.py`
+- `custom_components/remote_announcements/services.yaml`
+
+When checking announcements, use a source that reports playback for the 6/10
+case. The Android TV Remote entity reports power, active app, volume and mute.
+A native TV app without a Cast or Music Assistant playing report provides no
+playback indication. If no other living-room source reports playback, its
+confirmation uses 4/10.
+
+Compare the eight live files with their expected originals and retain verified
+backups. Run the installed `scripts/ha_safe_reload.sh` configuration check and
+restart once. After startup, verify the `remote_announcement_playback_entities`
+attribute on `sensor.universal_remote_target`, the `input_text.audio_pending_tap_ms` helper,
+the `remote_announcements.adopt_label_volume` action, and the speaker and climate
+entities. Observe the healthy process for 60 seconds. If rollback is required,
+restore these eight verified originals together after checking for intervening changes. Preserve unrelated files and the production Git index.
+
+## Issue 88 deployment and rollback
 
 Review the scoped source diff and exact tested commit. Preserve unrelated staged
 and unstaged production changes. Deploy only these 13 reviewed runtime files:

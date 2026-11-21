@@ -208,7 +208,7 @@ class RejectionQueue:
 
 def _quiet_unchanged(manager: Manager, playback: SpeechPlayback) -> bool:
     state = manager.hass.states.get(playback.entity)
-    if state is None or playback.user_changed_volume:
+    if state is None or playback.user_changed_volume or playback.initial_preempted:
         return False
     volume = state.attributes.get("volume_level")
     return (
@@ -224,14 +224,18 @@ def _quiet_unchanged(manager: Manager, playback: SpeechPlayback) -> bool:
 
 def _may_lower(manager: Manager, playback: SpeechPlayback) -> bool:
     state = manager.hass.states.get(playback.entity)
-    return bool(
+    admitted = bool(
         not manager.closing
+        and not playback.user_changed_volume
         and state is not None
-        and state.state not in ("unknown", "unavailable")
-        and not state.attributes.get("restored")
+        and playback.at_baseline(state)
         and not state.attributes.get("is_volume_muted", False)
-        and state.attributes.get("volume_level") == playback.old_volume
     )
+    if admitted:
+        # Acknowledgement can precede the quiet level's actual device report.
+        playback.initial_admitted = time.time()
+        playback.raised = True
+    return admitted
 
 
 async def _confirm_quiet(manager: Manager, playback: SpeechPlayback) -> None:
@@ -399,8 +403,7 @@ async def play_rejection(
         )
         try:
             if playback.applied < playback.old_volume:
-                # The shared recovery helper owns this temporary decrease.
-                playback.raised = True
+                # The admission guard gives shared recovery ownership.
                 changed = await manager.call(
                     "volume_set",
                     playback.entity,

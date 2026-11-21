@@ -339,8 +339,28 @@ script:
               - stop: "Короткий сигнал передан колонке."
                 response_variable: result
       - variables:
+          # A Station can report paused with no current item.
+          # A lost local link also clears metadata. Only a local report
+          # can distinguish an empty Station from a cloud-only resumable queue.
+          start_wave: >-
+            {{ cmd == 'play_pause' and route.owner == 'speaker'
+               and route.speaker_backend == 'yandex'
+               and (states(target_entity) in ['idle', 'paused', 'standby', 'off']
+                    or (states(target_entity) == 'playing'
+                        and state_attr(target_entity, 'alice_state') in ['SPEAKING', 'NONE']))
+               and state_attr(target_entity, 'alice_state') not in [none, '', 'unknown', 'unavailable']
+               and not state_attr(target_entity, 'assumed_state')
+               and not state_attr(target_entity, 'restored')
+               and not state_attr(target_entity, 'media_content_id')
+               and not state_attr(target_entity, 'media_title')
+               and not state_attr(target_entity, 'media_content_type')
+               and not state_attr(target_entity, 'media_playlist')
+               and not state_attr(target_entity, 'media_duration') }}
+      - variables:
           service_name: >-
-            {% if cmd == 'play_pause' %}
+            {% if start_wave %}
+              play_media
+            {% elif cmd == 'play_pause' %}
               {{ 'media_pause' if states(target_entity) in ['playing', 'buffering'] else 'media_play' }}
             {% else %}
               {{ {'next':'media_next_track', 'previous':'media_previous_track',
@@ -350,7 +370,7 @@ script:
             {% endif %}
       - variables:
           required_feature: >-
-            {{ {'media_play':16384, 'media_pause':1, 'media_next_track':32,
+            {{ {'play_media':512, 'media_play':16384, 'media_pause':1, 'media_next_track':32,
                 'media_previous_track':16, 'volume_up':1024, 'volume_down':1024,
                 'volume_set':4, 'volume_mute':8, 'media_stop':4096}[service_name] }}
       - if: "{{ (features | bitwise_and(required_feature | int)) == 0 }}"
@@ -372,6 +392,23 @@ script:
             then:
               - stop: "AISIS принимает громкость от 0.1; нулевой уровень не является поддерживаемым mute."
                 error: true
+          - if: >-
+              {{ route.owner == 'speaker' and volume_level | float > 0
+                 and state_attr('sensor.remote_announcements', 'supports_label_volume_adoption') == true }}
+            then:
+              - action: remote_announcements.adopt_label_volume
+                data:
+                  entity_id: "{{ target_entity }}"
+                  volume_level: "{{ volume_level | float }}"
+                response_variable: label_volume
+              - if: "{{ label_volume.status == 'kept' }}"
+                then:
+                  - stop: "Выбранная громкость уже установлена на колонке."
+                    response_variable: result
+              - if: "{{ label_volume.status == 'sent' }}"
+                then:
+                  - stop: "Выбранная громкость передана колонке."
+                    response_variable: result
       - if: >-
           {{ cmd == 'mute_toggle'
              and state_attr(target_entity, 'is_volume_muted') not in [true, false] }}
@@ -380,7 +417,10 @@ script:
             error: true
       - action: "{{ 'media_player.' ~ service_name }}"
         data: >-
-          {% if cmd == 'volume_set' %}
+          {% if start_wave %}
+            {{ dict(entity_id=target_entity, media_content_type='command',
+                    media_content_id='Включи мою волну') }}
+          {% elif cmd == 'volume_set' %}
             {{ dict(entity_id=target_entity, volume_level=volume_level | float) }}
           {% elif cmd == 'mute_toggle' %}
             {{ dict(entity_id=target_entity,

@@ -15,6 +15,16 @@ INPUT_MIN_GAP = 0.150
 INPUT_MAX_GAP = 1.000
 CAPTURE_EPSILON = 0.000001  # UTC epoch float resolution; never a debounce window.
 INTERNAL_KEYS = {"input_timeout", "projector_timeout", "power_state", "wake_done"}
+DISPLAY_ONLY_KEYS = {
+    "menu",
+    "home",
+    "guide",
+    "dash",
+    "netflix",
+    "youtube",
+    "disney",
+    "disney_hold",
+}
 
 
 class RemoteRoute(TypedDict):
@@ -24,6 +34,8 @@ class RemoteRoute(TypedDict):
     native: bool
     blocked: NotRequired[str]
     power_request_id: NotRequired[str]
+    speaker: NotRequired[bool]
+    audio_action: NotRequired[str]
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,8 @@ class RemoteMode:
             wake,
         )
         self.pair, self.native, self.audio = "tv", False, False
+        self.audio_expires_at = 0.0
+        self._audio_handle = None
         self.expires_at = 0.0
         self.shutting_down = False
         self.displays = {"tv": None, "projector": None}
@@ -165,6 +179,33 @@ class RemoteMode:
             and (self.clock() if at is None else at) + 1e-9 >= self.expires_at
         )
 
+    def set_audio(self, *, active: bool, at: float) -> None:
+        """Commit speaker focus and its physical inactivity deadline together."""
+        self._set_audio(active=active, at=at)
+        self._publish()
+
+    def _set_audio(self, *, active: bool, at: float) -> None:
+        if self._audio_handle is not None:
+            self._audio_handle.cancel()
+            self._audio_handle = None
+        self.audio = active
+        self.audio_expires_at = at + LEASE_SECONDS if active else 0.0
+        if active:
+            self._arm_audio()
+
+    def _arm_audio(self) -> None:
+        deadline = self.audio_expires_at
+
+        def expire() -> None:
+            if self.audio_expires_at != deadline:
+                return
+            if self.clock() < deadline:
+                self._arm_audio()
+            else:
+                self.set_audio(active=False, at=self.clock())
+
+        self._audio_handle = self.schedule(max(0, deadline - self.clock()), expire)
+
     def observe(
         self,
         power: PowerObservations,
@@ -179,7 +220,12 @@ class RemoteMode:
         turned_off = self._off_transitions(values, revisions, intents)
         self.displays, self.revisions, self.intents = values, revisions, intents
         shutdown_started = power.shutting_down and not self.shutting_down
-        self.shutting_down, self.audio = bool(power.shutting_down), bool(audio)
+        self.shutting_down = bool(power.shutting_down)
+        observed_at = self.clock() if at is None else at
+        if audio != self.audio:
+            self._set_audio(active=audio, at=observed_at)
+        elif self.audio and observed_at >= self.audio_expires_at:
+            self._set_audio(active=False, at=observed_at)
         self.targets = {**self.targets, **(power.targets or {})}
         if turned_off or shutdown_started:
             # Both sides are in the first INPUT snapshot: neither an old origin
@@ -223,6 +269,8 @@ class RemoteMode:
         if pair not in {"tv", "projector"}:
             error_message = "Unknown remote pair"
             raise ValueError(error_message)
+        if explicit:
+            self._set_audio(active=False, at=self.clock() if at is None else at)
         self._cancel_pending()
         if pair == "projector" and self.shutting_down:
             self._automatic()
@@ -263,14 +311,14 @@ class RemoteMode:
         if pending is None or not self._valid(pending):
             return
         destination = "tv" if pending.pair == "projector" else "projector"
-        other = pending.pair
         wake = (
-            self.displays[destination] is False
-            and self.displays[other] is True
-            and self.targets[destination] is not True
-            and not (destination == "projector" and self.shutting_down)
+            destination == "projector"
+            and self.displays["projector"] is False
+            and self.displays["tv"] is True
+            and self.targets["projector"] is not True
+            and not self.shutting_down
         )
-        self.audio = False
+        self._set_audio(active=False, at=pending.at)
         self.select(destination, at=pending.at)
         if wake:
             self.wake(destination, pending.revisions[destination])
@@ -291,6 +339,9 @@ class RemoteMode:
             return self._input_press(at)
         if self.pending:
             self._single()
+        if self.audio and button in DISPLAY_ONLY_KEYS:
+            # The display owns this press, including guards at physical reception.
+            self.set_audio(active=False, at=at)
         if self.expires_at:
             self.expires_at = max(self.expires_at, at + LEASE_SECONDS)
             self._arm_lease()
@@ -311,7 +362,7 @@ class RemoteMode:
         ):
             self._cancel_pending()
             if self._valid(pending):
-                self.audio = False
+                self._set_audio(active=False, at=at)
                 self.select(pending.pair, native=not pending.native, at=at)
             return self.resolve()
         if pending:
@@ -336,5 +387,9 @@ class RemoteMode:
     def close(self) -> None:
         """Cancel gestures and deadlines without dispatching hardware actions."""
         self._cancel_pending()
+        if self._audio_handle is not None:
+            self._audio_handle.cancel()
+            self._audio_handle = None
+        self.audio_expires_at = 0.0
         self.expires_at = 0
         self._arm_lease()

@@ -76,7 +76,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(self.config["backend_entity"], "AISIS")
         self.hass.states.async_set(self.config["aisis_connected_entity"], "on")
         self.hass.states.async_set(entity, "idle", {"volume_level": 0.1})
-        self.manager.aisis_volume_recovery[entity] = (0.4, 0.1)
+        self.manager.volume_recovery[entity] = integration.VolumeRestore(0.4, 0.1)
         await self.reject("pending-recovery")
         self.assertEqual(
             self.manager.public_status["rejection_drop_reason"],
@@ -240,7 +240,9 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.reject("unconfirmed-restore")
         self.assertEqual(self.spoken_status(), before)
-        self.assertEqual(self.manager.aisis_volume_recovery[entity], (0.4, 0.1))
+        self.assertEqual(
+            self.manager.volume_recovery[entity], integration.VolumeRestore(0.4, 0.1)
+        )
         self.assertEqual(
             self.manager.public_status["rejection_status"], "recovery_unconfirmed"
         )
@@ -340,6 +342,102 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.reject(f"unavailable:{index}")
         self.assertEqual(self.fixture.calls, [])
 
+    async def unobserved_quiet_initial(self) -> dict:
+        before = self.hass.states.get(self.entity)
+        attrs = {**before.attributes, "volume_level": 0.8, "is_volume_muted": False}
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def accept_without_echo(call) -> None:
+            self.fixture.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register(
+            "media_player", "volume_set", accept_without_echo
+        )
+        await self.reject()
+        self.assertEqual([name for name, _ in self.fixture.calls], ["volume_set"])
+        self.hass.services.async_register(
+            "media_player", "volume_set", self.fixture.media
+        )
+        return attrs
+
+    async def test_late_quiet_initial_expiry_keeps_ownership(self) -> None:
+        attrs = await self.unobserved_quiet_initial()
+        await self.fixture.check_expired_initial_handoff(attrs)
+
+    async def test_human_level_at_quiet_restore_handoff_survives_late_initial(
+        self,
+    ) -> None:
+        restore = self.manager.restore_playback
+
+        async def report_before_restore(playback, **kwargs: Any) -> dict[str, Any]:
+            self.assertFalse(playback.override_observed)
+            state = self.hass.states.get(self.entity)
+            self.hass.states.async_set(
+                self.entity,
+                state.state,
+                {**state.attributes, "volume_level": 0.9},
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(playback.initial_preempted)
+            return await restore(playback, **kwargs)
+
+        with patch.object(self.manager, "restore_playback", report_before_restore):
+            attrs = await self.unobserved_quiet_initial()
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.1}
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.9
+        )
+        self.assertEqual(
+            [
+                data["volume_level"]
+                for name, data in self.fixture.calls
+                if name == "volume_set"
+            ],
+            [0.1, 0.9],
+        )
+        self.assertFalse(self.manager.late_initials)
+        self.assertFalse(self.manager.volume_recovery)
+
+    async def test_late_quiet_volume_echo_restores_original_level(self) -> None:
+        before = self.hass.states.get(self.entity)
+        attrs = {**before.attributes, "volume_level": 0.8}
+        self.hass.states.async_set(self.entity, "paused", attrs)
+
+        async def accept_without_echo(call) -> None:
+            self.fixture.calls.append((call.service, dict(call.data)))
+
+        self.hass.services.async_register(
+            "media_player", "volume_set", accept_without_echo
+        )
+        await self.reject()
+        self.assertEqual(
+            self.manager.public_status["rejection_drop_reason"],
+            "quiet_volume_unconfirmed",
+        )
+        self.assertEqual([name for name, _ in self.fixture.calls], ["volume_set"])
+        self.hass.services.async_register(
+            "media_player", "volume_set", self.fixture.media
+        )
+        self.hass.states.async_set(
+            self.entity, "paused", {**attrs, "volume_level": 0.1}
+        )
+        await self.hass.async_block_till_done(wait_background_tasks=True)
+
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.8
+        )
+        self.assertEqual(
+            [
+                data["volume_level"]
+                for name, data in self.fixture.calls
+                if name == "volume_set"
+            ],
+            [0.1, 0.8],
+        )
+
     async def test_missing_quiet_volume_readback_prevents_sound(self) -> None:
         async def ignore_volume(call) -> None:
             self.fixture.calls.append((call.service, dict(call.data)))
@@ -418,6 +516,32 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.get(self.entity).attributes["volume_level"], 0.2
         )
 
+    async def test_yandex_cue_restore_ack_cannot_become_next_labels_volume(
+        self,
+    ) -> None:
+        async def ack_only(call) -> None:
+            if call.data["volume_level"] == 0.2:
+                self.fixture.calls.append((call.service, dict(call.data)))
+                return
+            await self.fixture.media(call)
+
+        self.hass.services.async_register("media_player", "volume_set", ack_only)
+        with (
+            patch.object(rejection, "CUE_BUDGET", 0.3),
+            patch.object(integration, "RECOVERY_RESERVE", 0.1),
+            patch.object(rejection, "CUE_SETTLE_SECONDS", 0.02),
+        ):
+            await self.reject()
+        before = list(self.fixture.calls)
+        with self.assertRaisesRegex(
+            integration.ProviderNotReadyError, "^yandex_volume_recovery_pending$"
+        ):
+            await self.manager.announce("tv")
+        self.assertEqual(self.fixture.calls, before)
+        self.assertEqual(
+            self.hass.states.get(self.entity).attributes["volume_level"], 0.1
+        )
+
     async def test_cue_waits_for_spoken_label_and_its_restore(self) -> None:
         started = asyncio.Event()
         self.fixture.speech_gate = asyncio.Event()
@@ -443,7 +567,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for name, data in self.fixture.calls
                 if name == "volume_set"
             ],
-            [0.4],
+            [0.6],
         )
         self.fixture.speech_gate.set()
         await speech
@@ -454,7 +578,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for name, data in self.fixture.calls
                 if name == "volume_set"
             ],
-            [0.4, 0.2, 0.1, 0.2],
+            [0.6, 0.2, 0.1, 0.2],
         )
         self.assertEqual(
             self.hass.states.get(self.entity).attributes["media_content_id"],
@@ -565,7 +689,7 @@ class RejectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.state, "playing")
         self.assertEqual(state.attributes["media_content_id"], "aisis-track")
         self.assertEqual(state.attributes["volume_level"], 0.4)
-        self.assertFalse(self.manager.aisis_volume_recovery)
+        self.assertFalse(self.manager.volume_recovery)
 
 
 if __name__ == "__main__":

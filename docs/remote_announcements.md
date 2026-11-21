@@ -66,8 +66,23 @@ and shutdown still has a bounded wait. A command already accepted by a physical
 speaker cannot be recalled. These deadlines therefore provide best-effort
 controller recovery, not a guarantee of physical interruption or audible latency.
 
-Speech volume is `max(current volume, configured volume_floor)`, currently 0.4
-in this package (HA 0..1; speaker 0..10). Restore the old volume only while the
+All five mode labels use 6/10 while any living-room source is playing and 4/10
+otherwise. At the start of speech, the controller reads the routed Samsung TV
+(active Chromecast, Android TV or Music Assistant session), Kodi on the projector,
+and the living-room Yandex Mini. The controller counts a display only when both the display
+and its selected player report active playback. Native Alice speech without underlying media does
+not count. A content ID, title, media type, playlist or duration identifies underlying
+Station content, using the same predicate as the remote's Play action. Each queued
+label reads current playback after the preceding label or
+quiet cue completes. Paused, idle, powered-on, buffering, unavailable
+and restored states do not count as playing. An assumed cloud-only speaker state after a
+disconnect does not raise the volume. The same rule applies when the
+studio speaker is selected for announcements. A louder speaker is temporarily
+turned down. The package configures the three source IDs on the target sensor through
+`homeassistant.customize`. Older configurations without a source list keep their configured minimum
+speech volume (default 5/10).
+
+Restore the old volume only while the
 current level still equals our temporary level and the
 speaker was not muted by the user during speech. Yandex volume-zero mute is lifted
 for speech and its remembered volume plus previous mute state are restored; user
@@ -81,18 +96,63 @@ reports `aisis_cannot_restore_muted_or_invalid_volume`. No Alice fallback is use
 verify the installed schema and actual native volume readback before deploying this
 HA guard change. Older Quasar can acknowledge a request while discarding level zero,
 so an HTTP/service acknowledgement is not restoration proof. After the restore call,
-the controller waits for matching AISIS volume state within the existing recovery
-deadline; absent readback reports `recovery_unconfirmed`, without a retry or extra
-volume command. The tests assert published device volume, and intervening human
+the controller waits for the original level or a distinct user volume or mute
+within the existing recovery deadline. Missing readback reports
+`recovery_unconfirmed` without retrying the command. The tests assert published device volume, and intervening human
 volume changes still prevent restore.
 
-An AISIS restore keeps a per-speaker recovery record until actual volume readback
+Spoken labels and quiet cues on Yandex and AISIS keep a per-speaker recovery record until volume readback
 confirms the original level, or a valid different human volume/mute state is observed.
 While HA still reports the temporary speech level, another announcement is rejected
-as `aisis_volume_recovery_pending`, even after the service acknowledgement completes.
-Unrelated state attributes do not release this guard. A restore that was never sent
-clears its own record. Clearing the guard does not replay speech or send a restore;
-only a later regular announcement request can proceed.
+as `yandex_volume_recovery_pending` or `aisis_volume_recovery_pending`, even after the service acknowledgement completes.
+Unrelated state attributes do not release this guard. If HA has accepted the original
+volume but the final mute was never dispatched, the controller still waits for the
+volume readback. When HA dispatches the mute, the original remembered level and
+muted state must both be observed unless the user chooses a distinct volume.
+The Yandex Mini remembers the last positive volume it reports. The controller
+waits for that report before sending mute. A late report has at most two extra
+seconds beyond the label’s two-second foreground budget. Losing ownership,
+shutdown or expiry ends the continuation. A later echo cannot trigger a write.
+
+Before changing the speaker level, the controller checks that its original level
+and mute still match. Speech starts only after the speaker reports the requested
+level with mute off. If that report misses the speech deadline, the label is
+skipped. A label needing the same level may share the accepted write and wait for
+its report; this does not renew that write's original uncertainty deadline.
+A conflicting label is rejected and a quiet cue is dropped with the pending
+recovery reason. Neither is automatically retried.
+
+While the initial write remains unobserved, a distinct reliable human level or
+mute becomes the recovery baseline. The interrupted label stays quiet. If our
+accepted write then appears, recovery preserves the latest observable human
+choice, including a change reported after the foreground wait ended. This changes
+only the volume/mute baseline; the original content and pause/resume snapshot stay
+separate. A later explicit remote digit relinquishes that recovery claim.
+
+A late initial report can trigger one guarded recovery within the original
+cleanup window: normally four seconds from the label's start, or five seconds for
+a quiet cue. Autonomous recovery needs at least a full service acknowledgement
+opportunity remaining. The initial write stays tracked until a native restore is
+admitted or reliable feedback confirms settlement; scheduling a recovery task does
+not release ownership. If its budget expires before admission, a fresh request can
+initiate cleanup with a full recovery budget. No delayed autonomous write is
+admitted after the original window. After pending provider/manual requests finish,
+a fresh request at the reliable baseline can treat an expired missing write as
+lost and try again. Physical commands cannot be recalled: a report that
+arrives after a lost-write claim was released cannot be safely attributed or
+corrected. An app/voice choice identical to an outstanding command's level is also
+indistinguishable from that command's report.
+
+A volume digit can keep the current audible setting before the label changes it,
+or after a previous restore has already settled. If an earlier write is still
+outstanding, each explicit digit can send its own level. A delayed mute report
+from an older command cannot confirm a newer audible selection. If coalesced
+commands produce no state change, a fresh label/cue request may release the manual
+fence after its uncertainty window only when the reliable current level already
+matches the audible selection and all provider/manual tasks have finished. The
+window normally ends four seconds after the digit and never precedes an inherited
+recovery deadline. A still-muted or different unresolved level remains guarded.
+Relative volume buttons adjust the current audible level.
 
 `sensor.remote_announcements` reports readiness, dependencies, clip duration,
 service dispatch timing, `controller_elapsed_ms`, `controller_deadline_missed`,
@@ -191,8 +251,10 @@ The selected announcement speaker receives its native short sound:
 
 A cue temporarily lowers a valid nonzero speaker volume to
 `min(current volume, 0.1)`, verifies the resulting HA state before sending audio,
-and restores the prior level only while its ownership checks still hold. A human
-volume or mute change wins. An unavailable, restored, muted or zero-volume speaker
+and restores the prior level only while its ownership checks still hold. An
+accepted quiet-level write remains tracked if its report misses the cue deadline;
+a later report uses the same bounded recovery as a label. A human volume or mute
+change wins. An unavailable, restored, muted or zero-volume speaker
 is left alone and produces a nondelivery diagnostic. Native sounds preserve the
 selected music queue; the cue sends no generic audio URL, pause, play or power
 command. The speakers' firmware may briefly duck music on their native sound
@@ -223,9 +285,11 @@ uses `rejection_controller_elapsed_ms`, `rejection_controller_budget_seconds`,
 Failed cue recovery remains `recovery_unconfirmed` with its safe recovery reason,
 including after a delivery failure. That delivery failure retains its
 `rejection_drop_reason` and increments the dropped counter, not the sent counter.
-Shutdown uses the explicit drop reason `closed`. Cue reporting does not replace
-the spoken-label readiness or controller diagnostics. Shared
-recovery ownership and guards still prevent another unsafe attempt.
+Shutdown uses the explicit drop reason `closed`. Ordinary cue reporting stays
+separate from spoken-label readiness and controller diagnostics. A failure in the
+shared late-volume recovery may update the main controller status; that diagnostic
+does not select a target or grant dispatch permission. Shared recovery ownership
+and guards still prevent another unsafe attempt.
 
 A queued service response does not prove playback. `completed` means a native
 Yandex completion event was observed; `sent_unconfirmed` means dispatch completed
@@ -233,8 +297,7 @@ without that event. Neither
 is acoustic proof of audibility. Physical cue level, duration and continuity of
 ongoing music require separate acceptance evidence.
 
-These cue rules preserve the existing spoken-label texts, cache identities and
-volume behavior.
+These cue rules preserve the existing spoken-label texts and cache identities.
 
 ## Silent preparation and checks
 

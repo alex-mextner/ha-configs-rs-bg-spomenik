@@ -21,7 +21,7 @@ The temperature sensor must report a recognized temperature unit; unknown, unava
 
 ## Devices and capabilities
 
-**Haier:** full-state off/cool/heat/dry/fan/auto; 16–30°C in 1°C steps; auto/low/medium/high fan; off/vertical swing; none/sleep/boost presets. Boost is available in cool/heat. Switching to another active mode clears boost. While off, changing desired settings does not turn the AC on. Explicit off always sends the model-specific off command, even when the assumed state is already off.
+**Haier:** full-state off/cool/heat/dry/fan/auto; 16–30°C in 1°C steps; auto/low/medium/high fan; off/vertical swing; none/sleep/boost presets. Boost is available in cool/heat. Switching to another active mode clears boost. While off, changing desired settings does not turn the AC on. Explicit off always sends the model-specific off command, even when the assumed state is already off. The universal remote’s Amazon button uses the assumed mode to choose between power-on and power-off. Power-on selects heat or cool from the outdoor temperature and retains the existing target temperature. To send OFF regardless of the assumed mode, call `climate.turn_off` on `climate.kondei_1`.
 
 The first setup defaults to off, 24°C, auto fan, no swing/preset, and previous mode cool. Later reloads restore the previous assumed mode and desired settings without transmitting. The native target temperature is persisted separately from HA's display-unit conversion. A legacy Comfort preset restores as None while preserving the other valid settings; restoration still sends no IR commands.
 
@@ -153,9 +153,9 @@ rapid taps stay distinct. Voice search rechecks the same guard before each step.
 The remote boundary does not change the native adapter's explicit power
 reconciliation described above.
 
-A single INPUT changes the display group. It retains the existing wake rule:
-when only the other group is ON, selecting an explicitly OFF display requests
-that pair to wake using the captured power-intent revision. A double INPUT keeps
+A single INPUT changes the display group. Selecting TV leaves an off TV asleep.
+Selecting the projector when the TV is on can wake the projector using the
+captured power-intent revision. A double INPUT keeps
 the original group and toggles Chromecast/TV or Kodi/projector. INPUT decisions
 use the first physical press's snapshot; intervening OFF invalidates that snapshot.
 
@@ -186,8 +186,13 @@ Matching transmitted IR echoes do not become physical remote observations.
 The latch persists through integration/HA reload via Home Assistant's Store API.
 Only a fresh explicit HDMI OFF report newer than the OFF request and reload can
 clear it. Cached/restored OFF, unknown, unavailable, command failure and timeouts
-cannot clear it. Audio mode continues to use double AUDIO and its existing
-three-second inactivity timeout; while active the effective target is `speaker`.
+cannot clear it. Double AUDIO selects `speaker` for up to sixty seconds after
+the last speaker control. AUDIO, Back and Exit dismiss speaker mode immediately.
+Colour lights and paired display Power keep their independent routes and leave
+speaker focus in place. Menu, Home, Guide, Dash, Netflix, YouTube and Disney
+return controls to the display on the same press. Disney also does so on a hold.
+Playback, arrow, OK and volume controls retain the owner selected when pressed,
+including when another button changes focus before the command runs.
 
 
 Queued INPUT wakes call `ekf_appliances.wake_if_current` on the canonical media

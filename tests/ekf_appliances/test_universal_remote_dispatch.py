@@ -288,7 +288,8 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             changed=self.controller._changed,
             wake=self.controller._wake,
         )
-        self.controller._clear_audio = False
+        self.controller._audio_mirror = None
+        self.controller._pending_audio = None
         self.controller._captured_routes.clear()
         self.controller._captured_press_ids.clear()
         self.controller._context_press_ids.clear()
@@ -319,6 +320,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             ("input_boolean.projector_power", "off"),
             ("input_boolean.audio_was_playing", "off"),
             ("input_text.audio_last_press_ms", "0"),
+            ("input_text.audio_pending_tap_ms", "0"),
             ("input_text.ac_last_mode", "cool"),
             (TV, "off"),
             ("media_player.projector", "off"),
@@ -353,6 +355,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.weather(18.3)
         self.controller.refresh()
         self.controller.mode.select(source, native=navigation == "on")
+        self.controller.mode.set_audio(active=audio == "on", at=time.time())
 
     def weather(self, value, unit="°C", state="sunny") -> None:
         self.hass.states.async_set(
@@ -410,6 +413,29 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             )
         await self.automation_scripts[identity].async_run(
             {"trigger": trigger, **variables}, context=Context()
+        )
+
+    async def dispatch_captured(self, button: str, at: float) -> None:
+        current = State(
+            "event.ekf_universal_remote",
+            str(at),
+            {
+                "event_type": button,
+                "last_received": at,
+                "receiver_enabled": True,
+            },
+        )
+        await self.run_automation(
+            "universal_remote_dispatcher",
+            button,
+            trigger_override={
+                "platform": "state",
+                "entity_id": current.entity_id,
+                "from_state": State(
+                    current.entity_id, "previous", {"event_type": "info"}
+                ),
+                "to_state": current,
+            },
         )
 
     def appliance_calls(self) -> Any:
@@ -518,7 +544,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     self.hass.states.get("input_boolean.audio_mode").state, mode[1]
                 )
 
-    async def test_amazon_turns_on_once_at_24_using_outdoor_temperature_in_every_mode(
+    async def test_amazon_turns_on_once_at_retained_target_using_outdoor_temperature(
         self,
     ) -> None:
         for mode, outdoor in product(MODES, (23.9, 24.0, 30.0)):
@@ -532,11 +558,12 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     self.appliance_calls(),
                     [
                         (
-                            "climate.set_temperature",
-                            {"entity_id": [AC], "temperature": 24, "hvac_mode": wanted},
+                            "climate.set_hvac_mode",
+                            {"entity_id": [AC], "hvac_mode": wanted},
                         )
                     ],
                 )
+                self.assertEqual(self.hass.states.get(AC).attributes["temperature"], 30)
                 self.assertEqual(
                     self.hass.states.get("input_boolean.audio_mode").state, mode[1]
                 )
@@ -561,8 +588,8 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.appliance_calls(),
             [
                 (
-                    "climate.set_temperature",
-                    {"entity_id": [AC], "temperature": 24, "hvac_mode": "heat"},
+                    "climate.set_hvac_mode",
+                    {"entity_id": [AC], "hvac_mode": "heat"},
                 )
             ],
         )
@@ -609,11 +636,134 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual([x for x in self.calls if x[0].startswith("climate.")], [])
 
+    async def test_explicit_display_service_moves_next_navigation_off_speaker(
+        self,
+    ) -> None:
+        for pair, explicit in product(("tv", "projector"), (None, True)):
+            with self.subTest(pair=pair, explicit=explicit):
+                other = "projector" if pair == "tv" else "tv"
+                self.reset((other, "on", "off"))
+                self.hass.states.async_set(TV if pair == "tv" else PROJECTOR, "on")
+                data = {"pair": pair}
+                if explicit is not None:
+                    data["explicit"] = explicit
+                route = await self.hass.services.async_call(
+                    "ekf_appliances",
+                    "remote_select",
+                    data,
+                    blocking=True,
+                    return_response=True,
+                )
+                self.assertEqual(route, {"pair": pair, "native": False})
+                self.assertEqual(self.appliance_calls(), [])
+                await self.run_automation("universal_remote_dispatcher", "right")
+                expected = (
+                    (
+                        "remote.send_command",
+                        {
+                            "entity_id": ["remote.televizor"],
+                            "command": "KEYCODE_DPAD_RIGHT",
+                            "delay_secs": 0,
+                        },
+                    )
+                    if pair == "tv"
+                    else (
+                        "kodi.call_method",
+                        {"entity_id": "media_player.home", "method": "Input.Right"},
+                    )
+                )
+                self.assertEqual(self.appliance_calls(), [expected])
+                self.assertFalse(self.controller.mode.audio)
+                self.assertEqual(self.controller.mode.audio_expires_at, 0)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+
+    async def test_observed_display_service_keeps_speaker_focus(self) -> None:
+        for pair in ("tv", "projector"):
+            with self.subTest(pair=pair):
+                self.reset((pair, "on", "off"))
+                self.hass.states.async_set(TV if pair == "tv" else PROJECTOR, "on")
+                deadline = self.controller.mode.audio_expires_at
+                await self.hass.services.async_call(
+                    "ekf_appliances",
+                    "remote_select",
+                    {"pair": pair, "explicit": False},
+                    blocking=True,
+                )
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertTrue(self.controller.mode.audio)
+                self.assertEqual(self.controller.mode.audio_expires_at, deadline)
+                await self.run_automation("universal_remote_dispatcher", "right")
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("script.music_remote_command", {"command": "next"})],
+                )
+
+    async def test_explicit_display_service_keeps_captured_speaker_and_power_routes(
+        self,
+    ) -> None:
+        self.reset(("tv", "on", "off"))
+        self.hass.states.async_set(TV, "on")
+        self.hass.states.async_set(PROJECTOR, "on")
+        at = time.time()
+        self.controller.physical_press("play", at)
+        self.controller.physical_press("power", at + 0.001)
+        await self.hass.services.async_call(
+            "ekf_appliances", "remote_select", {"pair": "projector"}, blocking=True
+        )
+        power = await self.hass.services.async_call(
+            "ekf_appliances",
+            "remote_prepare",
+            {"button": "power", "received_ms": (at + 0.001) * 1000},
+            blocking=True,
+            return_response=True,
+        )
+        self.assertEqual(set(power), {"pair", "native", "power_request_id"})
+        self.assertEqual(power["pair"], "tv")
+        self.assertFalse(power["native"])
+        self.assertTrue(power["power_request_id"])
+        self.assertEqual(self.appliance_calls(), [])
+        await self.dispatch_captured("play", at)
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+
+    async def test_explicit_display_service_keeps_pending_audio_double_tap(
+        self,
+    ) -> None:
+        self.reset()
+        at = time.time()
+        self.controller.mode.clock = lambda: at
+        self.controller.physical_press("audio", at)
+        await self.hass.services.async_call(
+            "ekf_appliances", "remote_select", {"pair": "projector"}, blocking=True
+        )
+        first = await self.hass.services.async_call(
+            "ekf_appliances",
+            "remote_prepare",
+            {"button": "audio", "received_ms": at * 1000},
+            blocking=True,
+            return_response=True,
+        )
+        self.assertEqual(first["pair"], "tv")
+        self.assertEqual(first["audio_action"], "pending")
+        self.controller.physical_press("audio", at + 0.3)
+        await self.dispatch_captured("audio", at)
+        await self.dispatch_captured("audio", at + 0.3)
+        self.assertTrue(self.controller.mode.audio)
+        self.assertEqual(self.appliance_calls(), [])
+
     async def test_audio_controls_use_the_music_owner_router(self) -> None:
         for button, command, extra in [
             ("left", "previous", {}),
             ("next", "next", {}),
+            ("prev", "previous", {}),
             ("play", "play_pause", {}),
+            ("ok", "play_pause", {}),
+            ("mute", "play_pause", {}),
+            ("0", "play_pause", {}),
             ("volume_up", "volume_up", {}),
             ("down", "volume_down", {}),
             ("1", "volume_set", {"volume_level": 0.1}),
@@ -635,6 +785,176 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     calls,
                     [("script.music_remote_command", {"command": command, **extra})],
+                )
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "on"
+                )
+
+    async def test_non_speaker_keys_leave_lights_independent_and_restore_display_routing(
+        self,
+    ) -> None:
+        for button in ("red", "green", "yellow", "home", "netflix", "youtube"):
+            with self.subTest(button=button):
+                self.reset()
+                self.hass.states.async_set(TV, "on")
+                await self.run_automation("universal_remote_dispatcher", button)
+                expected = self.appliance_calls()
+                self.assertTrue(expected)
+                self.reset(("tv", "on", "off"))
+                self.hass.states.async_set(TV, "on")
+                await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(self.appliance_calls(), expected)
+                focus = self.hass.states.get("input_boolean.audio_mode")
+                self.assertEqual(
+                    focus.state, "on" if button in ("red", "green", "yellow") else "off"
+                )
+                self.assertEqual(
+                    self.hass.states.get("input_text.audio_last_press_ms").state, "0"
+                )
+
+    async def test_one_physical_speaker_ok_hold_is_one_music_action_after_focus_changes(
+        self,
+    ) -> None:
+        self.reset(("tv", "on", "off"))
+        self.hass.states.async_set(TV, "on")
+        mapper = RemoteMapper()
+        now = time.time()
+        mapper.feed(
+            [
+                {
+                    "address": 0xBF00,
+                    "command": 0xEA15,
+                    "repeat": i > 0,
+                    "offset": i * 0.108,
+                }
+                for i in range(5)
+            ],
+            now,
+        )
+        self.assertEqual([key for key, _ in mapper.event_times], ["ok", "ok_hold"])
+        self.assertEqual(len(set(mapper.event_press_ids)), 1)
+        reasons = []
+
+        async def reject(call) -> None:
+            reasons.append(call.data["reason"])
+
+        self.hass.services.async_register("remote_announcements", "reject", reject)
+        for (button, at), identity in zip(
+            mapper.event_times, mapper.event_press_ids, strict=True
+        ):
+            self.controller.physical_press(button, at, press_id=str(identity))
+            if button == "ok":
+                # Change focus and power between frames, before either YAML run.
+                self.hass.states.async_set("input_boolean.audio_mode", "off")
+                self.hass.states.async_set(TV, "off")
+        for button, at in mapper.event_times:
+            await self.dispatch_captured(button, at)
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+        self.assertEqual(reasons, [])
+
+    async def test_play_keeps_its_captured_owner_when_focus_changes_before_dispatch(
+        self,
+    ) -> None:
+        for speaker_first in (True, False):
+            with self.subTest(speaker_first=speaker_first):
+                self.reset(("tv", "on" if speaker_first else "off", "off"))
+                self.hass.states.async_set(TV, "on")
+                now = time.time()
+                self.controller.physical_press("play", now)
+                if speaker_first:
+                    self.controller.physical_press("home", now + 0.001)
+                    await self.controller.async_prepare(
+                        {"button": "home", "received_ms": (now + 0.001) * 1000}
+                    )
+                else:
+                    self.hass.states.async_set("input_boolean.audio_mode", "on")
+                    self.controller.refresh()
+                await self.dispatch_captured("play", now)
+                expected = (
+                    ("script.music_remote_command", {"command": "play_pause"})
+                    if speaker_first
+                    else ("media_player.media_play_pause", {"entity_id": [TV]})
+                )
+                self.assertEqual(self.appliance_calls(), [expected])
+
+    async def test_disney_projector_short_and_hold_leave_speaker_focus(self) -> None:
+        for button in ("disney", "disney_hold"):
+            with self.subTest(button=button):
+                self.reset(("tv", "on", "off"))
+                await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+
+    async def test_speaker_display_key_keeps_receive_time_power_rejection(self) -> None:
+        for button in ("home", "netflix"):
+            with self.subTest(button=button):
+                self.reset(("tv", "on", "off"))
+                self.hass.states.async_set(TV, "on", {"power_sync_target": False})
+                now = time.time()
+                self.controller.physical_press(button, now)
+                self.hass.states.async_set(TV, "on")
+                route = await self.controller.async_prepare(
+                    {"button": button, "received_ms": now * 1000}
+                )
+                self.assertTrue(route.get("blocked"))
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+                self.assertEqual(self.appliance_calls(), [])
+
+    async def test_unsupported_speaker_key_rejects_without_renewing_focus(self) -> None:
+        self.reset(("tv", "on", "off"))
+        reasons = []
+
+        async def reject(call) -> None:
+            reasons.append(call.data["reason"])
+
+        self.hass.services.async_register("remote_announcements", "reject", reject)
+        await self.run_automation("universal_remote_dispatcher", "unmapped_test_key")
+        self.assertEqual(reasons, ["unsupported_speaker_button"])
+        self.assertEqual(
+            self.hass.states.get("input_text.audio_last_press_ms").state, "0"
+        )
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "on")
+        self.assertEqual(self.appliance_calls(), [])
+
+    async def test_audio_digit_then_up_both_control_speaker_until_back(self) -> None:
+        self.reset(("tv", "on", "off"))
+        for button in ("6", "up", "back"):
+            await self.run_automation("universal_remote_dispatcher", button)
+        self.assertEqual(
+            self.appliance_calls(),
+            [
+                (
+                    "script.music_remote_command",
+                    {"command": "volume_set", "volume_level": 0.6},
+                ),
+                ("script.music_remote_command", {"command": "volume_up"}),
+            ],
+        )
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "off")
+
+    async def test_single_audio_after_leaving_speaker_mode_starts_music(self) -> None:
+        for buttons in (("back",), ("volume_down", "audio")):
+            with self.subTest(buttons=buttons):
+                self.reset(("tv", "on", "off"))
+                for button in buttons:
+                    await self.run_automation("universal_remote_dispatcher", button)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+                self.calls.clear()
+                await self.run_automation("universal_remote_dispatcher", "audio")
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("script.music_remote_command", {"command": "play_pause"})],
+                )
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
                 )
 
     async def test_diagnostic_attribute_updates_do_not_replay_any_remote_automation(
@@ -1027,6 +1347,170 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.appliance_calls(), [])
 
+    async def test_physical_audio_bursts_keep_the_capture_order(self) -> None:
+        for dismissal in ("audio", "back", "exit"):
+            with self.subTest(dismissal=dismissal):
+                self.reset(("tv", "on", "off"))
+                self.hass.states.async_set(TV, "on")
+                at = time.time() - 1
+                self.controller.physical_press(dismissal, at)
+                self.controller.physical_press("play", at + 0.1)
+                self.assertFalse(self.controller.mode.audio)
+                # Dispatch in reverse: neither press can adopt the other's owner.
+                await self.dispatch_captured("play", at + 0.1)
+                await self.dispatch_captured(dismissal, at)
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("media_player.media_play_pause", {"entity_id": [TV]})],
+                )
+        self.reset()
+        at = time.time() - 1
+        with patch.object(self.controller, "async_mirror", return_value=None):
+            for button, offset in (("audio", 0), ("audio", 0.3), ("play", 0.4)):
+                self.controller.physical_press(button, at + offset)
+        self.assertTrue(self.controller.mode.audio)
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "off")
+        for button, offset in (("play", 0.4), ("audio", 0.3), ("audio", 0)):
+            await self.dispatch_captured(button, at + offset)
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+        self.assertTrue(self.controller.mode.audio)
+        # A later Home must not reinterpret Audio's already captured dismissal.
+        self.hass.states.async_set(TV, "on")
+        self.controller.physical_press("audio", at + 0.5)
+        self.controller.physical_press("home", at + 0.6)
+        await self.dispatch_captured("home", at + 0.6)
+        await self.dispatch_captured("audio", at + 0.5)
+        self.assertFalse(self.controller.mode.audio)
+        self.assertEqual(
+            sum(name == "script.music_remote_command" for name, _ in self.calls), 1
+        )
+
+    async def test_physical_single_audio_waits_for_the_window_then_runs_once(
+        self,
+    ) -> None:
+        self.reset()
+        await self.run_automation("universal_remote_dispatcher", "audio")
+        self.assertEqual(
+            self.appliance_calls(),
+            [("script.music_remote_command", {"command": "play_pause"})],
+        )
+        self.assertFalse(self.controller.mode.audio)
+        self.assertEqual(
+            await self.controller.async_prepare({"button": "audio"}),
+            {"pair": "tv", "native": False},
+        )
+
+    async def test_speaker_capture_renews_before_expiry_and_ignores_a_stale_ack(
+        self,
+    ) -> None:
+        self.reset()
+        now = time.time()
+        self.controller.mode.clock = lambda: now
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_on(_call: ServiceCall) -> None:
+            entered.set()
+            await release.wait()
+            self.capture_boolean("turn_on", "input_boolean.audio_mode", None, {})
+            self.controller.refresh()
+
+        self.hass.services.async_register("input_boolean", "turn_on", delayed_on)
+        self.controller.physical_press("audio", now - 0.5)
+        self.controller.physical_press("audio", now)
+        old_deadline = self.controller.mode.audio_expires_at
+        self.controller.physical_press("play", now + 59.9)
+        # A timer processing a ready receiver burst sees the renewed lease prior
+        # to the delayed YAML/control helper writing anything.
+        now = old_deadline + 0.01
+        self.controller.refresh()
+        self.assertTrue(self.controller.mode.audio)
+        self.assertAlmostEqual(
+            self.controller.mode.audio_expires_at, old_deadline + 59.9
+        )
+        # An in-flight ON projection returns after capture already dismissed.
+        mirror = asyncio.create_task(self.controller.async_mirror())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.controller.physical_press("back", now)
+        finally:
+            release.set()
+            await mirror
+        await self.controller.async_mirror()
+        self.assertFalse(self.controller.mode.audio)
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "off")
+        # External compatibility selection starts its own bounded lease.
+        self.hass.states.async_set("input_boolean.audio_mode", "on")
+        self.controller.refresh()
+        self.assertTrue(self.controller.mode.audio)
+        now += 60
+        self.controller.refresh()
+        self.assertFalse(self.controller.mode.audio)
+
+    async def test_direct_speaker_activity_renews_but_delayed_physical_dispatch_does_not(
+        self,
+    ) -> None:
+        self.reset(("tv", "on", "off"))
+        now = time.time()
+        self.controller.mode.clock = lambda: now
+        captured = now - 0.4
+        self.controller.physical_press("play", captured)
+        now += 10
+        await self.dispatch_captured("play", captured)
+        await self.hass.async_block_till_done()
+        self.assertAlmostEqual(self.controller.mode.audio_expires_at, captured + 60)
+        await self.scripts["audio_mode_dispatch"].async_run(
+            {"button": "play"}, context=Context()
+        )
+        await self.hass.async_block_till_done()
+        self.assertAlmostEqual(self.controller.mode.audio_expires_at, now + 60)
+
+    async def test_missing_physical_capture_never_extends_speaker_focus(self) -> None:
+        for evicted in (False, True):
+            with self.subTest(evicted=evicted):
+                self.reset()
+                await self.hass.async_block_till_done()
+                clock = SimpleNamespace(now=time.time() - 30)
+                self.controller.mode.clock = lambda clock=clock: clock.now
+                self.controller.physical_press("audio", clock.now - 0.5)
+                self.controller.physical_press("audio", clock.now)
+                deadline = clock.now + 60
+                # Still inside the dispatcher's five-second freshness window,
+                # but a late dispatch must not become new speaker activity.
+                received = clock.now + 28
+                if evicted:
+                    self.controller.physical_press("play", received)
+                    deadline = received + 60
+                    # Real, independent light captures evict this old Play without
+                    # renewing speaker activity or dispatching any hardware action.
+                    for index in range(controller_module._CAPTURED_ROUTE_LIMIT):
+                        self.controller.physical_press(
+                            "red", received + (index + 1) / 1000
+                        )
+                await self.controller.async_mirror()
+                await self.hass.async_block_till_done()
+                self.assertNotIn(
+                    self.controller._capture_key("play", received * 1000),
+                    self.controller._captured_routes,
+                )
+                self.calls.clear()
+                clock.now += 30
+                await self.dispatch_captured("play", received)
+                await self.hass.async_block_till_done()
+                self.assertEqual(
+                    self.appliance_calls(),
+                    [("script.music_remote_command", {"command": "play_pause"})],
+                )
+                clock.now = deadline + 0.01
+                self.controller.refresh()
+                await self.controller.async_mirror()
+                self.assertFalse(self.controller.mode.audio)
+                self.assertEqual(
+                    self.hass.states.get("input_boolean.audio_mode").state, "off"
+                )
+
     async def test_audio_double_tap_has_no_single_play_side_effect_and_needs_no_hold(
         self,
     ) -> None:
@@ -1226,9 +1710,112 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             and data.get("command") not in {"beep_on", "beep_off"}
         ]
         self.assertEqual(commands, [{"command": "play_pause"}])
+        self.assertEqual(self.hass.states.get("input_boolean.audio_mode").state, "on")
         self.assertEqual(
             [x for x in self.calls if x[0].startswith("media_player.")], []
         )
+
+    async def test_music_owner_play_starts_empty_station_and_resumes_or_pauses_tracks(
+        self,
+    ) -> None:
+        package = yaml.safe_load(PACKAGE.with_name("music_remote.yaml").read_text())
+        command = Script(
+            self.hass,
+            cv.SCRIPT_SCHEMA(package["script"]["music_remote_command"]["sequence"]),
+            "music_remote_command",
+            "script",
+        )
+        stock = "media_player.yandex_station_m0011hm00z86hg"
+        ma = "media_player.music_assistant_queue"
+        route = {"entity_id": stock, "owner": "speaker", "speaker_backend": "yandex"}
+
+        async def resolve(_call: ServiceCall) -> dict[str, str]:
+            return route
+
+        self.hass.services.async_register(
+            "script",
+            "music_remote_resolve",
+            resolve,
+            supports_response=SupportsResponse.ONLY,
+        )
+        self.hass.services.async_register("media_player", "play_media", self.capture)
+        for entity, state, attrs, expected in [
+            (
+                stock,
+                "paused",
+                {"alice_state": "IDLE", "media_content_id": ""},
+                "play_media",
+            ),
+            (stock, "idle", {"alice_state": "IDLE"}, "play_media"),
+            (stock, "idle", {"alice_state": "SPEAKING"}, "play_media"),
+            (stock, "playing", {"alice_state": "SPEAKING"}, "play_media"),
+            (stock, "playing", {"alice_state": "NONE"}, "play_media"),
+            (stock, "playing", {"alice_state": "IDLE"}, "media_pause"),
+            (
+                stock,
+                "playing",
+                {"alice_state": "NONE", "media_content_type": "radio"},
+                "media_pause",
+            ),
+            (
+                stock,
+                "playing",
+                {"alice_state": "SPEAKING", "media_title": "Track"},
+                "media_pause",
+            ),
+            (
+                stock,
+                "playing",
+                {"alice_state": "SPEAKING", "assumed_state": True},
+                "media_pause",
+            ),
+            (
+                stock,
+                "paused",
+                {"alice_state": "NONE", "media_content_type": "music"},
+                "media_play",
+            ),
+            (stock, "paused", {"assumed_state": True}, "media_play"),
+            (stock, "paused", {}, "media_play"),
+            (stock, "idle", {"assumed_state": True}, "media_play"),
+            (stock, "paused", {"media_content_id": "1234"}, "media_play"),
+            (stock, "paused", {"media_title": "Current track"}, "media_play"),
+            (stock, "playing", {}, "media_pause"),
+            (ma, "paused", {}, "media_play"),
+        ]:
+            with self.subTest(entity=entity, state=state, attrs=attrs):
+                route.update(
+                    entity_id=entity, owner="ma" if entity == ma else "speaker"
+                )
+                self.hass.states.async_set(
+                    entity, state, {"supported_features": 1 | 512 | 16384, **attrs}
+                )
+                self.calls.clear()
+                await command.async_run({"command": "play_pause"}, context=Context())
+                data = {"entity_id": entity}
+                if expected == "play_media":
+                    data.update(
+                        media_content_type="command",
+                        media_content_id="Включи мою волну",
+                    )
+                self.assertEqual(
+                    [
+                        call
+                        for call in self.calls
+                        if call[0].startswith("media_player.")
+                    ],
+                    [(f"media_player.{expected}", data)],
+                )
+        route.update(entity_id=stock, owner="speaker")
+        for state in ("unknown", "unavailable"):
+            with self.subTest(state=state):
+                self.hass.states.async_set(stock, state)
+                self.calls.clear()
+                result = await command.async_run(
+                    {"command": "play_pause"}, context=Context()
+                )
+                self.assertIsNone(result.service_response)
+                self.assertEqual(self.calls, [])
 
     async def test_reconnected_receiver_does_not_replay_recent_cached_button(
         self,
@@ -1353,13 +1940,10 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.mode.expires_at, 0)
         self.assertEqual(self.appliance_calls(), [])
 
-    async def test_single_input_wakes_only_the_other_off_pair_with_sixty_second_focus(
+    async def test_single_input_selects_either_pair_but_only_wakes_projector(
         self,
     ) -> None:
-        for tv, projector, expected, revision in [
-            ("on", "off", PROJECTOR, "projector:0"),
-            ("off", "on", TV, "tv:0"),
-        ]:
+        for tv, projector in [("on", "off"), ("off", "on")]:
             with self.subTest(tv=tv, projector=projector):
                 self.reset()
                 self.clear_explicit_focus()
@@ -1377,9 +1961,14 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     [
                         (
                             "ekf_appliances.wake_if_current",
-                            {"entity_id": expected, "expected_revision": revision},
+                            {
+                                "entity_id": PROJECTOR,
+                                "expected_revision": "projector:0",
+                            },
                         )
-                    ],
+                    ]
+                    if selected == "projector"
+                    else [],
                 )
                 self.assertLessEqual(self.controller.mode.expires_at - time.time(), 60)
                 self.assertEqual(
