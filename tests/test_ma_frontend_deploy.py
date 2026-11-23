@@ -17,7 +17,14 @@ from scripts import ma_frontend_deploy as deploy
 BASE = 'services:\n  music-assistant:\n    image: unchanged-image\n    entrypoint: ["/existing-wrapper"]\n    volumes:\n      - /home/ultra/music-assistant:/data\n      - /home/ultra/homeassistant/docker/music-assistant/person_likes:/app/venv/lib/python3.14/site-packages/music_assistant/providers/person_likes:ro\n    network_mode: host\n  another-service:\n    image: independently-edited-image\n    environment:\n      KEEP_THIS: changed-by-another-owner\n'
 IDLE = {
     "ha_started_at": "unchanged",
-    "players": [{"player_id": "test-player", "available": True}],
+    "players": [
+        {
+            "player_id": "test-player",
+            "available": True,
+            "playback_state": "idle",
+            "active_source": "test-queue",
+        }
+    ],
     "queues": [
         {
             "queue_id": "test-queue",
@@ -27,6 +34,7 @@ IDLE = {
             "elapsed_time": 2,
             "current_item": "test-item",
             "next_item": None,
+            "queue_item_ids": ["test-item"],
         }
     ],
 }
@@ -449,6 +457,9 @@ class FinalRecreationTests(unittest.TestCase):
                 saved = json.loads((Path(directory) / "receipt.json").read_text())
                 self.assertEqual(saved["status"], "up_started")
                 self.assertIsNone(kwargs["timeout"])
+                expected_log = str(Path(directory) / "compose-up.log")
+                self.assertEqual(saved.get("compose_output_log"), expected_log)
+                self.assertEqual(str(kwargs.get("output")), expected_log)
                 if fail_up:
                     message = "Compose interrupted after recreation began"
                     raise RuntimeError(message)

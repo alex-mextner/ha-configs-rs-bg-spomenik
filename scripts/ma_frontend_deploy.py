@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import nullcontext
 from http import HTTPStatus
 from http.client import HTTPConnection
 from pathlib import Path
@@ -64,6 +65,44 @@ MA_STATE_CODE = """
 import asyncio, json
 from pathlib import Path
 from music_assistant_client import MusicAssistantClient
+
+def project(players, queues):
+    def item(value):
+        return None if not value else value.get('queue_item_id')
+    return {
+        'players': sorted([{
+            'player_id':p['player_id'],'available':p['available'],
+            'playback_state':p['playback_state'],'active_source':p.get('active_source')
+        } for p in players],key=lambda p:p['player_id']),
+        'queues': sorted([{
+            'queue_id':q['queue_id'],'state':q['state'],'items':q['items'],
+            'current_index':q.get('current_index'),'elapsed_time':q.get('elapsed_time'),
+            'current_item':item(q.get('current_item')),'next_item':item(q.get('next_item'))
+        } for q in queues],key=lambda q:q['queue_id'])
+    }
+
+async def queue_items(client, queue):
+    count=queue['items']
+    if type(count) is not int or count < 0:
+        raise RuntimeError('Invalid queue item count')
+    result=[]
+    for offset in range(0, count, 500):
+        limit=min(500, count-offset)
+        page=await client.send_command(
+            'player_queues/items', queue_id=queue['queue_id'],
+            limit=limit, offset=offset
+        )
+        if not isinstance(page, list) or len(page)!=limit:
+            raise RuntimeError('Queue item page differs from advertised count')
+        for item in page:
+            item_id=item.get('queue_item_id') if isinstance(item, dict) else None
+            if not isinstance(item_id, str) or not item_id:
+                raise RuntimeError('Queue item ID is missing or invalid')
+            result.append(item_id)
+    if len(result)!=count:
+        raise RuntimeError('Queue item total differs')
+    return result
+
 async def main():
     entries=json.loads(Path('/config/.storage/core.config_entries').read_text())['data']['entries']
     entries=[e for e in entries if e['domain']=='music_assistant']
@@ -72,20 +111,16 @@ async def main():
         'http://172.20.0.1:8095', None, token=entries[0]['data']['token']
     )
     async with client:
-        players=await client.send_command('players/all')
-        queues=await client.send_command('player_queues/all')
-    def item(value):
-        return None if not value else value.get('queue_item_id')
-    result={
-        'players': sorted([
-            {'player_id':p['player_id'],'available':p['available']} for p in players
-        ],key=lambda p:p['player_id']),
-        'queues': sorted([{
-            'queue_id':q['queue_id'],'state':q['state'],'items':q['items'],
-            'current_index':q.get('current_index'),'elapsed_time':q.get('elapsed_time'),
-            'current_item':item(q.get('current_item')),'next_item':item(q.get('next_item'))
-        } for q in queues],key=lambda q:q['queue_id'])
-    }
+        headers=project(await client.send_command('players/all'),
+                        await client.send_command('player_queues/all'))
+        result={'players':headers['players'], 'queues':[]}
+        for queue in headers['queues']:
+            ids=await queue_items(client, queue)
+            result['queues'].append({**queue,'queue_item_ids':ids})
+        fresh=project(await client.send_command('players/all'),
+                      await client.send_command('player_queues/all'))
+        if fresh!=headers:
+            raise RuntimeError('MA state changed during queue collection')
     print(json.dumps(result))
 asyncio.run(main())
 """
@@ -113,13 +148,28 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def run(*args: str, data: bytes | None = None, timeout: int | None = 45) -> bytes:
-    """Run an internal command while keeping sensitive output private."""
-    result = subprocess.run(  # noqa: S603 -- fixed internal argv, without a shell
-        args, input=data, capture_output=True, timeout=timeout, check=False
-    )
+def run(
+    *args: str,
+    data: bytes | None = None,
+    timeout: int | None = 45,
+    output: Path | None = None,
+) -> bytes:
+    """Keep command output private; persist only explicitly requested Compose logs."""
+    with (
+        os.fdopen(os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb")
+        if output is not None
+        else nullcontext()
+    ) as handle:
+        result = subprocess.run(  # noqa: S603 -- fixed internal argv, without a shell
+            args,
+            input=data,
+            stdout=handle if handle is not None else subprocess.PIPE,
+            stderr=subprocess.STDOUT if handle is not None else subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
     require(result.returncode == 0, f"{args[0]} failed with exit {result.returncode}")
-    return result.stdout
+    return result.stdout or b""
 
 
 def json_run(*args: str, data: bytes | None = None) -> object:
@@ -307,14 +357,29 @@ def snapshot() -> dict:
 
 
 def require_idle(state: dict) -> None:
-    """Defer maintenance for every non-idle queue, including paused queues."""
+    """Defer maintenance for non-idle queues or players, including external sources."""
     require(bool(state["queues"]), "MA queue inventory is empty")
     require(all(q["state"] == "idle" for q in state["queues"]), "A queue is not idle")
+    require(bool(state["players"]), "MA player inventory is empty")
+    require(
+        all(p["playback_state"] == "idle" for p in state["players"]),
+        "A player is not idle",
+    )
 
 
-def require_same_state(before: dict, after: dict) -> None:
-    """Reject HA restarts, queue changes, and player inventory drift."""
+def require_same_state(
+    before: dict, after: dict, *, after_restart: bool = False
+) -> None:
+    """Keep pre-up exact; exclude only recomputed startup fields after recreation."""
     require_idle(after)
+    if after_restart:
+        before, after = copy.deepcopy(before), copy.deepcopy(after)
+        for state in (before, after):
+            for queue in state["queues"]:
+                queue.pop("current_item", None)
+                queue.pop("next_item", None)
+            for player in state["players"]:
+                player.pop("active_source", None)
     require(before["ha_started_at"] == after["ha_started_at"], "HA restarted")
     require(
         before["queues"] == after["queues"],
@@ -347,11 +412,22 @@ def require_image_frontend(hashes: dict) -> None:
         )
 
 
+def require_release_path(path: Path) -> None:
+    """Reject symlinks, another owner, or group/world-writable release entries."""
+    require(not path.is_symlink(), "Release contains a symlink")
+    metadata = path.stat()
+    require(
+        metadata.st_uid == os.getuid() and metadata.st_mode & 0o022 == 0,
+        "Release ownership or permissions differ",
+    )
+
+
 def release_hashes() -> dict:
     """Check the pinned manifest and every immutable release file."""
     require(
         RELEASE.is_dir() and not RELEASE.is_symlink(), "Release is missing or a symlink"
     )
+    require_release_path(RELEASE)
     manifest_bytes = (RELEASE / "manifest.json").read_bytes()
     require(digest(manifest_bytes) == MANIFEST_SHA, "Pinned manifest digest differs")
     manifest = json.loads(manifest_bytes)
@@ -371,7 +447,7 @@ def release_hashes() -> dict:
     require(len(files) == FILE_COUNT, "Duplicate manifest paths")
     actual = set()
     for path in RELEASE.rglob("*"):
-        require(not path.is_symlink(), "Release contains a symlink")
+        require_release_path(path)
         if path.is_file():
             actual.add(str(path.relative_to(RELEASE)))
     require(
@@ -427,7 +503,10 @@ def served_hashes(expected: dict) -> dict:
             index.decode(),
         )
     )
-    require(any(p.endswith(".js") for p in paths), "No entry JavaScript found")
+    require(
+        any(p.startswith("assets/") and p.endswith(".js") for p in paths),
+        "No entry JavaScript found",
+    )
     result = {"index.html": digest(index)}
     for path in sorted(paths):
         require(
@@ -528,6 +607,24 @@ def save_json(path: Path, value: dict) -> None:
             Path(temporary).unlink()
 
 
+def require_original_hashes(target: dict) -> None:
+    """Require the same usable rollback baseline before install and during recovery."""
+    require(
+        isinstance(target, dict) and "index.html" in target, "Original hashes missing"
+    )
+    require(
+        all(
+            isinstance(name, str)
+            and not Path(name).is_absolute()
+            and ".." not in Path(name).parts
+            and isinstance(value, str)
+            and re.fullmatch(r"[a-f0-9]{64}", value)
+            for name, value in target.items()
+        ),
+        "Original hash map is invalid",
+    )
+
+
 def installation_receipt(path: Path | None, raw: dict) -> dict:
     """Read a private receipt and validate its original-image recovery evidence."""
     if path is None:
@@ -557,21 +654,7 @@ def installation_receipt(path: Path | None, raw: dict) -> dict:
         prior["before"]["image_id"] == raw["Image"] == IMAGE_ID,
         "Original image differs",
     )
-    target = prior["original_frontend_hashes"]
-    require(
-        isinstance(target, dict) and "index.html" in target, "Original hashes missing"
-    )
-    require(
-        all(
-            isinstance(name, str)
-            and not Path(name).is_absolute()
-            and ".." not in Path(name).parts
-            and isinstance(value, str)
-            and re.fullmatch(r"[a-f0-9]{64}", value)
-            for name, value in target.items()
-        ),
-        "Original hash map is invalid",
-    )
+    require_original_hashes(prior["original_frontend_hashes"])
     return prior
 
 
@@ -587,6 +670,7 @@ def frontend_plan(
     if operation != "rollback":
         verify_running_config(config, raw, expected_hash=current_hash)
         hashes = frontend_hashes()
+        require_original_hashes(hashes)
         require_image_frontend(hashes)
         return release_hashes(), hashes, False
 
@@ -721,7 +805,11 @@ def verify_after(receipt: dict, expected: dict, config: dict) -> dict:
             state["ha_started_at"] == receipt["ha_started_at_before"], "HA restarted"
         )
     else:
-        require_same_state(receipt["state_before"], state)
+        require_same_state(
+            receipt["state_before"],
+            state,
+            after_restart=not receipt.get("configuration_only", False),
+        )
     require(frontend_hashes() == expected, "Mounted frontend differs")
     return {
         "after": after,
@@ -813,6 +901,7 @@ def apply_change(
                 "Image changed",
             )
             if not receipt.get("configuration_only", False):
+                receipt["compose_output_log"] = str(directory / "compose-up.log")
                 receipt["status"] = "up_started"
                 save_json(path, receipt)
             # This is after every configuration/image read, immediately before up.
@@ -837,6 +926,7 @@ def apply_change(
                     "never",
                     "music-assistant",
                     timeout=None,
+                    output=directory / "compose-up.log",
                 )
                 receipt["status"] = "recreated"
                 save_json(path, receipt)

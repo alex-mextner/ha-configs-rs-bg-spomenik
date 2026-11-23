@@ -29,10 +29,10 @@ Deploy from a clean, reviewed checkout. Copy only `scripts/ma_frontend_deploy.py
 The normal PR ship operation merges the repository and performs local checkout cleanup; it does not install the remote configuration. **Do not pull the deployment change into the dirty live checkout or replace its Compose file.** The guarded script inserts the one reviewed volume into the existing live file. This preserves the live image and reconnect-wrapper settings that differ from the canonical baseline.
 
 ```bash
-ma_frontend_script=/home/ultra/.local/state/ma-frontend-170/scripts/<reviewed-ha-commit>/ma_frontend_deploy.py
+cd /home/ultra/homeassistant
+ma_frontend_script='/home/ultra/.local/state/ma-frontend-170/scripts/<reviewed-ha-commit>/ma_frontend_deploy.py'
 sha256sum "$ma_frontend_script"
 python3 "$ma_frontend_script" plan
-python3 "$ma_frontend_script" install --expected-compose-sha <fresh-plan-sha256>
 ```
 
 The script's default `plan` reads live state and writes private receipts and logs. It validates the image ID, entrypoint, command, environment, mounts and **complete Compose service configuration hash** against the current container. Pending changes to other MA settings stop the operation. It also rejects original frontend files modified in the container layer, so the recorded rollback hashes describe the unchanged image. Python cache files do not invalidate that check.
@@ -45,7 +45,7 @@ The current deployment uses only `/home/ultra/homeassistant/ha.docker-compose.ya
 
 2. Stage the payload beneath:
    `/home/ultra/.local/share/music-assistant-frontend/releases/b1fbfe710099ea6309fd6d11538d0fa967a991f6/`.
-   Keep `manifest.json` and `SHA256SUMS` beside its `music_assistant_frontend/` child. Make staged files read-only and verify them again on the Odroid.
+   Keep `manifest.json` and `SHA256SUMS` beside its `music_assistant_frontend/` child. Make staged files read-only and verify them again on the Odroid. Every release file and directory must belong to the deploying user and reject group/other writes; the script checks the entire tree without changing permissions.
 
 3. Keep an additional, verified recovery copy **off the Odroid** in the existing private PC task directory:
    `/run/media/ultra/backups/home-ultra/work/ma-player-switch-20261123/ci-delivery-evidence/odroid-recovery-b1fbfe710099/`.
@@ -53,17 +53,47 @@ The current deployment uses only `/home/ultra/homeassistant/ha.docker-compose.ya
 
 4. The two Odroid backup manifests include the release and receipt directories for future provisioning. Their scheduled backup service has **not** been verified as installed on this host. The explicit off-host recovery copy above is the recovery material for this deployment; adding manifest paths alone does not establish a working backup job.
 
-5. Run a fresh plan, preserve its private receipt and exact preimage off-host, then install with that preimage SHA. Each mutating operation exclusively owns `/home/ultra/.ma-maintenance.lock`; an existing owner stops it. Every running-MA operation requires a fresh queue snapshot, unchanged HA start time, and all queues idle immediately before recreation. Paused queues defer maintenance.
+5. Run a fresh plan, preserve its private receipt and exact preimage off-host, then install with that preimage SHA. Each mutating operation exclusively owns `/home/ultra/.ma-maintenance.lock`; an existing owner stops it. Every running-MA operation requires a fresh queue/player snapshot, unchanged HA start time, and all queues and players idle immediately before recreation. Paused playback also defers maintenance. A player using an external source can be playing while its MA queue reports idle, so both states are required.
 
 The script changes only the pinned volume, validates the entire effective configuration delta, and recreates only `music-assistant` using the unchanged local image with `--no-deps --no-build --pull never`. It never edits runtime databases, recovery scripts, or player state.
 
+## Run installation and rollback as durable user services
+
+After the reviewed script, artifact, fresh plan and recovery copies are verified, launch every mutating operation as a detached user systemd service. The Odroid has an active user manager with lingering enabled. Use the same user and working directory as the plan. A lost SSH connection or Ctrl-C in a log monitor must not signal the guard or Compose.
+
+For installation, replace the SHA placeholder with the value from the fresh plan:
+
+```bash
+ma_frontend_preimage_sha='FRESH_PLAN_SHA256'
+ma_frontend_unit="ma-frontend-170-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+ma_frontend_operation_log="$(mktemp /home/ultra/.local/state/ma-frontend-170/operation-XXXXXX.log)"
+chmod 0600 "$ma_frontend_operation_log"
+systemd-run --user --unit="$ma_frontend_unit" --service-type=exec --remain-after-exit \
+  -p Restart=no -p UMask=0077 -p WorkingDirectory=/home/ultra/homeassistant \
+  -p "StandardOutput=append:$ma_frontend_operation_log" \
+  -p "StandardError=append:$ma_frontend_operation_log" \
+  /usr/bin/python3 "$ma_frontend_script" install \
+  --expected-compose-sha "$ma_frontend_preimage_sha"
+```
+
+Do not add `--scope`, `--pty`, `--pipe` or `--wait`, automatic restarts or a runtime kill deadline. A successful launch only means the service started. Read its actual result and the receipt named in the private operation log:
+
+```bash
+systemctl --user show "$ma_frontend_unit" \
+  --property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus
+```
+
+Keep the unit and result until the receipt, Compose preimage and diagnostics have been copied off-host. Do not stop the unit while Compose or verification is running. Interrupting a separate `tail -f` monitor is safe; stopping the service is not a substitute for inspecting its state.
+
+An existing maintenance lock is never stolen automatically. If an interrupted operation leaves one behind, retain the exact lock record and operation evidence. Establish that its named owner, guard process, Compose child and associated service are all gone before considering manual removal of that exact stale record. Never remove an unknown lock or one with a live owner, including another maintenance task's lock. Inspect the recorded phase and actual container/Compose state, then obtain a fresh guarded plan; removing a stale lock alone does not establish that retrying installation is safe.
+
 ## Receipts and verification
 
-Receipts and exact Compose preimages remain under `/home/ultra/.local/state/ma-frontend-170/`; automatic timestamped logs remain private under `/tmp`. Receipt writes are atomic. The `patch_started` phase is saved before the exact file replacement, and `up_started` before invoking Compose. If a pre-up check fails, the script restores its exact preimage only while it still owns the lock and the file still equals its own patch. A concurrent edit is preserved and recorded as an undo refusal.
+Receipts and exact Compose preimages remain under `/home/ultra/.local/state/ma-frontend-170/`; automatic timestamped logs remain private under `/tmp`. The detached service also keeps a private operation log. Compose stdout and stderr are saved together in the attempt directory as `compose-up.log` (mode `0600`), whose path is recorded before Compose starts; other command/configuration outputs are not written to that log. Receipt writes are atomic. The `patch_started` phase is saved before the exact file replacement, and `up_started` before invoking Compose. If a pre-up check fails, the script restores its exact preimage only while it still owns the lock and the file still equals its own patch. A concurrent edit is preserved and recorded as an undo refusal.
 
 After Compose has started, the script does not guess whether recreation completed or automatically restore configuration. It records the last phase and leaves recovery to a fresh guarded plan. Compose is not killed by an arbitrary timeout midway through container recreation; the owned process and log remain available for monitoring. Runtime verification still has a bounded 90-second retry window.
 
-A successful installation requires the full service hash, image, wrapper and mounts to match; the mounted package and served HTML/entry assets must match their expected hashes. It also requires unchanged HA start time and the fresh queue/player snapshot, including current/next items, indexes and positions. Copy the resulting installation receipt off-host and verify the copy immediately, including after a failed operation that needs recovery.
+A successful installation requires the full service hash, image, wrapper and mounts to match; the mounted package and served HTML/entry assets must match their expected hashes. It also requires unchanged HA start time, exact player roster/availability and idle playback, and preserved ordered queue-item IDs, counts, current indexes and elapsed positions. Collection uses bounded pages from `player_queues/items` and rereads projected headers/player state to reject drift. Checks before recreation compare the entire snapshot. Only after an actual recreation are derived current/next-item objects and diagnostic `active_source` excluded from equality: the pinned server recomputes them at startup. The full before/after snapshots remain in the receipt. Queue loss, reordering, changed resume position, unavailable-player loss or new playback still fail verification. Copy the resulting installation receipt off-host and verify the copy immediately, including after a failed operation that needs recovery.
 
 Reload the MA frontend and check the original interaction through the server-hosted UI: replace the idle group's leader with the intended speaker, then press Play. Record the observed selected player and actual playback in issue #170. Server asset verification does not establish which frontend origin a separate phone application uses.
 
@@ -75,8 +105,9 @@ Use the private installation receipt and obtain a fresh plan and Compose preimag
 
 ```bash
 python3 "$ma_frontend_script" plan --plan-action rollback --install-receipt <installation-receipt.json>
-python3 "$ma_frontend_script" rollback --expected-compose-sha <fresh-plan-sha256> --install-receipt <installation-receipt.json>
 ```
+
+Start rollback with a new unit name and private log using the durable-service launcher above, replacing its guard arguments with `rollback --expected-compose-sha FRESH_PLAN_SHA256 --install-receipt /absolute/installation-receipt.json`. Keep its actual unit result and copy the resulting receipt off-host.
 
 Each rollback acquires a fresh owned maintenance lock and removes only this exact volume entry, preserving later independent edits. It does not require the damaged overlay files to be intact.
 
