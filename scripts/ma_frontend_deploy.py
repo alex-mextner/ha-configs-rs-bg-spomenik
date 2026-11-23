@@ -233,7 +233,7 @@ def verify_running_config(config: dict, raw: dict) -> None:
         "Unexpected Compose configuration files",
     )
     entrypoint = service.get("entrypoint", image["Config"]["Entrypoint"])
-    command = service.get("command", image["Config"]["Cmd"])
+    command = service.get("command", image["Config"].get("Cmd"))
     require(entrypoint == raw["Config"]["Entrypoint"], "Running entrypoint differs")
     require(command == raw["Config"]["Cmd"], "Running command differs")
     expected_env = dict(value.split("=", 1) for value in image["Config"].get("Env", []))

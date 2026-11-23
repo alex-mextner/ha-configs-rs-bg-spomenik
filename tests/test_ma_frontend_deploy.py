@@ -255,6 +255,43 @@ class RuntimeIdentityTests(unittest.TestCase):
         ):
             deploy.verify_running_config(self.config(), self.raw())
 
+    def test_absent_image_command_preserves_compose_command(self) -> None:
+        image = {
+            "Id": deploy.IMAGE_ID,
+            "Config": {"Entrypoint": [], "Env": []},
+        }
+        for command in (None, [], ["--existing-argument"]):
+            with self.subTest(command=command):
+                config = self.config()
+                config["services"]["music-assistant"]["command"] = command
+                raw = self.raw()
+                raw["Config"]["Cmd"] = command
+                try:
+                    with patch.object(
+                        deploy, "run", return_value=json.dumps([image]).encode()
+                    ):
+                        deploy.verify_running_config(config, raw)
+                except KeyError as error:
+                    self.fail(f"Optional image command field was indexed: {error}")
+
+    def test_absent_image_command_still_rejects_runtime_drift(self) -> None:
+        image = {
+            "Id": deploy.IMAGE_ID,
+            "Config": {"Entrypoint": [], "Env": []},
+        }
+        config = self.config()
+        config["services"]["music-assistant"]["command"] = None
+        raw = self.raw()
+        raw["Config"]["Cmd"] = ["--unexpected-argument"]
+        try:
+            with (
+                patch.object(deploy, "run", return_value=json.dumps([image]).encode()),
+                self.assertRaisesRegex(RuntimeError, "command differs"),
+            ):
+                deploy.verify_running_config(config, raw)
+        except KeyError as error:
+            self.fail(f"Optional image command field was indexed: {error}")
+
     def test_existing_mount_drift_is_refused(self) -> None:
         raw = self.raw()
         raw["Mounts"][0]["Source"] = "/unexpected-data"
