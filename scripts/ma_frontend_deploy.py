@@ -24,11 +24,11 @@ from typing import TYPE_CHECKING, Self
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SOURCE = "b1fbfe710099ea6309fd6d11538d0fa967a991f6"
-WORKFLOW = "2bd8577744474d16daee74ddc0d0049cf3a84efe"
-RUN = "45252788796"
+SOURCE = "1f7cd828c8717fc20dec9f03c65c5229ec053638"
+WORKFLOW = "d151dd8d35ecb364eae64d530315d467ce3cd78c"
+RUN = "45265242388"
 FILE_COUNT = 307
-MANIFEST_SHA = "59ef76a5c32fbc2f9b3b1062e25915964e3bfc0f3ac774db5de54f337adadf9a"
+MANIFEST_SHA = "0df2edb45e6a07ea75ff7112919fbad351da80f95ce63471b57e462c7cf8f0f0"
 IMAGE_ID = "sha256:37a9a2776e838a754c9f5b38c432567389952304e7cb8f6b44b6cd28043de6de"
 ROOT = Path("/home/ultra/homeassistant")
 COMPOSE = ROOT / "ha.docker-compose.yaml"
