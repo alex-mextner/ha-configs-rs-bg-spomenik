@@ -1,0 +1,12 @@
+[Unit]
+Description=Check smart-home service health every minute
+
+[Timer]
+OnBootSec=90
+OnUnitInactiveSec=60
+AccuracySec=5
+Persistent=true
+Unit=ha-smart-home-recovery.service
+
+[Install]
+WantedBy=timers.target
