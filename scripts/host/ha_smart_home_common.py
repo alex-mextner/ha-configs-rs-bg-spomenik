@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -36,12 +37,22 @@ def identity(value: object) -> str | None:
 def durable_delivery(receipt: dict, source: str, event_id: str) -> bool:
     """Validate the shared spool's exact immutable-envelope acknowledgement."""
     return (
-        receipt.get("durable") is True
+        protocol_v1(receipt)
+        and receipt.get("durable") is True
         and receipt.get("source") == source
         and receipt.get("event_id") == event_id
         and receipt.get("status") in {"pending", "launched", "delivered", "recorded"}
         and isinstance(receipt.get("digest"), str)
         and re.fullmatch(r"[a-f0-9]{64}", receipt["digest"]) is not None
+    )
+
+
+def protocol_v1(message: object) -> bool:
+    """Accept only the frozen shared subscription protocol, not boolean aliases."""
+    return (
+        isinstance(message, dict)
+        and type(message.get("protocol_version")) is int
+        and message["protocol_version"] == 1
     )
 
 
@@ -56,6 +67,12 @@ def maintenance_status(path: Path = MAINTENANCE) -> str:
     owner = re.fullmatch(
         r"owner=chatgpt-ma-reconnect pid=([1-9][0-9]*) id=[a-f0-9-]+\n?", raw
     )
+    expected = b"deploy_reviewed.py"
+    if owner is None:
+        owner = re.fullmatch(
+            r"owner=music-accounts pid=([1-9][0-9]*) since=[^\n ]+ cmd=[^\n]*\n?", raw
+        )
+        expected = b"ma_accounts.sh"
     if not owner:
         return "unknown"
     process = Path("/proc") / owner[1] / "cmdline"
@@ -65,7 +82,7 @@ def maintenance_status(path: Path = MAINTENANCE) -> str:
         return "stale"
     except OSError:
         return "unknown"
-    return "active" if b"deploy_reviewed.py" in command else "stale"
+    return "active" if expected in command else "stale"
 
 
 def hardware_state(physical_id: str) -> dict | None:
@@ -91,10 +108,15 @@ def hardware_state(physical_id: str) -> dict | None:
     }
 
 
-def hardware_mute(physical_id: str) -> bool | None:
-    """Return only the exact device's fresh boolean mute observation."""
-    state = hardware_state(physical_id)
-    return state["muted"] if state else None
+def active_claim(claim: dict) -> bool:
+    """Private action markers expire in the exact producer boot's uptime."""
+    return (
+        claim.get("boot_id")
+        == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        and claim.get("clock") == "boot_monotonic"
+        and type(claim.get("expires")) in (int, float)
+        and claim["expires"] >= time.monotonic()
+    )
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -107,6 +129,11 @@ def atomic_json(path: Path, value: dict) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -248,9 +275,10 @@ def failure_reason(error: object) -> str:
             "unauthorized",
             "forbidden",
             "invalid token",
-            "401",
-            "403",
         )
+    ) or re.search(
+        r"\b(?:http(?:/\d(?:\.\d)?)?|status(?:\s+code)?|response|error)\s*[:=]?\s*(?:401|403)\b",
+        text,
     ):
         return "auth"
     if any(

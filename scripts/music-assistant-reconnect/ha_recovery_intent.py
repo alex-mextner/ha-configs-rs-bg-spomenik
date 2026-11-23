@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 
-VERSION = 1
+VERSION = 2
 LOGGER = logging.getLogger("music_assistant.ha_recovery_intent")
 IDENTITY = re.compile(r"[A-Za-z0-9_.:-]{1,160}\Z")
 CONTROLS = {
@@ -31,6 +31,70 @@ CONTROLS = {
     "volume_set",
     "transfer",
 }
+MAX_HA_TARGETS = 64
+HA_SERVICES = {
+    "media_stop",
+    "media_pause",
+    "media_play",
+    "media_play_pause",
+    "media_next_track",
+    "media_previous_track",
+    "play_media",
+    "media_seek",
+    "turn_off",
+    "turn_on",
+    "volume_set",
+    "volume_mute",
+    "select_source",
+}
+
+
+def log_hass_origin(result: object, domain: str, service: str, target: object) -> None:
+    """Correlate successful MA-origin HA calls using HA's exact returned context."""
+    try:
+        if (
+            domain != "media_player"
+            or service not in HA_SERVICES
+            or not isinstance(result, dict)
+        ):
+            return
+        context = result.get("context")
+        if (
+            not isinstance(context, dict)
+            or not isinstance(context.get("id"), str)
+            or not IDENTITY.fullmatch(context["id"])
+        ):
+            return
+        if not isinstance(target, dict):
+            return
+        entities = target.get("entity_id")
+        if isinstance(entities, str):
+            entities = [entities]
+        if (
+            not isinstance(entities, list)
+            or not entities
+            or len(entities) > MAX_HA_TARGETS
+            or not all(
+                isinstance(entity, str)
+                and entity.startswith("media_player.")
+                and IDENTITY.fullmatch(entity)
+                for entity in entities
+            )
+        ):
+            return
+        LOGGER.info(
+            "HA_RECOVERY_HASS_ORIGIN %s",
+            json.dumps(
+                {
+                    "context_id": context["id"],
+                    "domain": domain,
+                    "service": service,
+                    "entity_ids": sorted(set(entities)),
+                }
+            ),
+        )
+    except Exception:  # noqa: BLE001 - optional provenance cannot alter HA service results.
+        return
 
 
 def intent_payload(command: str, args: dict, state_getter: object) -> dict | None:

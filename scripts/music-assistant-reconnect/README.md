@@ -46,7 +46,8 @@ aborts startup visibly.
 | --- | --- |
 | Original hass-client client.py | 0b464086da1215a14250e72c144a7a57acceaa38f863337a939d4588cf04fd55 |
 | Previous ERROR-frame-only guard | dc7af40887c9c48c16a5e425b1a637734718614870a26066d8c0f5248d0df0f5 |
-| Client with both transport fixes | 9cfde978bd240782b78f79ca8ee5fc8b7614e9820298cac5a942f80c597c79ca |
+| Previous client with both transport fixes | 9cfde978bd240782b78f79ca8ee5fc8b7614e9820298cac5a942f80c597c79ca |
+| Client with transport fixes and exact HA provenance | 997ab3638eb045f9ace6284db436ba2c79f67842275612fbe424756497e53c14 |
 | Original MA HA provider | 600bd557f3549e0c412341f85d51eba96ec1e7d0412b4ae85ae28ec3f13abe1b |
 | Provider with cleanup and auth mapping | bfea362c3d13c82bc9ced0786c09952ffbdd2f75fd31ae054157c0c94589a6aa |
 
@@ -120,3 +121,13 @@ original, transformed controller and helper hashes are checked before any write;
 an unexpected image fails visibly instead of receiving a partial blind patch.
 The native CI job exercises the actual pinned HTTP/WS handlers and announcement
 restoration without accessing household devices.
+
+The guarded `hass_client.call_service` method also records a successful HA
+response's exact context ID, known media-player service and normalized entity
+targets. This optional helper never changes the returned object or a service
+exception. It emits no token, service arguments, user ID or raw response. The
+consumer handles either log/event order, same-context nested services, and an
+unrelated owner Stop conservatively. The original, ERROR-only and previous
+reconnect-only client preimages all migrate to the same reviewed output. Native
+tests exercise real client return identity, failure propagation, missing helper,
+invalid fields and logging failure.

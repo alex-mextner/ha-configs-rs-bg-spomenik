@@ -23,7 +23,10 @@ PATCHED = {
         "16d60a56330a8dd36a30abd0d8512e69adb42b7ae49b04047d8e4e96d560a96f"
     ),
 }
-HELPER_SHA256 = "e7d7567d6427477864e4cfb51f0a5d81a1a1c8482c28ca58d725f5ed91ddfd2e"
+HELPER_SHA256 = "013c51e6adfb63cd7621d2ee96222a83558c406bcc73cce8a94b6d747f72e5a1"
+PREVIOUS_HELPER_SHA256 = (
+    "e7d7567d6427477864e4cfb51f0a5d81a1a1c8482c28ca58d725f5ed91ddfd2e"
+)
 
 
 def transform(source: bytes, name: str) -> bytes:
@@ -84,10 +87,10 @@ def main() -> None:
         for name in ORIGINALS
     }
     target = root / "helpers/ha_recovery_intent.py"
-    if (
-        target.exists()
-        and hashlib.sha256(target.read_bytes()).hexdigest() != HELPER_SHA256
-    ):
+    if target.exists() and hashlib.sha256(target.read_bytes()).hexdigest() not in {
+        HELPER_SHA256,
+        PREVIOUS_HELPER_SHA256,
+    }:
         fail("Unexpected existing intent helper")
     if target.exists():
         write_verified(target, helper)

@@ -52,6 +52,31 @@ class InterruptionTests(unittest.TestCase):
     def broken(self, **extra: object) -> list:
         return self.send("player", player=player(available=False, **extra))
 
+    def test_tentative_control_holds_audio_without_canceling_native_restore(
+        self,
+    ) -> None:
+        self.broken()
+        self.send("intent_pending", at=1001, context_id="native", player_ids=["studio"])
+        actions = self.engine.due(1005)
+        self.assertEqual([a["type"] for a in actions], ["publish"])
+        self.assertIn("studio", self.engine.pending)
+        actions = self.send("intent_resolved", at=1005.1, context_id="native")
+        self.assertEqual([a["type"] for a in actions], ["announce"])
+        self.assertIn("studio", self.engine.restore)
+
+    def test_stop_while_origin_unresolved_cancels_and_new_epoch_drops_stale_hold(
+        self,
+    ) -> None:
+        self.broken()
+        self.send("intent_pending", at=1001, context_id="user", player_ids=["studio"])
+        self.send("intent", at=1002, player_ids=["studio"], queue_ids=[])
+        self.assertEqual(self.send("intent_resolved", at=1003, context_id="user"), [])
+        self.assertEqual(self.engine.pending, {})
+        self.assertEqual(self.engine.restore, {})
+        self.send("intent_pending", at=1004, context_id="old", player_ids=["studio"])
+        self.send("snapshot", at=1005, stream_id="new", players=[player()], queues=[])
+        self.assertFalse(self.engine.intent_pending("studio"))
+
     def test_persistent_network_notifies_and_speaks_only_after_five_seconds(
         self,
     ) -> None:
@@ -279,6 +304,40 @@ class InterruptionTests(unittest.TestCase):
         self.assertEqual(self.broken(), [])
         self.assertEqual(self.engine.due(1010), [])
 
+    def test_log_fault_clears_on_fresh_playing_and_does_not_taint_later_idle(
+        self,
+    ) -> None:
+        self.send(
+            "fault",
+            scope="player:studio",
+            provider="airplay",
+            reason="network",
+            player_ids=["studio"],
+            playback_fault=True,
+        )
+        self.send("player", at=1001, player=player())
+        self.send("player", at=1100, player=player(state="idle"))
+        self.assertEqual(self.engine.due(1110), [])
+        self.assertNotIn("player:studio", self.engine.faults)
+
+    def test_idle_log_player_removal_is_not_a_configuration_incident(self) -> None:
+        actions = self.send(
+            "fault",
+            scope="player:livingroom",
+            reason="unknown",
+            player_ids=["livingroom"],
+            playback_fault=True,
+        )
+        self.assertEqual(actions, [])
+        self.assertEqual(self.engine.due(1010), [])
+
+    def test_speech_window_is_carried_in_source_monotonic_time(self) -> None:
+        self.broken()
+        action = next(a for a in self.engine.due(1005) if a["type"] == "announce")
+        self.assertEqual(action["source_interrupted_at"], 100)
+        self.assertEqual(action["source_deadline"], 105)
+        self.assertEqual(action["source_not_after"], 108)
+
     def test_duplicate_stale_or_missing_sequence_never_announces(self) -> None:
         self.broken()
         self.assertEqual(
@@ -333,6 +392,56 @@ class InterruptionTests(unittest.TestCase):
             ],
             ["recovered"],
         )
+
+    def test_indeterminate_loss_remains_pending_without_reissuing_decided_scope(
+        self,
+    ) -> None:
+        self.broken()
+        self.engine.due(1005)
+        self.send(
+            "fault", at=1005, scope="provider:radio", provider="radio", reason="code"
+        )
+        self.engine.state["subscriber_losses"]["loss"] = {"reconciled": False}
+        evidence = {
+            "request_id": "loss",
+            "observed_at": 1006,
+            "boot_id": "boot",
+            "stream_id": "stream",
+            "status": "fresh",
+            "players": [player(available=False)],
+            "faults": [],
+        }
+        first = self.engine.reconcile_subscriber_loss(evidence, 1006)
+        self.assertEqual([a["event"]["scope"] for a in first], ["player:studio"])
+        self.assertFalse(self.engine.state["subscriber_losses"]["loss"]["reconciled"])
+        self.assertEqual(self.engine.reconcile_subscriber_loss(evidence, 1006), [])
+        evidence["faults"] = [{"scope": "provider:radio", "recovered": False}]
+        last = self.engine.reconcile_subscriber_loss(evidence, 1006)
+        self.assertEqual([a["event"]["scope"] for a in last], ["provider:radio"])
+        self.assertTrue(self.engine.state["subscriber_losses"]["loss"]["reconciled"])
+
+    def test_subscriber_loss_during_intentional_maintenance_waits_for_fresh_postmaintenance_evidence(
+        self,
+    ) -> None:
+        self.send("fault", scope="ma.provider.hass", reason="configuration")
+        self.engine.state["subscriber_losses"]["loss"] = {"reconciled": False}
+        self.send("maintenance", at=1001, active=True)
+        evidence = {
+            "request_id": "loss",
+            "observed_at": 1002,
+            "boot_id": "boot",
+            "stream_id": "stream",
+            "status": "fresh",
+            "players": [],
+            "maintenance": "active",
+            "faults": [{"scope": "ma.provider.hass", "recovered": False}],
+        }
+        self.assertEqual(self.engine.reconcile_subscriber_loss(evidence, 1002), [])
+        self.assertFalse(self.engine.state["subscriber_losses"]["loss"]["reconciled"])
+        self.send("maintenance", at=1003, active=False)
+        evidence.update(observed_at=1004, maintenance="absent")
+        actions = self.engine.reconcile_subscriber_loss(evidence, 1004)
+        self.assertEqual([a["event"]["phase"] for a in actions], ["updated"])
 
 
 if __name__ == "__main__":

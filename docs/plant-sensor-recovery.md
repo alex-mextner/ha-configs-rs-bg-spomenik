@@ -94,14 +94,17 @@ is reconciled before shared dispatch; the legacy host subcommand remains only to
 finish those existing workers.
 
 Install `ha_plant_repair_subscriber.py`, `ha_smart_home_common.py`, the reviewed
-plant standing instructions and a mode-0600 `plant-sensors` profile beside the
-Ubuntu controller. Enable `ha-plant-repair-subscriber.service` for the shared
+plant standing instructions at the exact absolute profile path (owned, mode 0600
+or 0644), and a mode-0600 `plant-sensors` profile beside the Ubuntu controller. Enable `ha-plant-repair-subscriber.service` for the shared
 native lifecycle event stream. A positively confirmed loss is recorded, then an
 ordinary read-only sensor observation determines whether the same unresolved
 incident needs a new event revision. Unknown liveness does not authorize a second
-agent. If that observation is temporarily unavailable, the existing detector's
-next authorized run consumes the durable loss; no new healthy polling loop is
-introduced.
+agent. Shared protocol version 1 is checked before accepting watch events or
+delivery acknowledgements. A retained native loss takes precedence over synthetic
+startup-vacancy reconciliation. If a read-only observation is temporarily
+unavailable, the shared watch retains and redelivers its unacknowledged loss on a
+concrete retry deadline; no new healthy polling loop is introduced. Domain
+decisions are flushed before the native loss is acknowledged.
 
 The existing care integration remains the only authority for physical recovery.
 The standing brief forbids watering, calibration shortcuts, household audio,
@@ -120,6 +123,7 @@ python3 tests/plant_recovery/test_recovery.py
 
 It covers bounded first aid, healthy saturation, restart limits, transport delays,
 actual measurement spacing, retained evidence, malformed payloads, missing optional
-entities, durable deduplication, failed dispatch, real process completion, explicit
-same-session reboot continuation, live cgroup ownership and private log fallback.
+entities, durable deduplication, failed dispatch, shared delivery ownership, and legacy live-cgroup reconciliation
+for pre-migration workers. New dispatches use shared subscriptions; reboot does
+not imply that a previously completed private session is resumed.
 Full suites and adversarial runs use established CI or RunPod, not production hosts.

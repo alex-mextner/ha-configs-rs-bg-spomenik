@@ -12,10 +12,64 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/host"))
 import ha_plant_repair_subscriber as shared
+import ha_plant_sensor_recovery as plant
 
 
 class PlantSubscriberTests(unittest.TestCase):
     """Exercise immutable delivery and legacy-worker migration without sensors."""
+
+    def test_successful_native_loss_ack_is_not_repeated_by_healthy_ticks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "subscriber-loss.json").write_text(
+                json.dumps({"source": "plant-sensors", "event_id": "loss-1"})
+            )
+            backend = shared.SharedBackend(types.SimpleNamespace(root=root))
+            response = {
+                "protocol_version": 1,
+                "status": "acknowledged",
+                "source": "plant-sensors",
+                "event_id": "loss-1",
+            }
+            with patch.object(
+                shared.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, json.dumps(response)),
+            ) as run:
+                backend.acknowledge_closed({"status": "healthy"})
+                backend.acknowledge_closed({"status": "healthy"})
+            self.assertEqual(run.call_count, 1)
+            self.assertTrue(
+                json.loads((root / "subscriber-loss.json").read_text())["acknowledged"]
+            )
+
+    def test_watch_malformed_records_do_not_block_and_cleanup_is_bounded(self) -> None:
+        class Process:
+            def __init__(self) -> None:
+                self.terminated = False
+                self.stdout = ["\n", "[1,2]\n", "not-json\n"]
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None) -> int:
+                self.timeout = timeout
+                return 0
+
+        process = Process()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(plant, "STATE_ROOT", Path(directory)),
+            patch.object(plant, "configure_logging"),
+            patch.object(shared.subprocess, "Popen", return_value=process),
+            self.assertRaisesRegex(RuntimeError, "shared_subscription_watch_ended"),
+        ):
+            shared.watch()
+        self.assertTrue(process.terminated)
+        self.assertEqual(process.timeout, 2)
 
     def test_retries_reuse_identical_envelope_and_use_only_shared_publish(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -39,7 +93,7 @@ class PlantSubscriberTests(unittest.TestCase):
                 first = backend.launch(incident, {"bridge_ok": False})
                 raw = backend.event_path(incident).read_bytes()
                 second = backend.launch(incident, {"bridge_ok": True})
-            self.assertEqual(first["status"], "started")
+            self.assertEqual(first["status"], "pending")
             self.assertEqual(second["subscriber_id"], "same-native")
             self.assertEqual(backend.event_path(incident).read_bytes(), raw)
             self.assertTrue(
@@ -116,6 +170,7 @@ class PlantSubscriberTests(unittest.TestCase):
                         Path(argv[argv.index("--event-file") + 1]).read_text()
                     )["event_id"]
                 receipt = {
+                    "protocol_version": 1,
                     "status": "pending",
                     "source": "plant-sensors",
                     "event_id": event_id,
@@ -141,6 +196,7 @@ class PlantSubscriberTests(unittest.TestCase):
                     "a": {
                         "id": "a",
                         "launch_receipt": {
+                            "protocol_version": 1,
                             "source": "plant-sensors",
                             "durable": True,
                             "subscriber_id": "prior",
@@ -151,11 +207,13 @@ class PlantSubscriberTests(unittest.TestCase):
             }
             (root / "state.json").write_text(json.dumps(state))
             ready = {
+                "protocol_version": 1,
                 "type": "ready",
                 "source": "plant-sensors",
                 "native_state": "unknown",
                 "authority_id": "authority",
                 "revision": "revision",
+                "loss_pending": False,
             }
             self.assertIsNone(shared.startup_loss(ready, root))
             ready["native_state"] = "vacant"
@@ -163,6 +221,13 @@ class PlantSubscriberTests(unittest.TestCase):
             self.assertEqual(loss["subscriber_id"], "prior")
             self.assertFalse(loss["native_ack_required"])
             self.assertEqual(shared.startup_loss(ready, root), loss)
+            for version, pending in ((1, True), (1, None), (2, False)):
+                self.assertIsNone(
+                    shared.startup_loss(
+                        {**ready, "protocol_version": version, "loss_pending": pending},
+                        root,
+                    )
+                )
             state["incidents"]["a"]["launch_receipt"] = {
                 "status": "started",
                 "unit": "legacy",

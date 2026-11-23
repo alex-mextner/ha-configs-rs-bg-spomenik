@@ -14,9 +14,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from ha_smart_home_common import atomic_json, durable_delivery
+from ha_smart_home_common import atomic_json, durable_delivery, protocol_v1
 
 SOURCE = "plant-sensors"
+LOG = logging.getLogger("plant_sensor_recovery")
 BROKER = str(Path.home() / ".local/bin/agent-sub")
 LOSS_REASONS = {
     "process_exited",
@@ -101,10 +102,10 @@ class SharedBackend:
             incident["subscription_revision"] = loss["event_id"]
             incident["subscription_native_ack"] = loss.get("native_ack_required", True)
 
-    def launch(self, incident: dict, observation: dict) -> dict:
-        """Publish once to the shared native lifecycle, preserving immutable retries."""
-        self.apply_loss(incident)
-        path = self.event_path(incident)
+    def prepare_event(
+        self, path: Path, incident: dict, observation: dict
+    ) -> dict | None:
+        """Preserve a legacy worker before creating the shared immutable event."""
         if not path.exists():
             legacy = (
                 self.local.reconcile(incident)
@@ -140,6 +141,15 @@ class SharedBackend:
                 },
             }
             atomic_json(path, event)
+        return None
+
+    def launch(self, incident: dict, observation: dict) -> dict:
+        """Publish once to the shared native lifecycle, preserving immutable retries."""
+        self.apply_loss(incident)
+        path = self.event_path(incident)
+        legacy = self.prepare_event(path, incident, observation)
+        if legacy:
+            return legacy
         event = json.loads(path.read_text())
         receipt_path = path.with_suffix(".receipt.json")
         prior = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
@@ -168,13 +178,17 @@ class SharedBackend:
         if not isinstance(receipt, dict):
             message = "invalid_subscription_receipt"
             raise TypeError(message)
-        native_status = receipt.get("status")
+        native_status = (
+            receipt.get("status")
+            if durable_delivery(receipt, SOURCE, event["event_id"])
+            else "unknown"
+        )
         if durable_delivery(receipt, SOURCE, event["event_id"]):
             atomic_json(receipt_path, receipt)
             if incident.get("subscription_revision") and incident.get(
                 "subscription_native_ack", True
             ):
-                acknowledge_loss(incident["subscription_revision"])
+                acknowledge_loss(incident["subscription_revision"], self.local.root)
         return {
             **receipt,
             "subscription_status": native_status,
@@ -194,14 +208,17 @@ class SharedBackend:
                 event.get("source") == SOURCE
                 and isinstance(event.get("event_id"), str)
                 and event.get("native_ack_required", True)
+                and not event.get("acknowledged")
             ):
-                acknowledge_loss(event["event_id"])
+                acknowledge_loss(event["event_id"], self.local.root)
 
 
 def startup_loss(event: dict, root: Path) -> dict | None:
     """Reconcile pre-watch shared work only after authoritative startup vacancy."""
     if (
-        event.get("native_state") != "vacant"
+        not protocol_v1(event)
+        or event.get("loss_pending") is not False
+        or event.get("native_state") != "vacant"
         or event.get("source") != SOURCE
         or not isinstance(event.get("authority_id"), str)
         or not event["authority_id"]
@@ -216,7 +233,8 @@ def startup_loss(event: dict, root: Path) -> dict | None:
     except (OSError, ValueError, AttributeError):
         return None
     if (
-        receipt.get("source") != SOURCE
+        not protocol_v1(receipt)
+        or receipt.get("source") != SOURCE
         or receipt.get("durable") is not True
         or receipt.get("subscription_status") != "delivered"
         or not receipt.get("subscriber_id")
@@ -235,9 +253,13 @@ def startup_loss(event: dict, root: Path) -> dict | None:
     }
 
 
-def acknowledge_loss(event_id: str) -> None:
+def acknowledge_loss(event_id: str, root: Path) -> bool:
     """Keep an ambiguous ack retryable; never turn it into a sensor failure."""
     try:
+        path = root / "subscriber-loss.json"
+        before = json.loads(path.read_text()) if path.exists() else {}
+        if before.get("event_id") == event_id and before.get("acknowledged"):
+            return True
         response = subprocess.run(  # noqa: S603 - fixed shared acknowledgement command.
             [BROKER, "watch-ack", "--source", SOURCE, "--event-id", event_id],
             check=True,
@@ -246,19 +268,77 @@ def acknowledge_loss(event_id: str) -> None:
             timeout=12,
         )
         receipt = json.loads(response.stdout)
-        if receipt.get("status") != "acknowledged":
-            logging.getLogger(__name__).warning("Subscriber acknowledgement deferred")
+        if (
+            not protocol_v1(receipt)
+            or receipt.get("status") != "acknowledged"
+            or receipt.get("source") != SOURCE
+            or receipt.get("event_id") != event_id
+        ):
+            LOG.warning("Subscriber acknowledgement deferred")
+            return False
+        current = json.loads(path.read_text()) if path.exists() else {}
+        if current.get("event_id") == event_id:
+            atomic_json(
+                path, {**current, "acknowledged": True, "acknowledged_at": time.time()}
+            )
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        logging.getLogger(__name__).warning(
-            "Subscriber acknowledgement pending: %s", type(error).__name__
+        LOG.warning("Subscriber acknowledgement pending: %s", type(error).__name__)
+        return False
+    else:
+        return True
+
+
+def process_watch_line(
+    line: str, root: Path, local: object, backend: SharedBackend
+) -> None:
+    """Reconcile one retained subscriber loss without blocking malformed records."""
+    from ha_plant_sensor_recovery import (  # noqa: PLC0415 - avoids circular host/probe imports.
+        Controller,
+    )
+
+    try:
+        event = json.loads(line)
+    except ValueError:
+        LOG.warning("Malformed shared watch record ignored")
+        return
+    if not protocol_v1(event):
+        return
+    if event.get("type") == "ready":
+        event = startup_loss(event, root) or {}
+    if (
+        event.get("type") != "subscriber_lost"
+        or event.get("source") != SOURCE
+        or event.get("reason") not in LOSS_REASONS
+    ):
+        return
+    path = root / "subscriber-loss.json"
+    prior = json.loads(path.read_text()) if path.exists() else {}
+    if prior.get("event_id") == event.get("event_id") and prior.get("acknowledged"):
+        return
+    atomic_json(path, event)
+    # This is a read-only source observation, not a fresh ADC measurement.
+    # The existing controller retains every threshold and remedy count.
+    try:
+        result = Controller(root / "state.json", backend).tick(
+            local.observe(), time.time()
         )
+        backend.acknowledge_closed(result)
+        LOG.info("Subscriber loss reconciled: %s", result.get("status"))
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        subprocess.SubprocessError,
+    ) as error:
+        LOG.warning("Subscriber loss pending: %s", type(error).__name__)
+        # Shared watch redelivers this retained loss on its concrete retry
+        # deadline. No new scan or agent ownership loop exists here.
 
 
 def watch() -> None:
     """React to shared subscriber death using a fresh ordinary plant observation."""
     from ha_plant_sensor_recovery import (  # noqa: PLC0415 - avoids a circular host/probe dependency.
         STATE_ROOT,
-        Controller,
         SystemBackend,
         configure_logging,
     )
@@ -266,45 +346,24 @@ def watch() -> None:
     configure_logging()
     local = SystemBackend(STATE_ROOT)
     backend = SharedBackend(local)
-    with subprocess.Popen(  # noqa: S603 - fixed trusted event subscription, no shell.
+    process = subprocess.Popen(  # noqa: S603 - fixed trusted event subscription, no shell.
         [BROKER, "watch", "--source", SOURCE, "--launch-profile", SOURCE],
         stdout=subprocess.PIPE,
         text=True,
-    ) as process:
+    )
+    try:
         for line in process.stdout:
-            event = json.loads(line)
-            if event.get("type") == "ready":
-                event = startup_loss(event, STATE_ROOT) or {}
-            if (
-                event.get("type") != "subscriber_lost"
-                or event.get("source") != SOURCE
-                or event.get("reason") not in LOSS_REASONS
-            ):
-                continue
-            atomic_json(STATE_ROOT / "subscriber-loss.json", event)
-            # This is a read-only source observation, not a fresh ADC measurement.
-            # The existing controller retains every threshold and remedy count.
-            try:
-                result = Controller(STATE_ROOT / "state.json", backend).tick(
-                    local.observe(), time.time()
-                )
-                backend.acknowledge_closed(result)
-                logging.getLogger(__name__).info(
-                    "Subscriber loss reconciled: %s", result.get("status")
-                )
-            except (
-                OSError,
-                ValueError,
-                TypeError,
-                subprocess.SubprocessError,
-            ) as error:
-                logging.getLogger(__name__).warning(
-                    "Subscriber loss pending: %s", type(error).__name__
-                )
-                # The existing plant timer will consume the durable loss on its next
-                # authorized observation; no new scan or agent ownership loop exists.
+            process_watch_line(line, STATE_ROOT, local, backend)
         message = "shared_subscription_watch_ended"
         raise RuntimeError(message)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
 
 
 if __name__ == "__main__":

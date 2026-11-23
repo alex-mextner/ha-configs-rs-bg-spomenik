@@ -10,9 +10,11 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from ha_smart_home_common import (
     CONFIG,
     LOCAL_STATE,
     MAINTENANCE,
+    active_claim,
     atomic_json,
     failure_reason,
     ha_token,
@@ -34,9 +37,27 @@ from ha_smart_home_watch import watch_marker
 
 CONTAINER = "homeassistant-music-assistant-1"
 INTENT_MARKER = "HA_RECOVERY_INTENT "
+TRUSTED_INTENT = re.compile(
+    r"^[^\n\[\]]{0,200}\[music_assistant\.ha_recovery_intent\]"
+    r"\s+HA_RECOVERY_INTENT (.+)$"
+)
+TRUSTED_HASS_ORIGIN = re.compile(
+    r"^[^\n\[\]]{0,200}\[music_assistant\.ha_recovery_intent\]"
+    r"\s+HA_RECOVERY_HASS_ORIGIN (.+)$"
+)
+HA_ORIGIN_TIMEOUT = 30
+MAX_PENDING_ORIGINS = 256
 MAX_COMMAND_LENGTH = 100
 INTENT_RETENTION_SECONDS = 600
 MAX_LOG_DELAY = 5
+
+
+@dataclass(frozen=True)
+class Moment:
+    """Capture source wall time for diagnostics and uptime for causal timing."""
+
+    wall: float
+    monotonic: float
 
 
 def require_lists(*values: object) -> None:
@@ -47,6 +68,7 @@ def require_lists(*values: object) -> None:
 
 
 HA_CONTROLS = {
+    "media_play",
     "media_pause",
     "media_stop",
     "media_play_pause",
@@ -63,8 +85,10 @@ HA_CONTROLS = {
 
 def log_events(line: str, players: dict) -> list:
     """Normalize scoped live errors; URLs and untrusted error text stay local."""
-    if INTENT_MARKER in line:
-        return intent_record(line.split(INTENT_MARKER, 1)[1])
+    if match := TRUSTED_INTENT.fullmatch(line):
+        return intent_record(match[1])
+    if match := TRUSTED_HASS_ORIGIN.fullmatch(line):
+        return hass_origin_record(match[1])
     if not any(
         marker in line
         for marker in (
@@ -102,6 +126,24 @@ def log_events(line: str, players: dict) -> list:
             }
         )
     return events
+
+
+def hass_origin_record(raw: str) -> list:
+    """Parse only bounded private native context provenance."""
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return []
+    if (
+        isinstance(value, dict)
+        and value.get("domain") == "media_player"
+        and identity(value.get("context_id"))
+        and isinstance(value.get("service"), str)
+        and isinstance(value.get("entity_ids"), list)
+        and all(identity(x) for x in value["entity_ids"])
+    ):
+        return [{"kind": "ha_origin", **value}]
+    return []
 
 
 def intent_record(raw: str) -> list:
@@ -159,6 +201,15 @@ def public_players(players: dict) -> list:
     ]
 
 
+def entity_targets(value: object) -> list:
+    """Normalize bounded HA entity identifiers without trusting other arguments."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [target for item in value if (target := identity(item))]
+
+
 def integration_events(entries: list, config: dict) -> list:
     """Map enabled critical entries without interpreting unknown state as health."""
     domains = config.get(
@@ -184,7 +235,7 @@ def integration_events(entries: list, config: dict) -> list:
                 "kind": "fault",
                 "scope": "ha.integration:" + iid,
                 "provider": "ha:" + str(entry["domain"]),
-                "reason": "configuration",
+                "reason": "network" if state == "setup_retry" else "configuration",
                 "recovered": state == "loaded",
             }
         )
@@ -198,6 +249,9 @@ class Socket:
         """Create one request multiplexer for the authenticated connection."""
         self.ws, self.channel = ws, channel
         self.sequence = 10
+        self.wire_sequence = 0
+        self.commands: dict[str, str] = {}
+        self.reply_sequences: dict[str, int] = {}
         self.pending: dict[str, asyncio.Future] = {}
         self.parts: dict[str, list] = {}
         self.events: asyncio.Queue = asyncio.Queue(maxsize=2048)
@@ -213,12 +267,14 @@ class Socket:
             message.update(type=command, **(args or {}))
         future = asyncio.get_running_loop().create_future()
         self.pending[str(self.sequence)] = future
+        self.commands[str(self.sequence)] = command
         try:
             await self.ws.send(json.dumps(message))
             return await asyncio.wait_for(future, 8)
         finally:
             self.pending.pop(str(message[key]), None)
             self.parts.pop(str(message[key]), None)
+            self.commands.pop(str(message[key]), None)
 
     async def read(self) -> None:
         """Consume all messages; an overflowing stream reconnects and reseeds."""
@@ -229,6 +285,7 @@ class Socket:
 
     def receive(self, message: dict) -> None:
         """Route one parsed message to its request or the event queue."""
+        self.wire_sequence += 1
         key = str(message.get("message_id" if self.channel == "ma" else "id"))
         result = (
             message.get("type") == "result"
@@ -238,7 +295,9 @@ class Socket:
         if key in self.pending and result:
             self.command_result(key, message)
         else:
-            self.events.put_nowait((time.time(), message))
+            self.events.put_nowait(
+                (Moment(time.time(), time.monotonic()), message, self.wire_sequence)
+            )
 
     def command_result(self, key: str, message: dict) -> None:
         """Resolve a live request, including streamed partial MA results."""
@@ -253,6 +312,7 @@ class Socket:
             value = message.get("result")
             if key in self.parts:
                 value = self.parts[key] + (value or [])
+            self.reply_sequences[self.commands[key]] = self.wire_sequence
             future.set_result(value)
 
 
@@ -273,7 +333,30 @@ class Source:
         self.maintenance = None
         self.provider_refresh: asyncio.Task | None = None
         self.sockets: dict[str, Socket] = {}
-        atomic_json(LOCAL_STATE / "intents.json", {"targets": {}})
+        self.seeded: dict[str, bool] = {}
+        self.playback_lock = asyncio.Lock()
+        self.baseline_sequences: dict[str, int] = {}
+        self.pending_ha: dict[str, dict] = {}
+        self.ha_origins: dict[str, dict] = {}
+        self.save_intents()
+
+    def save_intents(self) -> None:
+        """Keep control intent in this boot's uptime, never a cross-host wall clock."""
+        atomic_json(
+            LOCAL_STATE / "intents.json",
+            {
+                "clock": "boot_monotonic",
+                "boot_id": self.boot_id,
+                "targets": self.intents,
+                "pending_targets": sorted(
+                    {
+                        pid
+                        for item in self.pending_ha.values()
+                        for pid in item["player_ids"]
+                    }
+                ),
+            },
+        )
 
     def status(self) -> None:
         """Persist lifecycle transitions, not periodic health scans."""
@@ -289,20 +372,23 @@ class Source:
             },
         )
 
-    def emit(self, payload: dict, observed_at: float | None = None) -> None:
+    def emit(self, payload: dict, observed_at: float | Moment | None = None) -> None:
         """Sequence evidence at its source and never print tokens or raw errors."""
         active = maintenance_status() in {"active", "unknown"}
         if active != self.maintenance:
             self.maintenance = active
             self._write({"kind": "maintenance", "active": active}, time.time())
         stamp = time.time() if observed_at is None else observed_at
+        if payload.get("kind") == "ha_origin":
+            self.hass_origin(payload)
+            return
         if payload.get("kind") == "intent":
             if self.own_control(payload):
                 return
             payload = self.record_intent(payload, stamp)
         self._write(payload, stamp)
 
-    def record_intent(self, payload: dict, stamp: float) -> dict:
+    def record_intent(self, payload: dict, stamp: float | Moment) -> dict:
         """Normalize physical aliases and persist only recent control intent."""
         aliases = {
             alias: pid
@@ -315,14 +401,19 @@ class Source:
                 {aliases.get(p, p) for p in payload.get("player_ids", [])}
             ),
         }
+        observed_mono = (
+            stamp.monotonic
+            if isinstance(stamp, Moment)
+            else time.monotonic() - max(0, time.time() - stamp)
+        )
         for target in payload.get("player_ids", []) + payload.get("queue_ids", []):
-            self.intents[target] = stamp
+            self.intents[target] = observed_mono
         self.intents = {
             k: v
             for k, v in self.intents.items()
-            if time.time() - v < INTENT_RETENTION_SECONDS
+            if time.monotonic() - v < INTENT_RETENTION_SECONDS
         }
-        atomic_json(LOCAL_STATE / "intents.json", {"targets": self.intents})
+        self.save_intents()
         return payload
 
     @staticmethod
@@ -343,18 +434,22 @@ class Source:
         return (
             claim.get("origin_tag") == tag
             and claim.get("queue_id") in payload.get("queue_ids", [])
-            and claim.get("expires", 0) >= time.time()
+            and active_claim(claim)
         )
 
-    def _write(self, payload: dict, stamp: float) -> None:
+    def _write(self, payload: dict, stamp: float | Moment) -> None:
         self.sequence += 1
+        emitted = time.monotonic()
         frame = {
             "host": "odroidn2",
             "boot_id": self.boot_id,
             "stream_id": self.stream_id,
             "sequence": self.sequence,
-            "observed_at": stamp,
-            "monotonic": time.monotonic() - max(0, time.time() - stamp),
+            "observed_at": stamp.wall if isinstance(stamp, Moment) else stamp,
+            "monotonic": stamp.monotonic
+            if isinstance(stamp, Moment)
+            else emitted - max(0, time.time() - stamp),
+            "emitted_monotonic": emitted,
             **payload,
         }
         sys.stdout.write(
@@ -377,12 +472,14 @@ class Source:
             }
         )
 
-    def player(self, raw: dict, stamp: float) -> None:
+    def player(self, raw: dict, stamp: float | Moment) -> None:
         """Emit the configured physical player, excluding hidden protocol aliases."""
         pid = raw.get("player_id")
         if pid not in self.config.get("players", {}):
             return
-        clean = normalize_player(raw, self.queues, stamp)
+        clean = normalize_player(
+            raw, self.queues, stamp.wall if isinstance(stamp, Moment) else stamp
+        )
         media = raw.get("current_media") or {}
         if self.announcing(pid, raw):
             clean["announcement"] = True
@@ -403,9 +500,7 @@ class Source:
         )
         try:
             value = json.loads(marker.read_text())
-            return (
-                value.get("active") is True and value.get("expires", 0) >= time.time()
-            )
+            return value.get("active") is True and active_claim(value)
         except (OSError, ValueError, TypeError):
             return False
 
@@ -447,18 +542,23 @@ class Source:
 
     async def seed_ma(self, socket: Socket) -> None:
         """Seed a new baseline that cannot manufacture an interruption."""
-        self.queues, self.players = await self.read_playback(socket)
-        # Queued events during these initial queries belong to the baseline.
-        while not socket.events.empty():
-            socket.events.get_nowait()
-        self.emit(
-            {
-                "kind": "snapshot",
-                "players": public_players(self.players),
-                "queues": list(self.queues.values()),
+        self.seeded["ma"] = False
+        await self.check_intent()
+        async with self.playback_lock:
+            self.queues, self.players = await self.read_playback(socket)
+            self.baseline_sequences = {
+                "player": socket.reply_sequences.get("players/all", 0),
+                "queue": socket.reply_sequences.get("player_queues/all", 0),
             }
-        )
+            self.emit(
+                {
+                    "kind": "snapshot",
+                    "players": public_players(self.players),
+                    "queues": list(self.queues.values()),
+                }
+            )
         await self.providers(socket)
+        self.seeded["ma"] = True
 
     async def reconcile_current(self, request_id: str) -> None:
         """Read current domain evidence once after a shared subscriber dies."""
@@ -471,14 +571,18 @@ class Source:
             "maintenance": maintenance_status(),
         }
         try:
-            if "ma" in self.sockets:
+            if "ma" in self.sockets and self.seeded.get("ma"):
                 await self.reconcile_ma(payload, self.sockets["ma"])
-            if "ha" in self.sockets:
+            if "ha" in self.sockets and self.seeded.get("ha"):
                 entries = await self.sockets["ha"].call("config_entries/get")
                 require_lists(entries)
                 payload["faults"].extend(integration_events(entries, self.config))
             payload["intents"] = dict(self.intents)
-            payload["status"] = "fresh"
+            payload["status"] = (
+                "fresh"
+                if all(self.seeded.get(key) for key in ("ma", "ha"))
+                else "incomplete"
+            )
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, TimeoutError):
             payload["status"] = "incomplete"
         self.emit(payload)
@@ -491,8 +595,27 @@ class Source:
         payload["players"] = public_players(players)
         payload["faults"] = provider_events(configs)
 
-    async def ma_event(self, socket: Socket, message: dict, stamp: float) -> None:
+    async def ma_event(
+        self, socket: Socket, message: dict, stamp: float | Moment, sequence: int = 0
+    ) -> None:
         """Route supported Music Assistant push events into scoped evidence."""
+        async with self.playback_lock:
+            kind = str(message.get("event", ""))
+            family = (
+                "player"
+                if kind.startswith("player_")
+                else "queue"
+                if kind.startswith("queue_")
+                else None
+            )
+            if family and sequence <= self.baseline_sequences.get(family, -1):
+                return
+            await self.apply_ma_event(socket, message, stamp)
+
+    async def apply_ma_event(
+        self, socket: Socket, message: dict, stamp: float | Moment
+    ) -> None:
+        """Apply a delta only after its corresponding snapshot response boundary."""
         kind, data = message.get("event"), message.get("data")
         if kind in {"player_added", "player_updated"} and isinstance(data, dict):
             self.player(data, stamp)
@@ -512,7 +635,7 @@ class Source:
         elif kind == "application_shutdown":
             self.transport("ma", connected=False)
 
-    def ha_event(self, message: dict, stamp: float) -> None:
+    def ha_event(self, message: dict, stamp: float | Moment) -> None:
         """Handle enabled integration faults and explicit HA playback controls."""
         event = message.get("event", {})
         if isinstance(event, list):
@@ -522,29 +645,140 @@ class Source:
             return
         if event.get("event_type") != "call_service":
             return
+        self.ha_control(event, stamp)
+
+    def ha_control(self, event: dict, stamp: float | Moment) -> None:
+        """Hold possible user controls until exact native provenance resolves."""
         data = event.get("data", {})
         if (
             data.get("domain") != "media_player"
             or data.get("service") not in HA_CONTROLS
         ):
             return
-        targets = data.get("service_data", {}).get("entity_id", [])
-        targets = [targets] if isinstance(targets, str) else targets
+        if (
+            data.get("service") == "play_media"
+            and data.get("service_data", {}).get("announce") is True
+        ):
+            return
+        targets = entity_targets(data.get("service_data", {}).get("entity_id", []))
         players = [
             pid
             for pid, cfg in self.config.get("players", {}).items()
             if not targets or set(targets) & set(cfg.get("entities", []))
         ]
-        if players:
-            self.emit(
-                {
-                    "kind": "intent",
-                    "command": "ha:" + data["service"],
-                    "player_ids": players,
-                    "queue_ids": [],
-                },
-                stamp,
-            )
+        if not players:
+            return
+        payload = {
+            "kind": "intent",
+            "command": "ha:" + data["service"],
+            "player_ids": players,
+            "queue_ids": [],
+        }
+        self.hold_ha_control(payload, event.get("context") or {}, targets, stamp)
+
+    def hold_ha_control(
+        self, payload: dict, context: dict, targets: list, stamp: float | Moment
+    ) -> None:
+        """Keep each pending service/target identity until provenance or timeout."""
+        context_id = identity(context.get("id"))
+        if not context_id:
+            self.emit(payload, stamp)
+            return
+        pending = {
+            **payload,
+            "context_id": context_id,
+            "parent_id": identity(context.get("parent_id")),
+            "service": payload["command"].removeprefix("ha:"),
+            "entities": targets,
+            "expires": time.monotonic() + HA_ORIGIN_TIMEOUT,
+        }
+        if any(
+            self.origin_matches(pending, origin) for origin in self.ha_origins.values()
+        ):
+            return
+        intent_id = hashlib.sha256(
+            json.dumps(
+                [context_id, payload["command"].removeprefix("ha:"), sorted(targets)]
+            ).encode()
+        ).hexdigest()
+        previous = self.pending_ha.pop(intent_id, None)
+        if previous:
+            previous["timer"].cancel()
+        if len(self.pending_ha) >= MAX_PENDING_ORIGINS:
+            # Unresolved controls remain conservative user intent on overflow.
+            self.expire_ha_intent(next(iter(self.pending_ha)))
+        pending["timer"] = asyncio.get_running_loop().call_later(
+            HA_ORIGIN_TIMEOUT, self.expire_ha_intent, intent_id
+        )
+        self.pending_ha[intent_id] = pending
+        self.save_intents()
+        self.emit(
+            {
+                **payload,
+                "kind": "intent_pending",
+                "context_id": context_id,
+                "intent_id": intent_id,
+            },
+            stamp,
+        )
+
+    @staticmethod
+    def origin_matches(pending: dict, origin: dict) -> bool:
+        """Authorize only the proven context lineage and target subset."""
+        targets, proven = (
+            set(pending.get("entities", [])),
+            set(origin.get("entity_ids", [])),
+        )
+        if not targets or not targets <= proven:
+            return False
+        context_id = origin.get("context_id")
+        # HA may reuse the same Context for nested services; provenance follows
+        # that exact lineage, never a household account or a time/target guess.
+        direct = pending.get("context_id") == context_id
+        return direct or pending.get("parent_id") == context_id
+
+    def hass_origin(self, origin: dict) -> None:
+        """Resolve tentative HA control only with matching trusted MA provenance."""
+        now = time.monotonic()
+        self.ha_origins = {
+            key: item for key, item in self.ha_origins.items() if item["expires"] > now
+        }
+        previous = self.ha_origins.get(origin["context_id"], {})
+        origin = {
+            **origin,
+            "entity_ids": sorted(
+                set(origin["entity_ids"]) | set(previous.get("entity_ids", []))
+            ),
+        }
+        if len(self.ha_origins) >= MAX_PENDING_ORIGINS:
+            del self.ha_origins[next(iter(self.ha_origins))]
+        self.ha_origins[origin["context_id"]] = {
+            **origin,
+            "expires": now + HA_ORIGIN_TIMEOUT,
+        }
+        for intent_id, pending in list(self.pending_ha.items()):
+            if self.origin_matches(pending, origin):
+                pending["timer"].cancel()
+                del self.pending_ha[intent_id]
+                self.save_intents()
+                self.emit({"kind": "intent_resolved", "intent_id": intent_id})
+
+    def expire_ha_intent(self, intent_id: str) -> None:
+        """Unmatched or failed native provenance stays conservatively user intent."""
+        pending = self.pending_ha.pop(intent_id, None)
+        if pending is None:
+            return
+        pending["timer"].cancel()
+        self.emit(
+            {
+                "kind": "intent",
+                "command": pending["command"],
+                "player_ids": pending["player_ids"],
+                "queue_ids": [],
+            }
+        )
+        self.save_intents()
+        self.emit({"kind": "intent_resolved", "intent_id": intent_id})
 
     async def session(self, channel: str) -> None:
         """Authenticate normally, subscribe once, then consume push events."""
@@ -601,6 +835,7 @@ class Source:
                         "subscribe_events", {"event_type": "call_service"}
                     )
                     await socket.call("config_entries/subscribe")
+                    self.seeded["ha"] = True
                 self.transport(channel, connected=True)
                 await self.consume(socket, reader, channel)
             finally:
@@ -619,9 +854,9 @@ class Source:
             if reader in done:
                 event_task.cancel()
                 await reader
-            stamp, message = await event_task
+            stamp, message, sequence = await event_task
             if channel == "ma":
-                await self.ma_event(socket, message, stamp)
+                await self.ma_event(socket, message, stamp, sequence)
             else:
                 self.ha_event(message, stamp)
 
@@ -629,9 +864,13 @@ class Source:
         """Use one-shot backoff only after a known connection failure."""
         delay = 1
         while True:
+            self.seeded[channel] = False
             try:
                 await self.session(channel)
             except Exception as error:  # noqa: BLE001 - supervised stream boundary; only error type escapes.
+                if self.seeded.get(channel):
+                    delay = 1
+                self.seeded[channel] = False
                 self.transport(
                     channel,
                     connected=False,
@@ -645,41 +884,82 @@ class Source:
 
     async def logs(self) -> None:
         """Subscribe only to new container output; old errors are never replayed."""
+        delay = 1
         while True:
-            process = await asyncio.create_subprocess_exec(
-                "docker",
-                "logs",
-                "--follow",
-                "--tail",
-                "0",
-                "--timestamps",
-                CONTAINER,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            self.transport("logs", connected=True)
+            process = None
             try:
-                async for raw in process.stdout:
-                    line = raw.decode(errors="replace").strip()
-                    stamp_text, _, body = line.partition(" ")
-                    try:
-                        stamp = datetime.fromisoformat(stamp_text).timestamp()
-                    except ValueError:
-                        continue
-                    if not 0 <= time.time() - stamp <= MAX_LOG_DELAY:
-                        continue
-                    for event in log_events(body, self.log_players()):
-                        self.emit(event, stamp)
-                await process.wait()
+                process = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "logs",
+                    "--follow",
+                    "--tail",
+                    "0",
+                    "--timestamps",
+                    CONTAINER,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                await self.log_session(process)
+            except (OSError, ValueError, ConnectionError) as error:
+                LOG.warning("Log stream unavailable: %s", type(error).__name__)
             finally:
-                if process.returncode is None:
+                if self.connected.get("logs"):
+                    delay = 1
+                if process and process.returncode is None:
                     process.terminate()
-                    await process.wait()
+                    try:
+                        await asyncio.wait_for(process.wait(), 2)
+                    except TimeoutError:
+                        process.kill()
+                        await process.wait()
                 self.transport("logs", connected=False)
-            await asyncio.sleep(3)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
 
-    async def run(self) -> None:
-        """Prove installed intent telemetry once and start persistent streams."""
+    async def log_session(self, process: object) -> None:
+        """Confirm usable output or a surviving log attachment."""
+        reader = asyncio.create_task(self.read_logs(process.stdout))
+        exited = asyncio.create_task(process.wait())
+        attached = asyncio.create_task(asyncio.sleep(1))
+        try:
+            done, _ = await asyncio.wait(
+                {reader, exited, attached}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if attached in done and process.returncode is None:
+                self.transport("logs", connected=True)
+                await reader
+            elif reader in done:
+                await reader
+            message = "log_stream_ended"
+            raise ConnectionError(message)
+        finally:
+            for task in (reader, exited, attached):
+                task.cancel()
+            await asyncio.gather(reader, exited, attached, return_exceptions=True)
+
+    async def read_logs(self, stream: asyncio.StreamReader) -> None:
+        """Discard malformed log records without losing the source."""
+        while True:
+            try:
+                raw = await stream.readline()
+            except ValueError:
+                LOG.warning("Oversized container log record discarded")
+                continue
+            if not raw:
+                return
+            stamp_text, _, body = raw.decode(errors="replace").strip().partition(" ")
+            try:
+                stamp = datetime.fromisoformat(stamp_text).timestamp()
+            except ValueError:
+                continue
+            if not self.connected.get("logs"):
+                self.transport("logs", connected=True)
+            if 0 <= time.time() - stamp <= MAX_LOG_DELAY:
+                for event in log_events(body, self.log_players()):
+                    self.emit(event, stamp)
+
+    async def check_intent(self) -> None:
+        """Recheck installed telemetry for every new MA connection epoch."""
         process = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
@@ -691,8 +971,17 @@ class Source:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        output, _ = await asyncio.wait_for(process.communicate(), 8)
-        self.intent_ready = process.returncode == 0 and output.strip() == b"1"
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), 8)
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        self.intent_ready = process.returncode == 0 and output.strip() == b"2"
+        self.status()
+
+    async def run(self) -> None:
+        """Start persistent streams; each connection proves its own readiness."""
         self.status()
         self.transport("stream", connected=True)
         workers = [
@@ -713,6 +1002,8 @@ class Source:
             for task in workers:
                 task.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
+            for pending in self.pending_ha.values():
+                pending["timer"].cancel()
             self.connected = dict.fromkeys(self.connected, False)
             self.status()
 
@@ -745,19 +1036,61 @@ class Source:
                     "recovered": True,
                 }
             )
-            if was_active and "ma" in self.sockets:
-                await self.seed_ma(self.sockets["ma"])
+            if was_active:
+                await self.reseed_after_maintenance()
+
+    async def reseed_after_maintenance(self) -> None:
+        """Recover every suppressed HA/MA edge from one current snapshot."""
+        for channel, connected in tuple(self.connected.items()):
+            self.transport(channel, connected=connected)
+        for channel in ("ma", "ha"):
+            socket = self.sockets.get(channel)
+            if socket is None:
+                continue
+            try:
+                if channel == "ma":
+                    await self.seed_ma(socket)
+                else:
+                    entries = await socket.call("config_entries/get")
+                    require_lists(entries)
+                    for event in integration_events(entries, self.config):
+                        self.emit(event)
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                TimeoutError,
+                TypeError,
+            ) as error:
+                self.transport(
+                    channel,
+                    connected=False,
+                    reason=failure_reason(type(error).__name__),
+                )
+                LOG.warning(
+                    "Maintenance reseed deferred for %s: %s",
+                    channel,
+                    type(error).__name__,
+                )
+                await socket.ws.close()
 
     async def parent_lifetime(self) -> None:
         """Read only explicit lifecycle refresh requests; EOF ends this source."""
-        while raw := await asyncio.to_thread(sys.stdin.buffer.readline, 1024):
-            try:
-                request = json.loads(raw)
-                request_id = identity(request.get("request_id"))
-            except (ValueError, AttributeError):
-                continue
-            if request.get("type") == "reconcile" and request_id:
-                await self.reconcile_current(request_id)
+        reader = asyncio.StreamReader(limit=1024)
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer
+        )
+        try:
+            while raw := await reader.readline():
+                try:
+                    request = json.loads(raw)
+                    request_id = identity(request.get("request_id"))
+                except (ValueError, AttributeError):
+                    continue
+                if request.get("type") == "reconcile" and request_id:
+                    await self.reconcile_current(request_id)
+        finally:
+            transport.close()
 
 
 def main() -> None:

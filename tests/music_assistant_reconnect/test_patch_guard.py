@@ -44,6 +44,17 @@ class PatchGuardTests(unittest.TestCase):
             guard.prepare_client(previous), guard.prepare_client(self.client)
         )
 
+    def test_previous_reconnect_guard_migrates_to_private_origin_output(self) -> None:
+        previous = self.client.replace(guard.ORIGINAL, guard.REPLACEMENT).replace(
+            guard.HANDSHAKE_ORIGINAL, guard.HANDSHAKE_REPLACEMENT
+        )
+        self.assertEqual(
+            hashlib.sha256(previous).hexdigest(), guard.RECONNECT_GUARD_SHA256
+        )
+        self.assertEqual(
+            guard.prepare_client(previous), guard.prepare_client(self.client)
+        )
+
     def test_original_provider_migrates_to_reviewed_output(self) -> None:
         self.assertEqual(
             hashlib.sha256(guard.prepare_provider(self.provider)).hexdigest(),

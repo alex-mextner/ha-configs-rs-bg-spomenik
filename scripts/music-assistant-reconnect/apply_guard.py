@@ -21,7 +21,10 @@ EXPECTED_ARGUMENTS = 3
 
 ORIGINAL_SHA256 = "0b464086da1215a14250e72c144a7a57acceaa38f863337a939d4588cf04fd55"
 ERROR_GUARD_SHA256 = "dc7af40887c9c48c16a5e425b1a637734718614870a26066d8c0f5248d0df0f5"
-PATCHED_SHA256 = "9cfde978bd240782b78f79ca8ee5fc8b7614e9820298cac5a942f80c597c79ca"
+RECONNECT_GUARD_SHA256 = (
+    "9cfde978bd240782b78f79ca8ee5fc8b7614e9820298cac5a942f80c597c79ca"
+)
+PATCHED_SHA256 = "997ab3638eb045f9ace6284db436ba2c79f67842275612fbe424756497e53c14"
 PROVIDER_ORIGINAL_SHA256 = (
     "600bd557f3549e0c412341f85d51eba96ec1e7d0412b4ae85ae28ec3f13abe1b"
 )
@@ -50,6 +53,19 @@ HANDSHAKE_REPLACEMENT = b"""            client_exceptions.ClientError,
             client_exceptions.WSMessageTypeError,
         ) as err:
 """
+SERVICE_ORIGINAL = b'        return await self.send_command("call_service", **params)\n'
+SERVICE_REPLACEMENT = (
+    b'        result = await self.send_command("call_service", **params)\n'
+    b"""        try:
+            from music_assistant.helpers.ha_recovery_intent import log_hass_origin
+
+            log_hass_origin(result, domain, service, target)
+        except Exception:
+            # Private provenance must never change a service result.
+            pass
+        return result
+"""
+)
 
 # Cleanup mirrors music-assistant/server PR 7844, with cancellation cleanup and
 # explicit credential-error translation so invalid tokens never enter retry loops.
@@ -120,9 +136,11 @@ def prepare_client(source: bytes) -> bytes:
         return source
     if current == ORIGINAL_SHA256:
         source = replace_once(source, ORIGINAL, REPLACEMENT)
-    elif current != ERROR_GUARD_SHA256:
+    elif current not in {ERROR_GUARD_SHA256, RECONNECT_GUARD_SHA256}:
         fail(f"Unexpected hass-client source SHA256: {current}")
-    source = replace_once(source, HANDSHAKE_ORIGINAL, HANDSHAKE_REPLACEMENT)
+    if current != RECONNECT_GUARD_SHA256:
+        source = replace_once(source, HANDSHAKE_ORIGINAL, HANDSHAKE_REPLACEMENT)
+    source = replace_once(source, SERVICE_ORIGINAL, SERVICE_REPLACEMENT)
     if hashlib.sha256(source).hexdigest() != PATCHED_SHA256:
         fail("Client backport output does not match reviewed source")
     return source

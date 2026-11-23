@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from ha_smart_home_common import atomic_json, durable_delivery, identity
+from ha_smart_home_common import atomic_json, durable_delivery, identity, protocol_v1
 from ha_smart_home_recovery import LOG, Engine, init_log
 
 ROOT = Path.home() / ".local/state/ha-smart-home-recovery"
@@ -29,11 +29,56 @@ SSH = [
 ]
 BROKER = str(Path.home() / ".local/bin/agent-sub")
 STATE_SCHEMA = 2
+RECEIPT_RETENTION = 7 * 86400
+PRUNE_INTERVAL = 3600
 LOSS_REASONS = {
     "process_exited",
     "subscription_released",
     "authority_vacant_after_restart",
 }
+
+
+class SourceClock:
+    """Map one source uptime to consumer time without comparing wall clocks."""
+
+    def __init__(self) -> None:
+        """Initialize a separate monotonic origin for each source epoch."""
+        self.epoch = None
+        self.offset = None
+
+    def normalize(
+        self, event: dict, received_at: float, received_monotonic: float
+    ) -> dict:
+        """Preserve event delay without comparing host wall clocks."""
+        original, emitted = event.get("monotonic"), event.get("emitted_monotonic")
+        if not all(valid_number(x) for x in (original, emitted)) or original > emitted:
+            message = "invalid_source_clock"
+            raise ValueError(message)
+        epoch = event.get("boot_id"), event.get("stream_id")
+        if not all(isinstance(value, str) and value for value in epoch):
+            message = "invalid_source_epoch"
+            raise ValueError(message)
+        offset = received_monotonic - emitted
+        if epoch != self.epoch:
+            self.epoch, self.offset = epoch, offset
+        else:
+            self.offset = min(self.offset, offset)
+        age = max(0, received_monotonic - original - self.offset)
+        mapped = received_at - age
+        source_offset = original - mapped
+        result = {
+            **event,
+            "observed_at": mapped,
+            "source_monotonic": original,
+            "source_offset": source_offset,
+        }
+        if isinstance(event.get("intents"), dict):
+            result["intents"] = {
+                key: stamp - source_offset
+                for key, stamp in event["intents"].items()
+                if valid_number(stamp)
+            }
+        return result
 
 
 def valid_number(value: object) -> bool:
@@ -120,13 +165,30 @@ def validate_delivery_state(state: dict) -> None:
             msg = "speech_schema"
             raise ValueError(msg)
     for loss in state.get("subscriber_losses", {}).values():
-        if (
-            not isinstance(loss, dict)
-            or type(loss.get("reconciled")) is not bool
-            or not valid_number(loss.get("observed_at"))
-        ):
-            msg = "subscriber_loss_schema"
-            raise ValueError(msg)
+        validate_loss(loss)
+
+
+def validate_loss(loss: dict) -> None:
+    """Validate one persisted domain decision and its retry metadata."""
+    if (
+        not isinstance(loss, dict)
+        or type(loss.get("reconciled")) is not bool
+        or not valid_number(loss.get("observed_at"))
+    ):
+        msg = "subscriber_loss_schema"
+        raise ValueError(msg)
+    decisions = loss.get("decisions", {})
+    if (
+        not isinstance(decisions, dict)
+        or any(
+            not isinstance(k, str) or not isinstance(v, str)
+            for k, v in decisions.items()
+        )
+        or type(loss.get("attempts", 0)) is not int
+        or (loss.get("retry_at") is not None and not valid_number(loss["retry_at"]))
+    ):
+        msg = "subscriber_decision_schema"
+        raise ValueError(msg)
 
 
 def load_state(root: Path) -> dict:
@@ -194,11 +256,62 @@ class Runtime:
         self.stored: str | None = None
         self.source_writer: asyncio.StreamWriter | None = None
         self.refresh_deadline: float | None = None
-        self.requested_losses: set[str] = set()
+        self.requested_losses: dict[str, float] = {}
         self.ack_deadline: float | None = None
+        self.source_clock = SourceClock()
+        self.source_changed = asyncio.Event()
+        self.last_pruned = 0
+
+    def prune_terminal(self, now: float) -> None:
+        """Expire terminal evidence on existing activity only."""
+        if now - self.last_pruned < PRUNE_INTERVAL:
+            return
+        self.last_pruned = now
+        cutoff = now - RECEIPT_RETENTION
+        state = self.engine.state
+        protected = {
+            i["id"] for i in state["incidents"].values() if i.get("closed") is None
+        }
+        protected.update(
+            a["event"].get("incident_id") for a in state["outbox"].values()
+        )
+        self.prune_claims(cutoff, protected)
+        self.prune_losses(cutoff)
+        self.prune_files(cutoff)
+
+    def prune_claims(self, cutoff: float, protected: set) -> None:
+        """Keep claims for unresolved incidents and recent attempts."""
+        state = self.engine.state
+        for kind in ("spoken", "resumed"):
+            for key, value in list(state[kind].items()):
+                if value.get("attempted_at", cutoff) < cutoff and not any(
+                    i and i in key for i in protected
+                ):
+                    del state[kind][key]
+
+    def prune_losses(self, cutoff: float) -> None:
+        """Retain every unresolved or unacknowledged native loss."""
+        state = self.engine.state
+        for key, loss in list(state["subscriber_losses"].items()):
+            terminal = loss.get("reconciled") and (
+                loss.get("acknowledged") or loss.get("native_ack_required") is False
+            )
+            if terminal and loss.get("observed_at", cutoff) < cutoff:
+                del state["subscriber_losses"][key]
+                self.requested_losses.pop(key, None)
+
+    def prune_files(self, cutoff: float) -> None:
+        """Remove old producer evidence after shared durable admission."""
+        state = self.engine.state
+        kept_events = {eid.replace(":", "-") + ".json" for eid in state["outbox"]}
+        for directory in ("events", "receipts"):
+            for path in (self.root / directory).glob("*.json"):
+                if path.name not in kept_events and path.stat().st_mtime < cutoff:
+                    path.unlink()
 
     def save(self) -> None:
         """Persist only changed domain state, always before effects."""
+        self.prune_terminal(time.time())
         serialized = json.dumps(self.engine.state, sort_keys=True, allow_nan=False)
         if serialized != self.stored:
             atomic_json(self.root / "state.json", self.engine.state)
@@ -272,7 +385,12 @@ class Runtime:
                     (
                         key,
                         action,
-                        {"status": "pending", "reason": type(error).__name__},
+                        {
+                            "status": "unknown"
+                            if action["type"] in {"announce", "resume"}
+                            else "pending",
+                            "reason": type(error).__name__,
+                        },
                     ),
                 )
             )
@@ -298,11 +416,31 @@ class Runtime:
         """Speak only through the exact-target native route, never another room."""
         lock = self.player_locks.setdefault(action["player_id"], asyncio.Lock())
         async with lock:
+            while self.engine.intent_pending(
+                action["player_id"]
+            ) and self.announcement_current(action):
+                wake = self.source_changed
+                try:
+                    await asyncio.wait_for(
+                        wake.wait(), max(0, action["not_after"] - time.time())
+                    )
+                except TimeoutError:
+                    return {
+                        "status": "suppressed",
+                        "reason": "unresolved_control_origin",
+                    }
             if not self.announcement_current(action):
                 return {"status": "suppressed", "reason": "canceled_before_submission"}
+            wire_action = {
+                **action,
+                "clock": "boot_monotonic",
+                "interrupted_at": action["source_interrupted_at"],
+                "deadline": action["source_deadline"],
+                "not_after": action["source_not_after"],
+            }
             return await command_json(
                 [*SSH, "python3", REMOTE + "/ha_smart_home_probe.py", "--execute"],
-                action,
+                wire_action,
                 35,
             )
 
@@ -319,28 +457,31 @@ class Runtime:
                 **result,
             }
         else:
-            self._broker_receipt(key, action, result)
+            self._broker_receipt(action, result)
         self.save()
 
     def _ack_receipt(self, action: dict, result: dict) -> None:
         loss = self.engine.state["subscriber_losses"].get(action["event_id"], {})
         accepted = (
-            result.get("status") == "acknowledged"
+            protocol_v1(result)
+            and result.get("status") == "acknowledged"
             and result.get("event_id") == action["event_id"]
             and result.get("source") == "smart-home"
         )
         loss["acknowledged"] = accepted
         if not accepted:
-            self.ack_deadline = time.time() + 5
-
-    def _broker_receipt(self, key: str, action: dict, result: dict) -> None:
-        for receipt in result.get("receipts", [result]):
-            event_id = (
-                action["event"]["event_id"]
-                if action["type"] == "publish"
-                else receipt.get("event_id", key)
+            loss["ack_attempts"] = loss.get("ack_attempts", 0) + 1
+            self.ack_deadline = time.time() + min(
+                5 * 2 ** min(loss["ack_attempts"] - 1, 4), 60
             )
-            self._store_delivery(event_id, receipt)
+
+    def _broker_receipt(self, action: dict, result: dict) -> None:
+        if not protocol_v1(result):
+            result = {
+                "status": "pending",
+                "reason": "unsupported_subscription_protocol",
+            }
+        self._store_broker_receipts(action, result)
         retry = result.get("retry_at")
         try:
             due = (
@@ -354,6 +495,22 @@ class Runtime:
         if action["type"] == "reconcile" and "receipts" in result:
             # Reconciliation precedes retries of an ambiguous immutable publish.
             self.submit(list(self.engine.state["outbox"].values()))
+
+    def _store_broker_receipts(self, action: dict, result: dict) -> None:
+        """Store only receipts with an actual event identity."""
+        receipts = (
+            result.get("receipts", []) if action["type"] == "reconcile" else [result]
+        )
+        for receipt in receipts if isinstance(receipts, list) else []:
+            if not isinstance(receipt, dict):
+                continue
+            event_id = (
+                action["event"]["event_id"]
+                if action["type"] == "publish"
+                else identity(receipt.get("event_id"))
+            )
+            if event_id:
+                self._store_delivery(event_id, receipt)
 
     def _store_delivery(self, event_id: str, receipt: dict) -> None:
         if durable_delivery(receipt, "smart-home", event_id):
@@ -404,21 +561,30 @@ class Runtime:
         self.reschedule()
 
     def _source_event(self, data: dict) -> None:
+        data = self.source_clock.normalize(
+            data,
+            data.get("received_at", time.time()),
+            data.get("received_monotonic", time.monotonic()),
+        )
         self.submit(self.engine.feed(data, time.time()))
+        changed, self.source_changed = self.source_changed, asyncio.Event()
+        changed.set()
         if data.get("kind") == "reconciliation":
             self.submit(self.engine.reconcile_subscriber_loss(data, time.time()))
             self.acknowledge_losses()
-            self.requested_losses.discard(data.get("request_id"))
-            self.refresh_deadline = (
-                None if data.get("status") == "fresh" else time.time() + 5
-            )
+            self.requested_losses.pop(data.get("request_id"), None)
+            self._refresh_result(data)
+            self.request_refresh()
         elif data.get("kind") == "transport" and data.get("connected"):
             self.request_refresh()
+        elif data.get("kind") == "transport" and data.get("boot_id") == "consumer":
+            self.reconcile_source_absence()
 
     def _subscriber_lost(self, data: dict) -> None:
         event_id = identity(data.get("event_id"))
         if not (
-            event_id
+            protocol_v1(data)
+            and event_id
             and data.get("source") == "smart-home"
             and data.get("reason") in LOSS_REASONS
         ):
@@ -431,18 +597,28 @@ class Runtime:
         self.request_refresh()
 
     def _shared_delivery(self, data: dict) -> None:
-        if data.get("source") == "smart-home" and isinstance(data.get("receipt"), dict):
+        if (
+            protocol_v1(data)
+            and data.get("source") == "smart-home"
+            and isinstance(data.get("receipt"), dict)
+        ):
             receipt = data["receipt"]
-            self.receipt(
-                receipt.get("event_id", "shared"), {"type": "delivery_receipt"}, receipt
-            )
+            event_id = identity(receipt.get("event_id"))
+            if event_id and durable_delivery(receipt, "smart-home", event_id):
+                # A shared observer receipt is not completion of our CLI task.
+                self._store_delivery(event_id, receipt)
+                self.save()
+                if not self.engine.state["outbox"]:
+                    self.retry_at = None
 
     def _effect_receipt(self, data: tuple) -> None:
         self.receipt(*data)
 
     def _shared_ready(self, data: dict) -> None:
         if (
-            data.get("source") != "smart-home"
+            not protocol_v1(data)
+            or data.get("loss_pending") is not False
+            or data.get("source") != "smart-home"
             or data.get("native_state") != "vacant"
             or not isinstance(data.get("authority_id"), str)
             or not data["authority_id"]
@@ -479,7 +655,6 @@ class Runtime:
             self.submit([{"type": "reconcile"}])
         if self.refresh_deadline is not None and self.refresh_deadline <= time.time():
             self.refresh_deadline = None
-            self.requested_losses.clear()
             self.request_refresh()
         if self.ack_deadline is not None and self.ack_deadline <= time.time():
             self.ack_deadline = None
@@ -500,16 +675,66 @@ class Runtime:
     def request_refresh(self) -> None:
         """Ask the existing source once for fresh evidence of known orphaned work."""
         if self.source_writer is None or self.source_writer.is_closing():
+            self.refresh_deadline = None
+            self.reconcile_source_absence()
             return
+        now = time.time()
         for event_id, loss in self.engine.state["subscriber_losses"].items():
-            if loss.get("reconciled") or event_id in self.requested_losses:
+            if (
+                loss.get("reconciled")
+                or self.requested_losses.get(event_id, 0) > now
+                or loss.get("retry_at", 0) > now
+            ):
                 continue
             self.source_writer.write(
                 json.dumps({"type": "reconcile", "request_id": event_id}).encode()
                 + b"\n"
             )
-            self.requested_losses.add(event_id)
-            self.refresh_deadline = time.time() + 30
+            self.requested_losses[event_id] = now + 30
+            loss.pop("retry_at", None)
+        deadlines = [
+            self.requested_losses.get(event_id, loss.get("retry_at", now + 5))
+            for event_id, loss in self.engine.state["subscriber_losses"].items()
+            if not loss.get("reconciled")
+        ]
+        self.refresh_deadline = min(deadlines, default=None)
+
+    def reconcile_source_absence(self) -> None:
+        """Confirm only the locally absent collector, never remote service health."""
+        if (
+            self.source_writer is not None
+            or not self.engine.stream
+            or self.engine.stream[0] != "consumer"
+        ):
+            return
+        now = time.time()
+        for event_id, loss in self.engine.state["subscriber_losses"].items():
+            if loss.get("reconciled"):
+                continue
+            self.submit(
+                self.engine.reconcile_subscriber_loss(
+                    {
+                        "request_id": event_id,
+                        "observed_at": now,
+                        "boot_id": self.engine.stream[0],
+                        "stream_id": self.engine.stream[1],
+                        "status": "incomplete",
+                        "connected": {"stream": False},
+                        "players": [],
+                        "faults": [],
+                    },
+                    now,
+                )
+            )
+        self.acknowledge_losses()
+
+    def _refresh_result(self, data: dict) -> None:
+        loss = self.engine.state["subscriber_losses"].get(data.get("request_id"))
+        if loss is None or loss.get("reconciled"):
+            return
+        loss["attempts"] = loss.get("attempts", 0) + 1
+        delay = min(5 * 2 ** min(loss["attempts"] - 1, 4), 60)
+        loss["retry_at"] = time.time() + delay
 
     async def run(self) -> None:
         """Resume durable pending deliveries and consume source events forever."""
@@ -552,7 +777,7 @@ class Runtime:
                 )
                 async for line in process.stdout:
                     event = json.loads(line)
-                    if isinstance(event, dict) and event.get("type") in {
+                    if protocol_v1(event) and event.get("type") in {
                         "ready",
                         "subscriber_lost",
                         "delivery_receipt",
@@ -595,6 +820,8 @@ class Runtime:
                 self.source_writer = process.stdin
                 async for line in process.stdout:
                     event = json.loads(line)
+                    event["received_at"] = time.time()
+                    event["received_monotonic"] = time.monotonic()
                     await self.inbox.put(("event", event))
                     delay = 1
                 await process.wait()
@@ -617,6 +844,7 @@ class Runtime:
                             "sequence": sequence,
                             "observed_at": time.time(),
                             "monotonic": time.monotonic(),
+                            "emitted_monotonic": time.monotonic(),
                             "channel": "stream",
                             "connected": False,
                             "reason": "network",

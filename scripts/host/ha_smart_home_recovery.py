@@ -16,8 +16,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 LOG = logging.getLogger("ha_smart_home_recovery")
-ROOT = Path.home() / ".local/state/ha-smart-home-recovery"
-REMOTE = "/home/ultra/.local/share/ha-smart-home-recovery"
 FRESHNESS = 10
 NETWORK_DELAY = 5
 REASONS = {"network", "auth", "configuration", "code", "unknown"}
@@ -119,6 +117,9 @@ class Engine:
         self.stream = None
         self.sequence = 0
         self.maintenance = False
+        self.source_offset = 0
+        self.event_time = 0
+        self.tentative: dict[str, set[str]] = {}
 
     def _admit(self, event: dict, now: float) -> bool:
         if not isinstance(event, dict):
@@ -143,6 +144,7 @@ class Engine:
             self.restore.clear()
             self.faults.clear()
             self.stopped.clear()
+            self.tentative.clear()
             self.stream, self.sequence = stream, seq - 1
         if seq <= self.sequence:
             return False
@@ -150,6 +152,7 @@ class Engine:
             self.players.clear()
             self.pending.clear()
             self.restore.clear()
+            self.tentative.clear()
         self.sequence = seq
         return True
 
@@ -248,6 +251,10 @@ class Engine:
             "claim": claim,
             "interrupted_at": now,
             "deadline": now + (NETWORK_DELAY if reason == "network" else 0),
+            "source_interrupted_at": now + self.source_offset,
+            "source_deadline": now
+            + self.source_offset
+            + (NETWORK_DELAY if reason == "network" else 0),
         }
         self.restore[identity] = {**self.pending[identity], "ready": False}
         incident.setdefault("playback", {})[identity] = {
@@ -263,6 +270,8 @@ class Engine:
             return []
         previous = self.players.get(identity)
         self.players[identity] = player
+        if player.get("available") is True and player.get("state") == "playing":
+            self.faults.pop("player:" + identity, None)
         if not previous:
             return []
         if player.get("state") == "paused" or player.get("enabled") is False:
@@ -300,6 +309,8 @@ class Engine:
 
     def _cause(self, player: dict) -> dict | None:
         for fault in reversed(list(self.faults.values())):
+            if fault.get("expires", float("inf")) < self.event_time:
+                continue
             if fault.get("players") and player.get("id") not in fault["players"]:
                 continue
             sources = {player.get("provider"), player.get("source_provider")} - {None}
@@ -330,6 +341,20 @@ class Engine:
             self.stopped.pop(pid, None)
         return []
 
+    def intent_pending(self, player_id: str) -> bool:
+        """Tentative HA commands inhibit effects without discarding a native restore."""
+        return any(player_id in players for players in self.tentative.values())
+
+    def _intent_pending(self, event: dict, _now: float) -> list:
+        context_id = event.get("intent_id", event.get("context_id"))
+        if isinstance(context_id, str):
+            self.tentative[context_id] = set(event.get("player_ids", []))
+        return []
+
+    def _intent_resolved(self, event: dict, now: float) -> list:
+        self.tentative.pop(event.get("intent_id", event.get("context_id")), None)
+        return self.due(now)
+
     def _fault(self, event: dict, now: float) -> list:
         scope, provider = event.get("scope"), event.get("provider")
         if not isinstance(scope, str):
@@ -344,9 +369,15 @@ class Engine:
             "domain": event.get("domain"),
             "players": event.get("player_ids", []),
         }
+        if event.get("playback_fault"):
+            self.faults[scope]["expires"] = now + NETWORK_DELAY
         observed = self._correlate_playback_fault(event, now)
-        if event.get("playback_fault") and reason == "network":
-            return observed
+        if event.get("playback_fault"):
+            if not any(pid in self.pending for pid in event.get("player_ids", [])):
+                return observed
+            incident, actions = self._open(scope, reason, now)
+            actions.extend(self._upgrade_pending_fault(scope, incident, reason, now))
+            return observed + actions + self.due(now)
         incident, actions = self._open(scope, reason, now)
         actions.extend(self._upgrade_pending_fault(scope, incident, reason, now))
         return observed + actions + self.due(now)
@@ -375,12 +406,16 @@ class Engine:
         for pid, pending in self.pending.items():
             if self._cause(self.players.get(pid, {})) != self.faults[scope]:
                 continue
-            actions.extend(self._close("player:" + pid, now))
+            if scope != "player:" + pid:
+                actions.extend(self._close("player:" + pid, now))
             pending.update(
                 reason=reason,
                 incident_id=incident["id"],
                 claim=incident["id"] + ":" + pid,
                 deadline=now if reason != "network" else pending["deadline"],
+                source_deadline=now + self.source_offset
+                if reason != "network"
+                else pending["source_deadline"],
             )
         return actions
 
@@ -428,6 +463,10 @@ class Engine:
         if not self._admit(event, now):
             return []
         now = event["observed_at"]
+        self.event_time = now
+        self.source_offset = event.get(
+            "source_offset", event.get("monotonic", now) - now
+        )
         kind = event.get("kind")
         if kind == "maintenance":
             self.maintenance = event.get("active") is True
@@ -447,6 +486,8 @@ class Engine:
             return nested(event.get(kind, {}), now)
         handler = {
             "intent": self._intent,
+            "intent_pending": self._intent_pending,
+            "intent_resolved": self._intent_resolved,
             "fault": self._fault,
             "transport": self._transport,
         }.get(kind)
@@ -456,13 +497,19 @@ class Engine:
         """Claim only scheduled interruption deadlines, never healthy scans."""
         if self.maintenance:
             return []
+        self.event_time = now
         actions = [
             self._publish(i, "opened", now)
             for i in self.state["incidents"].values()
             if i.get("closed") is None and i.get("dispatch_at", float("inf")) <= now
         ]
+        return actions + self._announcement_actions(now) + self._resume_actions(now)
+
+    def _announcement_actions(self, now: float) -> list:
+        """Claim eligible speech without consuming tentative user controls."""
+        actions = []
         for pid, pending in list(self.pending.items()):
-            if pending["deadline"] > now:
+            if pending["deadline"] > now or self.intent_pending(pid):
                 continue
             del self.pending[pid]
             if self.maintenance or self.intents.get(pid, 0) > now:
@@ -481,9 +528,10 @@ class Engine:
                     **pending,
                     "stream_id": self.stream[1] if self.stream else None,
                     "not_after": pending["deadline"] + 3,
+                    "source_not_after": pending["source_deadline"] + 3,
                 }
             )
-        return actions + self._resume_actions(now)
+        return actions
 
     def reconcile_subscriber_loss(self, evidence: dict, now: float) -> list:
         """Reissue open work only from fresh evidence after positive native death."""
@@ -491,25 +539,36 @@ class Engine:
             return []
         players = index_records(evidence.get("players", []), "id")
         faults = index_records(evidence.get("faults", []), "scope")
+        loss = self.state["subscriber_losses"][evidence["request_id"]]
+        decisions = loss.setdefault("decisions", {})
+        unresolved = False
         actions = []
         for scope, incident in self.state["incidents"].items():
             if incident.get("closed") is not None or not incident.get("published"):
+                continue
+            if decisions.get(scope) == incident["id"]:
                 continue
             broken = incident_broken(scope, incident, evidence, players, faults)
             if broken is True:
                 actions.append(self._publish(incident, "updated", now))
             elif broken is False:
                 actions.extend(self._close(scope, now))
-        self.state["subscriber_losses"][evidence["request_id"]]["reconciled"] = True
+            else:
+                unresolved = True
+                continue
+            decisions[scope] = incident["id"]
+        loss["reconciled"] = not unresolved
         return actions
 
     def _loss_ready(self, evidence: dict, now: float) -> bool:
         loss_id, stamp = evidence.get("request_id"), evidence.get("observed_at")
         return (
-            type(stamp) in (int, float)
+            not self.maintenance
+            and evidence.get("maintenance") not in {"active", "unknown"}
+            and type(stamp) in (int, float)
             and 0 <= now - stamp <= FRESHNESS
             and (evidence.get("boot_id"), evidence.get("stream_id")) == self.stream
-            and evidence.get("status") == "fresh"
+            and evidence.get("status") in {"fresh", "incomplete"}
             and loss_id in self.state["subscriber_losses"]
             and not self.state["subscriber_losses"][loss_id].get("reconciled")
         )
@@ -525,6 +584,7 @@ class Engine:
                 or player.get("state") != "idle"
                 or self._cause(player)
                 or self.intents.get(pid, 0) > now
+                or self.intent_pending(pid)
             ):
                 continue
             claim = "resume:" + waiting["claim"]
@@ -540,6 +600,8 @@ class Engine:
                     "claim": claim,
                     "deadline": now,
                     "not_after": now + 30,
+                    "source_deadline": now + self.source_offset,
+                    "source_not_after": now + self.source_offset + 30,
                     "stream_id": self.stream[1] if self.stream else None,
                 }
             )
@@ -549,7 +611,11 @@ class Engine:
         """Return the next one-shot deadline, or no timer at all."""
         if self.maintenance:
             return None
-        deadlines = [p["deadline"] for p in self.pending.values()]
+        deadlines = [
+            p["deadline"]
+            for pid, p in self.pending.items()
+            if not self.intent_pending(pid)
+        ]
         deadlines.extend(
             p["interrupted_at"] + NETWORK_DELAY
             for pid, p in self.restore.items()
@@ -557,6 +623,7 @@ class Engine:
             and self.players.get(pid, {}).get("available") is True
             and self.players.get(pid, {}).get("state") == "idle"
             and not self._cause(self.players.get(pid, {}))
+            and not self.intent_pending(pid)
         )
         deadlines.extend(
             i["dispatch_at"]

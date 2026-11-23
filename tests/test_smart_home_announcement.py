@@ -1,7 +1,10 @@
 # Copyright (c) 2026 Alex Mextner
 """No-audio acceptance for exact-target cached native announcements."""
 
+import io
+import json
 import sys
+import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +20,7 @@ class AnnouncementTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = datetime(2026, 11, 23, 12, tzinfo=UTC).timestamp()
         self.action = {
+            "clock": "boot_monotonic",
             "player_id": "studio",
             "queue_id": "studio",
             "item_id": "track-1",
@@ -43,12 +47,7 @@ class AnnouncementTests(unittest.TestCase):
             "state": "idle",
             "current_item": {"queue_item_id": "track-1"},
         }
-        self.states = [{"entity_id": "person.ultra", "state": "home"}]
-        self.config = {
-            "players": {"studio": {}},
-            "persons": ["person.ultra"],
-            "timezone": "Europe/Belgrade",
-        }
+        self.config = {"players": {"studio": {}}}
 
     def plan(self, **extra: object) -> dict | None:
         return probe.announcement_plan(
@@ -56,7 +55,6 @@ class AnnouncementTests(unittest.TestCase):
             {
                 "player": self.player,
                 "queue": self.queue,
-                "states": self.states,
                 "intents": extra.get("intents", {}),
             },
             self.config,
@@ -146,7 +144,6 @@ class AnnouncementTests(unittest.TestCase):
     ) -> None:
         self.assertIsNone(self.plan(now=self.now + 4))
         self.config["quiet_hours"] = [0, 24]
-        self.states = []
         self.assertIsNotNone(self.plan())
 
     def test_reason_codes_do_not_claim_network_for_auth_or_code(self) -> None:
@@ -158,6 +155,35 @@ class AnnouncementTests(unittest.TestCase):
         ]:
             self.action["reason"] = reason
             self.assertEqual(self.plan()["asset"], asset)
+
+    def test_lost_submission_response_is_unknown_and_keeps_own_audio_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            config.write_text("{}")
+            output = io.StringIO()
+            action = {**self.action, "claim": "incident:studio"}
+            with (
+                patch.object(probe, "LOCAL_STATE", root),
+                patch.object(probe, "CONFIG", config),
+                patch.object(probe, "init_log", return_value=root / "log"),
+                patch.object(probe, "prepare", return_value={"player_id": "studio"}),
+                patch.object(
+                    probe, "ma_command", side_effect=TimeoutError("lost response")
+                ),
+                patch.object(sys, "argv", ["probe", "--execute"]),
+                patch.object(sys, "stdin", io.StringIO(json.dumps(action))),
+                patch.object(sys, "stdout", output),
+            ):
+                probe.main()
+            self.assertEqual(json.loads(output.getvalue())["status"], "unknown")
+            marker = json.loads(
+                next((root / "announcements").glob("*.json")).read_text()
+            )
+            self.assertTrue(marker["active"])
+            self.assertEqual(marker["clock"], "boot_monotonic")
 
 
 if __name__ == "__main__":

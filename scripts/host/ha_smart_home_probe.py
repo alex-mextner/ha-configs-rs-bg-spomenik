@@ -26,6 +26,7 @@ from ha_smart_home_common import (
 from ha_smart_home_recovery import LOG, init_log
 
 MAX_VOLUME = 100
+CONTROL_RETENTION = 86400
 
 ASSETS = {
     "network.ogg": "8c56a8bb345c79a7f18bbf5e74d770b1f31435d3c17cad2ce349c131f7eb9dcb",
@@ -80,7 +81,8 @@ def same_interruption(action: dict, evidence: dict, now: float) -> bool:
     player, queue, intents = (evidence[k] for k in ("player", "queue", "intents"))
     pid, qid = action.get("player_id"), action.get("queue_id")
     return (
-        action.get("deadline", float("inf")) <= now <= action.get("not_after", 0)
+        action.get("clock") == "boot_monotonic"
+        and action.get("deadline", float("inf")) <= now <= action.get("not_after", 0)
         and all(intents.get(t, 0) < action.get("interrupted_at", 0) for t in (pid, qid))
         and player.get("player_id") == pid
         and queue.get("queue_id") == qid
@@ -143,9 +145,16 @@ def current_intents(action: dict) -> dict | None:
     ):
         return None
     boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    if status.get("boot_id") != boot:
+    intents = json.loads((LOCAL_STATE / "intents.json").read_text())
+    if (
+        status.get("boot_id") != boot
+        or intents.get("clock") != "boot_monotonic"
+        or intents.get("boot_id") != boot
+        or {action.get("player_id"), action.get("queue_id")}
+        & set(intents.get("pending_targets", []))
+    ):
         return None
-    return json.loads((LOCAL_STATE / "intents.json").read_text()).get("targets", {})
+    return intents.get("targets", {})
 
 
 def prepare(action: dict, config: dict) -> dict | None:
@@ -162,7 +171,7 @@ def prepare(action: dict, config: dict) -> dict | None:
     player = active_mute_state(player, config["players"][action["player_id"]])
     evidence = {"player": player, "queue": queue, "intents": intents}
     plan = (resume_plan if action.get("type") == "resume" else announcement_plan)(
-        action, evidence, config, time.time()
+        action, evidence, config, time.monotonic()
     )
     if not plan:
         return None
@@ -183,7 +192,7 @@ def prepare(action: dict, config: dict) -> dict | None:
             latest.get(t, 0) >= action["interrupted_at"]
             for t in (action["player_id"], action["queue_id"])
         )
-        or time.time() > action["not_after"]
+        or time.monotonic() > action["not_after"]
         or maintenance_status() in {"active", "unknown"}
     ):
         return None
@@ -219,8 +228,16 @@ def active_mute_state(player: dict, configured: dict) -> dict:
 def execute(action: dict, plan: dict) -> dict:
     """Mark our own clip before submission so it cannot masquerade as recovery."""
     hardware_before = plan.pop("hardware_before", None)
+    marker_clock = {
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "clock": "boot_monotonic",
+    }
     if action.get("type") == "resume":
         tag = "ha-recovery:" + uuid.uuid4().hex
+        controls = LOCAL_STATE / "controls"
+        for old in controls.glob("*.json"):
+            if time.time() - old.stat().st_mtime > CONTROL_RETENTION:
+                old.unlink()
         atomic_json(
             LOCAL_STATE
             / "controls"
@@ -228,7 +245,8 @@ def execute(action: dict, plan: dict) -> dict:
             {
                 "origin_tag": tag,
                 "queue_id": action["queue_id"],
-                "expires": time.time() + 30,
+                "expires": time.monotonic() + 30,
+                **marker_clock,
             },
         )
         ma_command("player_queues/resume", plan, message_id=tag, deadline_seconds=23)
@@ -242,7 +260,8 @@ def execute(action: dict, plan: dict) -> dict:
     claim = {
         "player_id": action["player_id"],
         "claim": action["claim"],
-        "expires": time.time() + 45,
+        "expires": time.monotonic() + 45,
+        **marker_clock,
         "active": True,
     }
     atomic_json(marker, claim)
@@ -278,11 +297,13 @@ def main() -> None:
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     action = json.loads(sys.stdin.read(8192))
+    submitted = False
     try:
         plan = prepare(action, json.loads(CONFIG.read_text()))
         if plan is None:
             result = {"status": "suppressed", "reason": "no_current_safe_route"}
         elif args.execute:
+            submitted = True
             result = execute(action, plan)
         else:
             result = {
@@ -290,7 +311,10 @@ def main() -> None:
                 "player_id": action["player_id"],
             }
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
-        result = {"status": "suppressed", "reason": type(error).__name__}
+        result = {
+            "status": "unknown" if submitted else "suppressed",
+            "reason": type(error).__name__,
+        }
     LOG.info("Completed status=%s log=%s", result.get("status"), log_path)
     sys.stdout.write(json.dumps(result) + "\n")
 

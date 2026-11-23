@@ -15,7 +15,7 @@ REPOSITORY_HELPERS = (
 if REPOSITORY_HELPERS.is_dir():
     sys.path.insert(0, str(REPOSITORY_HELPERS))
 
-import ha_recovery_intent as intent  # noqa: E402 - repository or pinned-image helper path is configured above.
+import ha_recovery_intent as intent  # noqa: E402 - native and repository helper paths differ.
 
 
 class IntentTests(unittest.TestCase):
