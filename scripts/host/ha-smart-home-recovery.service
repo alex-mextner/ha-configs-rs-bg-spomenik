@@ -1,0 +1,20 @@
+[Unit]
+Description=Smart-home event recovery and affected-speaker announcements
+After=network-online.target
+Wants=network-online.target
+OnFailure=service-failover-repair@ha-smart-home-recovery.service.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/share/ha-smart-home-recovery/ha_smart_home_service.py
+Restart=on-failure
+RestartMode=normal
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=default.target

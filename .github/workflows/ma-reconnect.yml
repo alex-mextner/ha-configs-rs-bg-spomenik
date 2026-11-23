@@ -1,0 +1,73 @@
+name: Music Assistant reconnect
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/music-assistant-reconnect/**"
+      - "tests/music_assistant_reconnect/**"
+      - "ha.docker-compose.yaml"
+      - ".github/workflows/ma-reconnect.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/music-assistant-reconnect/**"
+      - "tests/music_assistant_reconnect/**"
+      - "ha.docker-compose.yaml"
+      - ".github/workflows/ma-reconnect.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconnect:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exercise managed wrapper and reconnect regressions in pinned image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          task_evidence="$RUNNER_TEMP/ma-reconnect-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$task_evidence"
+          task_log="$task_evidence/ma-reconnect.log"
+          exec > >(tee -a "$task_log") 2>&1
+          trap 'rc=$?; printf "%s completed rc=%s log=%s\n" "$(date -Is)" "$rc" "$task_log"; exit "$rc"' EXIT
+          printf '%s starting log=%s\n' "$(date -Is)" "$task_log"
+          docker run --rm --network none --cpus 2 --memory 768m \
+            --entrypoint /bin/bash \
+            --volume "$PWD/scripts/music-assistant-reconnect:/opt/music-assistant-reconnect:ro" \
+            --volume "$PWD/tests/music_assistant_reconnect:/tests:ro" \
+            ghcr.io/music-assistant/server:2.10.4@sha256:37a9a2776e838a754c9f5b38c432567389952304e7cb8f6b44b6cd28043de6de \
+            -c '
+              set -Eeuo pipefail
+              umask 077
+              fixtures=$(mktemp -d /tmp/ma-reconnect-fixtures-XXXXXX)
+              trap '\''rm -rf "$fixtures"'\'' EXIT
+              client=/app/venv/lib/python3.14/site-packages/hass_client/client.py
+              provider=/app/venv/lib/python3.14/site-packages/music_assistant/providers/hass/__init__.py
+              cp "$client" "$fixtures/client.py"
+              cp "$provider" "$fixtures/provider.py"
+              mkdir "$fixtures/webserver"
+              cp /app/venv/lib/python3.14/site-packages/music_assistant/controllers/webserver/controller.py "$fixtures/webserver/"
+              cp /app/venv/lib/python3.14/site-packages/music_assistant/controllers/webserver/websocket_client.py "$fixtures/webserver/"
+              export PYTHONPATH=/opt/music-assistant-reconnect
+              export MA_CLIENT_ORIGINAL="$fixtures/client.py"
+              export MA_PROVIDER_ORIGINAL="$fixtures/provider.py"
+              export MA_WEBSERVER_ORIGINAL="$fixtures/webserver"
+              /bin/sh /opt/music-assistant-reconnect/entrypoint.sh \
+                /app/venv/bin/python -m unittest discover \
+                  -s /tests -p "test_*.py" -v
+              sha256sum "$client" "$provider"
+            '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ma-reconnect-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ma-reconnect-*/ma-reconnect.log
+          retention-days: 14

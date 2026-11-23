@@ -1,0 +1,35 @@
+{
+  "players": {
+    "up32ec3884": {
+      "physical_id": "M00ZRW3008RAJG",
+      "hardware_mute": true,
+      "aliases": [
+        "ap5a617035dd03",
+        "spb_5a617035dd03"
+      ],
+      "entities": [
+        "media_player.yandex_mini2_rajg_airplay",
+        "media_player.aisis_speaker_m00zrw3008rajg"
+      ]
+    },
+    "media_player.yandex_station_m0011hm00z86hg": {
+      "physical_id": "M0011HM00Z86HG",
+      "entities": [
+        "media_player.yandex_station_m0011hm00z86hg"
+      ]
+    },
+    "media_player.yandex_station_m10dst310hxnpk": {
+      "physical_id": "M10DST310HXNPK",
+      "entities": [
+        "media_player.yandex_station_m10dst310hxnpk"
+      ]
+    }
+  },
+  "integration_domains": [
+    "music_assistant",
+    "yandex_station",
+    "yandex_smart_home",
+    "ekf_appliances",
+    "aisis_speaker"
+  ]
+}

@@ -16,8 +16,8 @@ Odroid; the controller receives only the four relevant entities and bridge healt
 3. If both physical requests failed, request a restart of only
    `ha-soil-moisture.service` once, then obtain another sample after five minutes.
    An uncertain SSH reply does not justify a duplicate restart.
-4. If the integration still reports the incident after verification, start one
-   saved OMP repair session, at least ten minutes after first observation. A healthy
+4. If the integration still reports the incident after verification, deliver to the shared
+   plant repair subscriber, at least ten minutes after first observation. A healthy
    ADC beyond the wet calibration point is recorded as saturation and does not
    cause a service restart. Each confirmed measurement and failure stays in the
    incident action history even when later observations replace its current state.
@@ -77,51 +77,41 @@ closed. The identity uses the entity and persisted start timestamp, not its curr
 reason. Missing supplementary calibration helpers stay visible in diagnostics but
 do not disable first aid. Malformed bridge JSON counts as a failed measurement.
 
-## Persistence and native OMP execution
+## Persistence and shared repair subscriptions
 
-Private state is under `~/.local/state/ha-plant-sensor-recovery/`. It is atomically
-saved and guarded by an exclusive monitor lock. A launch claim is saved before
-dispatch. The stable systemd unit, its process cgroup and the exact root session
-file are reconciled before retrying. A lost reply remains unknown; confirmed
-absence of the launch identities permits retry of the same incident with backoff.
+Private domain state remains under `~/.local/state/ha-plant-sensor-recovery/`,
+atomically saved under the existing monitor lock. Sensor thresholds, two physical
+refreshes, dedicated bridge restart limits and actual recovery evidence are
+unchanged. The production backend delegates only agent dispatch to
+`agent-sub publish --source plant-sensors --launch-profile plant-sensors`.
 
-A separate `Type=exec` transient service in `omp.slice` runs the installed
-`~/.local/bin/omp` wrapper in native print mode with a saved session directory.
-The normal authentication, model selection, admission, Landlock signal isolation
-and memory guards remain active. No skip environment variables or alternative
-binary are introduced. The service keeps the existing OMP memory limits, a
-25-minute outer lifetime and a 20-minute native budget with `--wait-async`.
+The shared broker reuses the current verified native subscriber or reserves,
+starts an idle endpoint and binds it before delivering the immutable incident.
+A lost publication response retries the identical envelope. Delivery means input
+acceptance, never a repaired sensor. The controller checks current measurement
+reliability before any new effect. A live or ambiguous pre-migration legacy worker
+is reconciled before shared dispatch; the legacy host subcommand remains only to
+finish those existing workers.
 
-The service waits for the actual child process once. It does not use interactive
-crash supervision or auto-relaunch a print-mode conversation. A draft report,
-assistant stop message or normal-looking exit metadata cannot prove success.
-Completion requires the actual child exit code zero, its normal saved terminal
-state with no pending tool calls, and the incident report. The native fixed title
-record before the session header is accepted, as are older header-first files.
-A recorded process exit without a transcript consumes the attempt and cannot launch
-a replacement conversation. Native async deadline, authentication or provider
-failures remain visible as failed attempts. Temporary
-monitor inspection errors cannot terminate the separate running repair service.
+Install `ha_plant_repair_subscriber.py`, `ha_smart_home_common.py`, the reviewed
+plant standing instructions at the exact absolute profile path (owned, mode 0600
+or 0644), and a mode-0600 `plant-sensors` profile beside the Ubuntu controller. Enable `ha-plant-repair-subscriber.service` for the shared
+native lifecycle event stream. A positively confirmed loss is recorded, then an
+ordinary read-only sensor observation determines whether the same unresolved
+incident needs a new event revision. Unknown liveness does not authorize a second
+agent. Shared protocol version 1 is checked before accepting watch events or
+delivery acknowledgements. A retained native loss takes precedence over synthetic
+startup-vacancy reconciliation. If a read-only observation is temporarily
+unavailable, the shared watch retains and redelivers its unacknowledged loss on a
+concrete retry deadline; no new healthy polling loop is introduced. Domain
+decisions are flushed before the native loss is acknowledged.
 
-After a confirmed host reboot, one provably unfinished root conversation can
-resume once using its exact saved file and an explicit continuation prompt.
-Completed/stopped work, a cancellation marker, multiple root sessions or an
-uncertain outcome prevents automatic resume. A rejected unit dispatch can retry
-the same pending resume claim after authoritative absence; starting the native
-resume consumes the one allowance. No replacement conversation is created for a
-saved interrupted session. Unverified asynchronous completion remains interrupted.
-
-All launch paths, session files and briefs live under persistent home directories.
-The default source reference is `odroidn2:/home/ultra/homeassistant`; execution does
-not depend on an implementation worktree or a `/tmp` artifact. Before any repair
-mutation the brief requires rechecking live reliability and the incident identity.
-Physical recovery is still determined by the care integration, not an OMP report.
-
-Each run prints its private log path under `/tmp/ha-plant-sensor-recovery/`; an
-unsafe pre-existing directory causes selection of a separate owned private
-fallback. That fallback is reused across timer runs; it is not reallocated every
-minute. Only owned execution logs older than two days are expired. Full native output is
-kept privately with the incident, and process receipts contain sanitized status.
+The existing care integration remains the only authority for physical recovery.
+The standing brief forbids watering, calibration shortcuts, household audio,
+other-device controls, broad service restarts, `.storage` or database edits, and
+people-directed messages. Every normal controller run retains its private `/tmp`
+log and two-day retention policy. Shared subscriptions and native process receipts
+are owned by agent-tools, not a second HA registry.
 
 ## Verification
 
@@ -133,6 +123,7 @@ python3 tests/plant_recovery/test_recovery.py
 
 It covers bounded first aid, healthy saturation, restart limits, transport delays,
 actual measurement spacing, retained evidence, malformed payloads, missing optional
-entities, durable deduplication, failed dispatch, real process completion, explicit
-same-session reboot continuation, live cgroup ownership and private log fallback.
+entities, durable deduplication, failed dispatch, shared delivery ownership, and legacy live-cgroup reconciliation
+for pre-migration workers. New dispatches use shared subscriptions; reboot does
+not imply that a previously completed private session is resumed.
 Full suites and adversarial runs use established CI or RunPod, not production hosts.
