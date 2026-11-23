@@ -53,9 +53,13 @@ jobs:
               provider=/app/venv/lib/python3.14/site-packages/music_assistant/providers/hass/__init__.py
               cp "$client" "$fixtures/client.py"
               cp "$provider" "$fixtures/provider.py"
+              mkdir "$fixtures/webserver"
+              cp /app/venv/lib/python3.14/site-packages/music_assistant/controllers/webserver/controller.py "$fixtures/webserver/"
+              cp /app/venv/lib/python3.14/site-packages/music_assistant/controllers/webserver/websocket_client.py "$fixtures/webserver/"
               export PYTHONPATH=/opt/music-assistant-reconnect
               export MA_CLIENT_ORIGINAL="$fixtures/client.py"
               export MA_PROVIDER_ORIGINAL="$fixtures/provider.py"
+              export MA_WEBSERVER_ORIGINAL="$fixtures/webserver"
               /bin/sh /opt/music-assistant-reconnect/entrypoint.sh \
                 /app/venv/bin/python -m unittest discover \
                   -s /tests -p "test_*.py" -v

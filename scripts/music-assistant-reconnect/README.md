@@ -104,3 +104,19 @@ ERROR-frame fix but does not prove handshake, cleanup, cancellation or auth
 retry behavior. Verify all five behaviors in the exact replacement image and
 run these regressions. Then remove the mount and entrypoint override together.
 Review its digest, Python paths and original entrypoint in the same upgrade.
+
+## Playback intent telemetry
+
+The same pinned startup wrapper installs a complete-source-checked private hook
+at authenticated HTTP and WebSocket command dispatch. Parsed, authorized controls
+produce a minimal pending server-log record before effects; successful handlers
+produce an accepted record. An offline but authorized Stop still cancels recovery.
+Invalid/private/unauthenticated requests produce no authorized intent. No target
+identities are broadcast to restricted users or guests.
+
+The event bridge correlates only its own unpredictable resume message ID with a
+private local claim. Speech commands never count as user playback intent. Full
+original, transformed controller and helper hashes are checked before any write;
+an unexpected image fails visibly instead of receiving a partial blind patch.
+The native CI job exercises the actual pinned HTTP/WS handlers and announcement
+restoration without accessing household devices.
