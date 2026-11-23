@@ -80,7 +80,17 @@ services:
     # the stream server MA announces by IP; on ha-net it announced 172.20.0.10:8097, which no
     # player could reach, so nothing ever played. HA and MA now both use host networking;
     # the bridge gateway and localhost endpoints continue to work.
-    image: ghcr.io/music-assistant/server:2.10.4
+    # Reapply reviewed reconnect guards on every start; retain the deployed image.
+    image: ghcr.io/music-assistant/server:2.10.4@sha256:37a9a2776e838a754c9f5b38c432567389952304e7cb8f6b44b6cd28043de6de
+    entrypoint:
+      - /bin/sh
+      - /opt/music-assistant-reconnect/entrypoint.sh
+      # Original image entrypoint and arguments (image Cmd is null).
+      - /usr/local/bin/entrypoint.sh
+      - --data-dir
+      - /data
+      - --cache-dir
+      - /data/.cache
     # root: AirPlay 2 (cliairplay) must bind UDP 319/320 for PTP. The Yandex speaker receiver
     # (station-airplay) answers NTP timing with 461, so MA could not play to it as uid 1000
     # (host networking => no per-container ip_unprivileged_port_start sysctl). Default caps only.
@@ -88,6 +98,7 @@ services:
     network_mode: host
     volumes:
       - /home/ultra/music-assistant:/data
+      - /home/ultra/homeassistant/scripts/music-assistant-reconnect:/opt/music-assistant-reconnect:ro
       # person_likes plugin (aisis#17): like/unlike in ONE account, used by HA music_accounts.
       # The target follows the image's Python version: re-check it when bumping MA.
       - /home/ultra/homeassistant/docker/music-assistant/person_likes:/app/venv/lib/python3.14/site-packages/music_assistant/providers/person_likes:ro
