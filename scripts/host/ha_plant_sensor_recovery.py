@@ -1112,11 +1112,18 @@ def command_result(args: argparse.Namespace) -> dict:
         if monitor.exists():
             result["monitor"] = json.loads(monitor.read_text())
         return result
-    backend = SystemBackend(args.state_dir, args.remote_host, args.source_repo)
+    from ha_plant_repair_subscriber import (  # noqa: PLC0415 - host adapter; Odroid probe remains self-contained.
+        SharedBackend,
+    )
+
+    backend = SharedBackend(
+        SystemBackend(args.state_dir, args.remote_host, args.source_repo)
+    )
     observation = backend.observe()
     result = Controller(args.state_dir / "state.json", backend).tick(
         observation, time.time()
     )
+    backend.acknowledge_closed(result)
     atomic_json(
         args.state_dir / "monitor.json",
         {

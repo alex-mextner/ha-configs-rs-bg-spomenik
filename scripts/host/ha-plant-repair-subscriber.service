@@ -1,0 +1,16 @@
+[Unit]
+Description=Observe shared plant repair subscriber lifecycle
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/share/ha-plant-sensor-recovery/ha_plant_repair_subscriber.py
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+Nice=10
+UMask=0077
+
+[Install]
+WantedBy=default.target
