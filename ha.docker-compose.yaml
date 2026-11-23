@@ -91,6 +91,13 @@ services:
       # person_likes plugin (aisis#17): like/unlike in ONE account, used by HA music_accounts.
       # The target follows the image's Python version: re-check it when bumping MA.
       - /home/ultra/homeassistant/docker/music-assistant/person_likes:/app/venv/lib/python3.14/site-packages/music_assistant/providers/person_likes:ro
+      # Stage the verified release before recreating MA; see docs/music-assistant-frontend-deployment.md.
+      - type: bind
+        source: /home/ultra/.local/share/music-assistant-frontend/releases/1f7cd828c8717fc20dec9f03c65c5229ec053638/music_assistant_frontend
+        target: /app/venv/lib/python3.14/site-packages/music_assistant_frontend
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
     deploy:
       resources:

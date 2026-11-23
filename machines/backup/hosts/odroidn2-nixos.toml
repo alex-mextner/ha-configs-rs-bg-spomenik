@@ -17,6 +17,8 @@ paths = [
   "/var/lib/bluetooth",
   "/home/ultra/homeassistant",
   "/home/ultra/music-assistant",
+  "/home/ultra/.local/share/music-assistant-frontend",
+  "/home/ultra/.local/state/ma-frontend-170",
   "/home/ultra/esphome",
   "/home/ultra/ssh-data",
   "/home/ultra/.config",
