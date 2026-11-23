@@ -76,6 +76,25 @@ class InterruptionTests(unittest.TestCase):
         self.assertEqual(self.engine.due(1006), [])
         self.assertEqual(self.engine.state["outbox"], {})
 
+    def test_reconnect_snapshot_closes_known_interruption_before_network_deadline(
+        self,
+    ) -> None:
+        self.broken()
+        self.send("snapshot", at=1003, stream_id="reconnected", players=[player()])
+        self.assertEqual(self.engine.due(1005), [])
+        self.assertEqual(self.engine.state["outbox"], {})
+        self.assertIsNotNone(self.engine.state["incidents"]["player:studio"]["closed"])
+
+    def test_reconnect_snapshot_reports_recovery_of_already_published_interruption(
+        self,
+    ) -> None:
+        self.broken()
+        self.engine.due(1005)
+        actions = self.send(
+            "snapshot", at=1006, stream_id="reconnected", players=[player()]
+        )
+        self.assertEqual([a["event"]["phase"] for a in actions], ["recovered"])
+
     def test_reconnected_idle_player_resumes_exact_prior_queue_once(self) -> None:
         self.broken(state="idle")
         self.engine.due(1005)

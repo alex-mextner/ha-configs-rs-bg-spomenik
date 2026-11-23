@@ -384,7 +384,7 @@ class Engine:
             )
         return actions
 
-    def _snapshot(self, event: dict, _now: float) -> list:
+    def _snapshot(self, event: dict, now: float) -> list:
         self.players = {
             p["id"]: p
             for p in event.get("players", [])
@@ -399,7 +399,15 @@ class Engine:
         self.restore.clear()
         self.faults.clear()
         self.stopped.clear()
-        return []
+        actions = []
+        for player in self.players.values():
+            if (
+                player.get("available") is True
+                and player.get("state") == "playing"
+                and not player.get("announcement")
+            ):
+                actions.extend(self._close("player:" + player["id"], now))
+        return actions
 
     def _transport(self, event: dict, now: float) -> list:
         channel = event.get("channel", "stream")
