@@ -455,6 +455,67 @@ def save_json(path: Path, value: dict) -> None:
     path.chmod(0o600)
 
 
+def frontend_plan(
+    operation: str,
+    args: argparse.Namespace,
+    original: bytes,
+    configurations: tuple[dict, dict],
+    raw: dict,
+) -> tuple[dict, dict | None, bool]:
+    """Validate the installed image and choose a safe frontend backout path."""
+    config, proposed = configurations
+    if operation != "rollback":
+        verify_running_config(config, raw)
+        return release_hashes(), frontend_hashes(), False
+
+    require(
+        args.install_receipt is not None, "Rollback requires an installation receipt"
+    )
+    prior = json.loads(args.install_receipt.read_text())
+    require(
+        prior["source_sha"] == SOURCE and prior["action"] == "install",
+        "Wrong installation receipt",
+    )
+    require(
+        prior["status"] in {"compose_updated", "recreated", "verified"},
+        "Installation was not applied",
+    )
+    require(
+        prior["before"]["image_id"] == raw["Image"] == IMAGE_ID,
+        "Original image differs",
+    )
+    target = prior["original_frontend_hashes"]
+    require(
+        isinstance(target, dict) and "index.html" in target, "Original hashes missing"
+    )
+    require(
+        all(
+            isinstance(name, str)
+            and not Path(name).is_absolute()
+            and ".." not in Path(name).parts
+            and isinstance(value, str)
+            and re.fullmatch(r"[a-f0-9]{64}", value)
+            for name, value in target.items()
+        ),
+        "Original hash map is invalid",
+    )
+    configuration_only = (
+        prior["status"] == "compose_updated" and raw["Id"] == prior["before"]["id"]
+    )
+    if configuration_only:
+        require(
+            digest(original) == prior["compose_proposed_sha256"],
+            "Partial-install Compose differs from its receipt",
+        )
+        require(runtime(raw) == prior["before"], "Original container changed")
+        verify_running_config(proposed, raw)
+        require(frontend_hashes() == target, "Original frontend changed")
+    else:
+        verify_running_config(config, raw)
+    # A bad or missing overlay is a reason to back out, not a rollback prerequisite.
+    return target, None, configuration_only
+
+
 def preflight(
     args: argparse.Namespace, directory: Path
 ) -> tuple[dict, bytes, bytes, dict]:
@@ -470,27 +531,11 @@ def preflight(
     config, proposed = effective(original), effective(changed)
     verify_delta(config, proposed, operation)
     raw = inspect(MA)
-    verify_running_config(config, raw)
+    target_hashes, hashes, configuration_only = frontend_plan(
+        operation, args, original, (config, proposed), raw
+    )
     state = snapshot()
     require_idle(state)
-    hashes = frontend_hashes()
-    target_hashes = release_hashes()
-    if operation == "rollback":
-        require(
-            args.install_receipt is not None,
-            "Rollback requires the installation receipt",
-        )
-        prior = json.loads(args.install_receipt.read_text())
-        require(
-            prior["source_sha"] == SOURCE and prior["action"] == "install",
-            "Wrong installation receipt",
-        )
-        require(
-            prior["status"] in {"compose_updated", "recreated", "verified"},
-            "Installation was not applied",
-        )
-        require(prior["before"]["image_id"] == raw["Image"], "Original image differs")
-        target_hashes = prior["original_frontend_hashes"]
     receipt = {
         "action": operation,
         "mode": args.action,
@@ -504,6 +549,7 @@ def preflight(
         "before": runtime(raw),
         "state_before": state,
         "original_frontend_hashes": hashes,
+        "configuration_only": configuration_only,
         "status": "preflight",
     }
     backup = directory / "compose.before.yaml"
@@ -558,27 +604,44 @@ def apply_change(
             runtime(inspect(MA)) == receipt["before"], "MA changed before recreation"
         )
         # Re-resolve the local image immediately before --pull never recreates MA.
-        image = effective(changed)["services"]["music-assistant"]["image"]
+        final_config = effective(changed)
+        require(
+            digest(json.dumps(final_config, sort_keys=True).encode())
+            == receipt["effective_proposed_sha256"],
+            "Effective configuration changed before recreation",
+        )
+        image = final_config["services"]["music-assistant"]["image"]
         require(
             json.loads(run("docker", "image", "inspect", image))[0]["Id"] == IMAGE_ID,
             "Image changed",
         )
-        log("Recreating only music-assistant with its unchanged image.")
-        run(
-            *compose_args(),
-            "-f",
-            str(COMPOSE),
-            "up",
-            "-d",
-            "--no-deps",
-            "--no-build",
-            "--pull",
-            "never",
-            "music-assistant",
-            timeout=90,
-        )
-        receipt["status"] = "recreated"
-        save_json(path, receipt)
+        if not receipt.get("configuration_only", False):
+            lock.check()
+            require(
+                COMPOSE.read_bytes() == changed,
+                "Compose changed immediately before recreation",
+            )
+            log("Recreating only music-assistant with its unchanged image.")
+            run(
+                *compose_args(),
+                "-f",
+                str(COMPOSE),
+                "up",
+                "-d",
+                "--no-deps",
+                "--no-build",
+                "--pull",
+                "never",
+                "music-assistant",
+                timeout=90,
+            )
+            receipt["status"] = "recreated"
+            save_json(path, receipt)
+        else:
+            log(
+                "Removing only the unapplied volume; "
+                "original MA container stays running."
+            )
         deadline = time.monotonic() + 90
         while True:
             lock.check()

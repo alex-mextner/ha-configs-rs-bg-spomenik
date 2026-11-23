@@ -67,6 +67,8 @@ Before any rollback, acquire the same shared maintenance lock with a fresh uniqu
 
 Remove only the volume entry whose source and target match this pinned release, then validate Compose and recreate only `music-assistant` with the same command. Check that any changes made after the initial backup remain intact; a wholesale backup restore is not the rollback procedure.
 
+A rollback can remove a damaged or missing overlay without trusting that overlay's files. If installation stopped after patching Compose and before recreation, the script supports a configuration-only backout: it requires the exact recorded post-patch file, the unchanged original container identity, and the original frontend hashes, then removes the volume without restarting MA. Any mismatch stops that path for review.
+
 The original image then supplies its frontend package. Verify the original frontend hashes, MA availability, expected players, and unchanged HA start time. Preserve the server image, reconnect wrapper, provider mounts, and data directory throughout. Keep the verified artifact and deployment receipt for diagnosis. Never restore queue state by modifying runtime databases.
 
 ## Later upgrades
