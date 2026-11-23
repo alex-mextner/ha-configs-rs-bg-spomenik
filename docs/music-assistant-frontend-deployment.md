@@ -8,17 +8,17 @@ Runtime acceptance and deployment receipts belong to [issue #170](https://github
 
 | Item | Value |
 | --- | --- |
-| Frontend source | [a520cdc4d6856a0084aa7feee05508c3650b433b](https://github.com/alex-mextner/music-assistant-frontend/commit/a520cdc4d6856a0084aa7feee05508c3650b433b) |
+| Frontend source | [b1fbfe710099ea6309fd6d11538d0fa967a991f6](https://github.com/alex-mextner/music-assistant-frontend/commit/b1fbfe710099ea6309fd6d11538d0fa967a991f6) |
 | Installed frontend base | 2.17.297, source `e779b9d359e47cd210c2801f16a0ce6263571903` |
 | Server compatibility | Music Assistant 2.10.4, Python 3.14 package directory |
-| CI build | [Run 45230718817](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45230718817) |
-| Download | [Artifact 14846219123](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45230718817/artifacts/14846219123) |
-| Archive SHA-256 | `47587cfdbc3b4a02d8582dccff333a2cf053ea98428c9e2a5e053f9e0683d937` |
-| Manifest SHA-256 | `4b810ce3dddbac0cb27eefcd3085f18f28c9feae45d9c42b8020b4c339758e27` |
+| CI build | [Run 45252788796](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45252788796) |
+| Download | [Artifact 14856569072](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45252788796/artifacts/14856569072) |
+| Archive SHA-256 | `3dac36b60afcf202765c4e91fb71711c0e161fe37517de4abf3464921ae89322` |
+| Manifest SHA-256 | `59ef76a5c32fbc2f9b3b1062e25915964e3bfc0f3ac774db5de54f337adadf9a` |
 | Payload | `music_assistant_frontend/` (307 verified files), `manifest.json`, and `SHA256SUMS` |
 | Runtime mount | `/app/venv/lib/python3.14/site-packages/music_assistant_frontend`, read-only |
 
-The build passed 2,968 tests across 284 files, including all 26 transfer interaction tests, playback guards for player cards, queue menus and API commands, and the existing group membership and playback-confirmation suites. Native TypeScript checks, lint, the frontend build, Python package verification, and the unchanged-source check also passed. The [initial regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45200112538) failed six target/transfer checks against the unmodified installed-base code; the [follow-up regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45212691624) exposed 16 failures in the other playback entry points and member-availability guard. The [latest regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45229030713) failed six checks covering Keep-playing controls, the captured non-idle route, and queue clear/delete during a pending transfer.
+The build passed 2,983 tests across 284 files, including all 41 transfer interaction tests, playback guards for player cards, queue menus and API commands, and the existing group membership and playback-confirmation suites. Native TypeScript checks, lint, the frontend build, Python package verification, and the unchanged-source check also passed. The [initial regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45200112538) failed six target/transfer checks against the unmodified installed-base code; the [follow-up regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45212691624) exposed 16 failures in the other playback entry points and member-availability guard. A [control regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45229030713) failed six checks covering Keep-playing controls, the captured non-idle route, and queue clear/delete during a pending transfer. The [final review regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45249351388) failed 14 checks against the previous candidate, covering changed member ownership, playback starting during the handoff, event-listener dispatch, and component reuse. The corrected source passes all 78 focused checks, including those regressions.
 
 Retain the verified release locally before the Actions artifact expires. Its manifest records the source commit, workflow commit and run, actual tool versions, and the size and SHA-256 digest of every frontend file.
 
@@ -44,11 +44,11 @@ The current deployment uses only `/home/ultra/homeassistant/ha.docker-compose.ya
 1. Verify the archive against the pinned digest and safely extract it. Check every manifest entry and `SHA256SUMS`, including the exact source and CI run. Require the complete 307-file package, including `__init__.py`, `py.typed`, `index.html`, `sw.js`, `manifest.webmanifest` and `assets/`.
 
 2. Stage the payload beneath:
-   `/home/ultra/.local/share/music-assistant-frontend/releases/a520cdc4d6856a0084aa7feee05508c3650b433b/`.
+   `/home/ultra/.local/share/music-assistant-frontend/releases/b1fbfe710099ea6309fd6d11538d0fa967a991f6/`.
    Keep `manifest.json` and `SHA256SUMS` beside its `music_assistant_frontend/` child. Make staged files read-only and verify them again on the Odroid.
 
 3. Keep an additional, verified recovery copy **off the Odroid** in the existing private PC task directory:
-   `/run/media/ultra/backups/home-ultra/work/ma-player-switch-20261123/ci-delivery-evidence/odroid-recovery-a520cdc4d685/`.
+   `/run/media/ultra/backups/home-ultra/work/ma-player-switch-20261123/ci-delivery-evidence/odroid-recovery-b1fbfe710099/`.
    Before installation it must contain the complete archive, manifest/checksums, artifact verification receipt, exact reviewed script and its provenance, and the fresh plan's `receipt.json` plus `compose.before.yaml`. Check the copies' sizes and SHA-256 digests against their originals; keep directories private and files mode `0600`. The Compose backup may contain private configuration and must never enter Git.
 
 4. The two Odroid backup manifests include the release and receipt directories for future provisioning. Their scheduled backup service has **not** been verified as installed on this host. The explicit off-host recovery copy above is the recovery material for this deployment; adding manifest paths alone does not establish a working backup job.
