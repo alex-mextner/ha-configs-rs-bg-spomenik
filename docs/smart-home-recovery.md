@@ -15,6 +15,8 @@ Coverage is declarative:
 
 There is no generic alert for arbitrary unavailable entities, old Kodi entries, idle players, background audio analysis, or an unrelated historical log error. Extra critical integrations and speakers can be added explicitly to the configuration.
 
+Music-source faults use the current queue item's exact `streamdetails.provider`, including its account-specific instance ID. Queue updates refresh this association only for the same queue and item; they do not create an interruption. A `library://` media URI is not treated as a music provider, and no media URL or stream credentials leave the source.
+
 ## Playback and cause
 
 | Evidence | Agent behavior | Spoken message |

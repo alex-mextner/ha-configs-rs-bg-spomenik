@@ -15,12 +15,70 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/host"))
 import ha_smart_home_events as events
-from ha_smart_home_common import normalize_player
+from ha_smart_home_common import normalize_player, normalize_queue
 from ha_smart_home_events import Socket, log_events, provider_events
 
 
 class WireTests(unittest.TestCase):
     """Exercise the scoped event contract without household effects."""
+
+    def test_library_item_uses_exact_stream_provider_without_exporting_metadata(
+        self,
+    ) -> None:
+        queue = normalize_queue(
+            {
+                "queue_id": "group",
+                "current_item": {
+                    "queue_item_id": "track1",
+                    "media_item": {"uri": "library://track/42?token=secret"},
+                    "streamdetails": {
+                        "provider": "yandex_music--account",
+                        "path": "secret",
+                    },
+                },
+            }
+        )
+        clean = normalize_player(
+            {
+                "player_id": "studio",
+                "provider": "universal_player",
+                "current_media": {
+                    "source_id": "group",
+                    "queue_item_id": "track1",
+                    "uri": "library://track/42?token=secret",
+                },
+            },
+            {"group": queue},
+            1000,
+        )
+        self.assertEqual(clean["source_provider"], "yandex_music--account")
+        self.assertNotIn("secret", str((clean, queue)))
+        self.assertEqual((clean["id"], clean["queue_id"]), ("studio", "group"))
+
+    def test_missing_or_mismatched_stream_provider_does_not_guess_from_library(
+        self,
+    ) -> None:
+        raw = {
+            "player_id": "studio",
+            "current_media": {"queue_item_id": "now", "uri": "library://track/42"},
+        }
+        for item in (
+            {"queue_item_id": "other", "streamdetails": {"provider": "other_account"}},
+            {"queue_item_id": "now", "streamdetails": {"provider": "https://secret"}},
+            {"queue_item_id": "now", "streamdetails": None},
+        ):
+            with self.subTest(item=item):
+                queue = normalize_queue({"queue_id": "studio", "current_item": item})
+                self.assertIsNone(
+                    normalize_player(raw, {"studio": queue}, 1000)["source_provider"]
+                )
+
+    def test_provider_uri_domain_remains_a_conservative_fallback(self) -> None:
+        raw = {
+            "player_id": "studio",
+            "current_media": {"queue_item_id": "now", "uri": "spotify://track/42"},
+        }
+        self.assertEqual(normalize_player(raw, {}, 1000)["source_provider"], "spotify")
 
     def test_group_queue_keeps_member_identity_and_uri_is_not_exported(self) -> None:
         raw = {
@@ -217,6 +275,40 @@ asyncio.run(events.Source({}).run())
 
 class SocketReceiptTests(unittest.IsolatedAsyncioTestCase):
     """Exercise the scoped event contract without household effects."""
+
+    async def test_queue_delta_updates_private_log_correlation_for_same_item(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(events, "LOCAL_STATE", Path(directory)),
+        ):
+            source = events.Source({"players": {"studio": {}}})
+            source.players = {
+                "studio": {
+                    "id": "studio",
+                    "queue_id": "group",
+                    "item_id": "track1",
+                    "source_provider": None,
+                    "uri": "library://track/42?token=secret",
+                }
+            }
+            payload = {
+                "event": "queue_updated",
+                "data": {
+                    "queue_id": "group",
+                    "current_item": {
+                        "queue_item_id": "track1",
+                        "streamdetails": {"provider": "yandex_music--account"},
+                    },
+                },
+            }
+            with patch.object(source, "emit") as emit:
+                await source.ma_event(None, payload, events.Moment(1000, 100), 1)
+            self.assertEqual(
+                source.players["studio"]["source_provider"], "yandex_music--account"
+            )
+            self.assertNotIn("secret", str(emit.call_args))
 
     async def test_string_message_ids_and_partial_results_resolve_the_request(
         self,

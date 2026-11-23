@@ -215,6 +215,71 @@ class InterruptionTests(unittest.TestCase):
         self.assertEqual([a["reason"] for a in speech], ["auth"])
         self.assertEqual(self.engine.due(1005), [])
 
+    def test_late_queue_provider_upgrades_only_matching_interrupted_item(self) -> None:
+        self.broken()
+        self.send(
+            "fault",
+            at=1001,
+            scope="provider:yandex_music--account",
+            provider="yandex_music--account",
+            domain="yandex_music",
+            reason="auth",
+        )
+        self.assertEqual(
+            self.send(
+                "queue",
+                at=1001.1,
+                queue={
+                    "id": "livingroom",
+                    "item_id": "track-1",
+                    "source_provider": "yandex_music--account",
+                },
+            ),
+            [],
+        )
+        actions = self.send(
+            "queue",
+            at=1001.2,
+            queue={
+                "id": "studio",
+                "item_id": "track-1",
+                "source_provider": "yandex_music--account",
+            },
+        )
+        self.assertEqual(
+            [(a["player_id"], a["reason"]) for a in actions if a["type"] == "announce"],
+            [("studio", "auth")],
+        )
+        self.assertEqual(self.engine.due(1005), [])
+
+    def test_exact_music_provider_failure_and_recovery_use_retained_queue(self) -> None:
+        self.send("snapshot", players=[player(source_provider="yandex_music--account")])
+        self.send(
+            "fault",
+            scope="provider:yandex_music--account",
+            provider="yandex_music--account",
+            reason="auth",
+        )
+        actions = self.send(
+            "player",
+            at=1001,
+            player=player(state="idle", source_provider="yandex_music--account"),
+        )
+        self.assertEqual(
+            [a["reason"] for a in actions if a["type"] == "announce"], ["auth"]
+        )
+        actions = self.send(
+            "fault",
+            at=1006,
+            scope="provider:yandex_music--account",
+            provider="yandex_music--account",
+            recovered=True,
+        )
+        self.assertEqual(
+            [(a["queue_id"], a["item_id"]) for a in actions if a["type"] == "resume"],
+            [("studio", "track-1")],
+        )
+
     def test_snapshot_discards_obsolete_provider_classification(self) -> None:
         self.send("fault", scope="provider:airplay", provider="airplay", reason="auth")
         self.send("snapshot", players=[player()])

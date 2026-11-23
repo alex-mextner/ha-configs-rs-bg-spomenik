@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from ha_smart_home_common import refresh_queue_sources
+
 LOG = logging.getLogger("ha_smart_home_recovery")
 FRESHNESS = 10
 NETWORK_DELAY = 5
@@ -318,7 +320,7 @@ class Engine:
                 return fault
         return None
 
-    def _queue(self, queue: dict, _now: float) -> list:
+    def _queue(self, queue: dict, now: float) -> list:
         identity = queue.get("id")
         self.queues[identity] = queue
         for pid, pending in {**self.restore, **self.pending}.items():
@@ -327,7 +329,26 @@ class Engine:
                 or queue.get("item_id") != pending["item_id"]
             ):
                 self._cancel(pid)
-        return []
+        changed = refresh_queue_sources(self.players, queue)
+        return self._refresh_pending_causes(changed, now)
+
+    def _refresh_pending_causes(self, players: list[str], now: float) -> list:
+        """Late current-item metadata can resolve an already proven interruption."""
+        scopes = {
+            fault["scope"]
+            for pid in players
+            if pid in self.pending and (fault := self._cause(self.players[pid]))
+        }
+        actions = []
+        for scope in scopes:
+            incident = self.state["incidents"].get(scope)
+            if incident and incident.get("closed") is None:
+                actions.extend(
+                    self._upgrade_pending_fault(
+                        scope, incident, self.faults[scope]["reason"], now
+                    )
+                )
+        return actions + (self.due(now) if scopes else [])
 
     def _intent(self, event: dict, now: float) -> list:
         players = set(event.get("player_ids", []))

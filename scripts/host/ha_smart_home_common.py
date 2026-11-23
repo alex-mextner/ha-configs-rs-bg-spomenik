@@ -233,12 +233,35 @@ def item_identity(media: object) -> str | None:
 
 
 def normalize_queue(raw: dict) -> dict:
-    """Keep only the queue identity needed to cancel an obsolete deadline."""
+    """Keep queue identity and its exact current stream provider, never media URLs."""
+    item = raw.get("current_item")
+    details = item.get("streamdetails") if isinstance(item, dict) else None
     return {
         "id": identity(raw.get("queue_id")),
         "state": raw.get("state"),
-        "item_id": item_identity(raw.get("current_item")),
+        "item_id": item_identity(item),
+        "source_provider": identity(details.get("provider"))
+        if isinstance(details, dict)
+        else None,
     }
+
+
+def refresh_queue_sources(players: dict, queue: dict) -> list[str]:
+    """Apply source metadata only to the same observed queue item."""
+    changed = []
+    if not queue.get("item_id") or "source_provider" not in queue:
+        return changed
+    for pid, player in players.items():
+        if (player.get("queue_id"), player.get("item_id")) != (
+            queue.get("id"),
+            queue["item_id"],
+        ):
+            continue
+        source = queue.get("source_provider") or player.get("source_domain")
+        if source != player.get("source_provider"):
+            player["source_provider"] = source
+            changed.append(pid)
+    return changed
 
 
 def normalize_player(raw: dict, queues: dict, now: float) -> dict:
@@ -249,10 +272,14 @@ def normalize_player(raw: dict, queues: dict, now: float) -> dict:
     queue = queues.get(queue_id, {})
     uri = media.get("uri", "")
     source = uri.partition("://")[0] if isinstance(uri, str) and "://" in uri else None
-    return {
+    source = (
+        identity(source) if source not in {"library", "http", "https", "file"} else None
+    )
+    clean = {
         "id": identity(raw.get("player_id")),
         "provider": identity(raw.get("provider")),
-        "source_provider": identity(source),
+        "source_provider": source,
+        "source_domain": source,
         "queue_id": queue_id,
         "item_id": item_identity(media) or queue.get("item_id"),
         "state": raw.get("playback_state", raw.get("state")),
@@ -263,6 +290,8 @@ def normalize_player(raw: dict, queues: dict, now: float) -> dict:
         "updated_at": now,
         "members": [v for x in raw.get("group_members", []) if (v := identity(x))],
     }
+    refresh_queue_sources({clean["id"]: clean}, queue)
+    return clean
 
 
 def failure_reason(error: object) -> str:

@@ -31,6 +31,7 @@ from ha_smart_home_common import (
     maintenance_status,
     normalize_player,
     normalize_queue,
+    refresh_queue_sources,
 )
 from ha_smart_home_recovery import LOG, init_log
 from ha_smart_home_watch import watch_marker
@@ -623,6 +624,7 @@ class Source:
             queue = normalize_queue(data)
             if queue["id"]:
                 self.queues[queue["id"]] = queue
+                refresh_queue_sources(self.players, queue)
                 self.emit({"kind": "queue", "queue": queue}, stamp)
         elif kind == "player_removed" and message.get("object_id") in self.players:
             pid = message["object_id"]
