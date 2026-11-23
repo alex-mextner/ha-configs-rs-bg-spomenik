@@ -49,7 +49,9 @@ Own announcement requests have a bounded private marker before submission. Their
 
 HA owns incident identities, immutable event envelopes and speech claims. **The shared agent-tools broker alone owns subscriptions and agent launches.** `agent-sub publish --source smart-home --event-file PATH --launch-profile smart-home` delivers to the existing verified native subscriber. With no holder, the broker reserves the native source, starts an idle OMP endpoint, binds it atomically, and only then delivers the event. No incident-specific prompt runs before binding.
 
-`delivered` means native input acceptance, not completed repair. `launched` and `pending` require broker reconciliation. A recovered event with no subscriber is recorded without launching an agent. Identical event IDs and contents are safe to retry after an ambiguous response; changed content has a new event ID. The consumer reconciles once at startup, then schedules one-shot deadlines only while concrete delivery work is pending. After a durable pending receipt, the shared spool owns retries; the consumer does not race a second publication against reconciliation.
+`delivered` means native input acceptance, not completed repair. `launched` and `pending` require broker reconciliation. A recovered event with no subscriber is recorded without launching an agent. Identical event IDs and contents are safe to retry after an ambiguous response; changed content has a new event ID. The consumer reconciles once at startup, then schedules one-shot deadlines only while concrete delivery work is pending. A receipt hands retry ownership to the shared spool only when `durable:true`, source and event ID match and its immutable-envelope digest is valid. The native endpoint `receipt_id` may still be null during launch. An ambiguous or mismatched response leaves the producer's immutable publication pending.
+
+The shared watch also reports authoritative startup vacancy. Only a positive `vacant` snapshot with its authority and revision can trigger a fresh reconciliation of previously published open work. Unknown ownership does not imply absence. A new domain revision is issued only if current service evidence still shows the fault; a synthetic startup observation is never acknowledged as a native lifecycle event.
 
 The consumer also subscribes to `agent-sub watch`. A positively confirmed native subscriber death triggers one fresh API reconciliation of still-open domain work, then a new immutable event revision. Unknown liveness never creates a replacement. A repaired domain closes without launching a new agent.
 
@@ -65,6 +67,7 @@ On ubuntu-pc:
 - Install the shared agent-tools `agent-sub` command and the owned mode-0600 profile at `~/.config/agent-tools/subscriptions/profiles/smart-home.json`. Use the example profile with the reviewed standing instructions file; no event-file launch argument is allowed.
 - State and immutable delivery evidence live under `~/.local/state/ha-smart-home-recovery/`.
 - Install and enable `ha-smart-home-recovery.service` as a user service. User lingering must be enabled for boot startup. The superseded `ha-smart-home-recovery.timer` must remain absent or disabled.
+- Preserve its explicit `OnFailure=service-failover-repair@ha-smart-home-recovery.service.service` and `RestartMode=normal`. The installed shared service-failover template handles the controller's own failures; repair/watch units themselves must remain excluded from recursive failover.
 
 On Odroid:
 

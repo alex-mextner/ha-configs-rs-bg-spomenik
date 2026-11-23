@@ -485,7 +485,7 @@ class Engine:
         faults = index_records(evidence.get("faults", []), "scope")
         actions = []
         for scope, incident in self.state["incidents"].items():
-            if incident.get("closed") is not None:
+            if incident.get("closed") is not None or not incident.get("published"):
                 continue
             broken = incident_broken(scope, incident, evidence, players, faults)
             if broken is True:

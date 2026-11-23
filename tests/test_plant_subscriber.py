@@ -96,6 +96,80 @@ class PlantSubscriberTests(unittest.TestCase):
             self.assertEqual(event["phase"], "updated")
             self.assertEqual(event["payload"]["subscriber_loss"], "loss-1")
 
+    def test_durable_handoff_uses_read_only_status_on_later_domain_ticks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            local = types.SimpleNamespace(
+                root=Path(directory),
+                remote_host="odroidn2",
+                reconcile=lambda _: {"status": "not_started"},
+            )
+            backend = shared.SharedBackend(local)
+            incident = {"id": "a" * 20, "started_at": 1000, "actions": []}
+            event_id = None
+            commands = []
+
+            def command(argv, **_kwargs: object) -> subprocess.CompletedProcess:
+                nonlocal event_id
+                commands.append(argv[1])
+                if argv[1] == "publish":
+                    event_id = json.loads(
+                        Path(argv[argv.index("--event-file") + 1]).read_text()
+                    )["event_id"]
+                receipt = {
+                    "status": "pending",
+                    "source": "plant-sensors",
+                    "event_id": event_id,
+                    "durable": True,
+                    "digest": "a" * 64,
+                    "receipt_id": None,
+                }
+                return subprocess.CompletedProcess(argv, 0, json.dumps(receipt))
+
+            with patch.object(shared.subprocess, "run", command):
+                backend.launch(incident, {"bridge_ok": False})
+                backend.reconcile(incident)
+            self.assertEqual(commands, ["publish", "status"])
+
+    def test_initial_authoritative_vacancy_rechecks_only_previous_shared_work(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {
+                "active": "a",
+                "incidents": {
+                    "a": {
+                        "id": "a",
+                        "launch_receipt": {
+                            "source": "plant-sensors",
+                            "durable": True,
+                            "subscriber_id": "prior",
+                            "subscription_status": "delivered",
+                        },
+                    }
+                },
+            }
+            (root / "state.json").write_text(json.dumps(state))
+            ready = {
+                "type": "ready",
+                "source": "plant-sensors",
+                "native_state": "unknown",
+                "authority_id": "authority",
+                "revision": "revision",
+            }
+            self.assertIsNone(shared.startup_loss(ready, root))
+            ready["native_state"] = "vacant"
+            loss = shared.startup_loss(ready, root)
+            self.assertEqual(loss["subscriber_id"], "prior")
+            self.assertFalse(loss["native_ack_required"])
+            self.assertEqual(shared.startup_loss(ready, root), loss)
+            state["incidents"]["a"]["launch_receipt"] = {
+                "status": "started",
+                "unit": "legacy",
+            }
+            (root / "state.json").write_text(json.dumps(state))
+            self.assertIsNone(shared.startup_loss(ready, root))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -127,12 +127,64 @@ class IndependentEffectsTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "status": "pending",
                     "event_id": "i:1",
-                    "receipt_id": "durable",
+                    "receipt_id": None,
+                    "durable": True,
+                    "source": "smart-home",
+                    "digest": "a" * 64,
                     "retry_at": None,
                 },
             )
             self.assertEqual(runtime.engine.state["outbox"], {})
             self.assertIsNone(runtime.retry_at)
+
+    async def test_missing_durable_identity_retains_local_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            runtime = service.Runtime(Path(root), Engine({}))
+            action = {"type": "publish", "event": {"event_id": "i:1"}}
+            runtime.engine.state["outbox"]["i:1"] = action
+            runtime.receipt(
+                "i:1",
+                action,
+                {
+                    "status": "delivered",
+                    "event_id": "other",
+                    "durable": True,
+                    "source": "smart-home",
+                    "digest": "a" * 64,
+                },
+            )
+            self.assertIn("i:1", runtime.engine.state["outbox"])
+            self.assertIsNotNone(runtime.retry_at)
+
+    def test_startup_vacancy_reconciles_open_work_without_native_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            runtime = service.Runtime(Path(root), Engine({}))
+            runtime.engine.state["incidents"]["provider:one"] = {
+                "id": "known-open",
+                "published": True,
+                "closed": None,
+            }
+            event = {
+                "source": "smart-home",
+                "authority_id": "authority",
+                "revision": "revision",
+                "native_state": "unknown",
+            }
+            runtime._shared_ready(event)
+            self.assertEqual(runtime.engine.state["subscriber_losses"], {})
+            event["native_state"] = "vacant"
+            with patch.object(runtime, "request_refresh") as refresh:
+                runtime._shared_ready(event)
+                runtime._shared_ready(event)
+            losses = runtime.engine.state["subscriber_losses"]
+            self.assertEqual(len(losses), 1)
+            self.assertEqual(refresh.call_count, 2)
+            loss = next(iter(losses.values()))
+            self.assertFalse(loss["native_ack_required"])
+            loss["reconciled"] = True
+            with patch.object(runtime, "submit") as submit:
+                runtime.acknowledge_losses()
+            submit.assert_called_once_with([])
 
     async def test_same_speaker_serializes_announcement_and_resume_and_rechecks_stop(
         self,

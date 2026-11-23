@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from ha_smart_home_common import atomic_json, identity
+from ha_smart_home_common import atomic_json, durable_delivery, identity
 from ha_smart_home_recovery import LOG, Engine, init_log
 
 ROOT = Path.home() / ".local/state/ha-smart-home-recovery"
@@ -335,7 +335,12 @@ class Runtime:
 
     def _broker_receipt(self, key: str, action: dict, result: dict) -> None:
         for receipt in result.get("receipts", [result]):
-            self._store_delivery(receipt.get("event_id", key), receipt)
+            event_id = (
+                action["event"]["event_id"]
+                if action["type"] == "publish"
+                else receipt.get("event_id", key)
+            )
+            self._store_delivery(event_id, receipt)
         retry = result.get("retry_at")
         try:
             due = (
@@ -351,11 +356,7 @@ class Runtime:
             self.submit(list(self.engine.state["outbox"].values()))
 
     def _store_delivery(self, event_id: str, receipt: dict) -> None:
-        accepted = receipt.get("status") in {"delivered", "recorded"} or (
-            receipt.get("status") in {"pending", "launched"}
-            and receipt.get("receipt_id")
-        )
-        if accepted:
+        if durable_delivery(receipt, "smart-home", event_id):
             # The shared spool owns retries after its durable receipt.
             self.engine.state["outbox"].pop(event_id, None)
         atomic_json(
@@ -392,6 +393,7 @@ class Runtime:
         handler = {
             "event": self._source_event,
             "subscriber_lost": self._subscriber_lost,
+            "ready": self._shared_ready,
             "delivery_receipt": self._shared_delivery,
             "receipt": self._effect_receipt,
             "deadline": self._deadline,
@@ -438,6 +440,38 @@ class Runtime:
     def _effect_receipt(self, data: tuple) -> None:
         self.receipt(*data)
 
+    def _shared_ready(self, data: dict) -> None:
+        if (
+            data.get("source") != "smart-home"
+            or data.get("native_state") != "vacant"
+            or not isinstance(data.get("authority_id"), str)
+            or not data["authority_id"]
+            or not isinstance(data.get("revision"), str)
+            or not data["revision"]
+        ):
+            return
+        open_ids = sorted(
+            i["id"]
+            for i in self.engine.state["incidents"].values()
+            if i.get("published") and i.get("closed") is None
+        )
+        if not open_ids:
+            return
+        identity_bytes = json.dumps(
+            [data["authority_id"], data["revision"], open_ids]
+        ).encode()
+        event_id = "startup:" + hashlib.sha256(identity_bytes).hexdigest()
+        self.engine.state["subscriber_losses"].setdefault(
+            event_id,
+            {
+                "observed_at": time.time(),
+                "reconciled": False,
+                "native_ack_required": False,
+            },
+        )
+        self.save()
+        self.request_refresh()
+
     def _deadline(self, _data: object) -> None:
         self.submit(self.engine.due(time.time()))
         if self.retry_at is not None and self.retry_at <= time.time():
@@ -457,7 +491,9 @@ class Runtime:
             [
                 {"type": "watch_ack", "event_id": event_id, "claim": "ack:" + event_id}
                 for event_id, loss in self.engine.state["subscriber_losses"].items()
-                if loss.get("reconciled") and not loss.get("acknowledged")
+                if loss.get("reconciled")
+                and not loss.get("acknowledged")
+                and loss.get("native_ack_required", True)
             ]
         )
 
@@ -517,6 +553,7 @@ class Runtime:
                 async for line in process.stdout:
                     event = json.loads(line)
                     if isinstance(event, dict) and event.get("type") in {
+                        "ready",
                         "subscriber_lost",
                         "delivery_receipt",
                     }:

@@ -33,6 +33,18 @@ def identity(value: object) -> str | None:
     return value if isinstance(value, str) and IDENTITY.fullmatch(value) else None
 
 
+def durable_delivery(receipt: dict, source: str, event_id: str) -> bool:
+    """Validate the shared spool's exact immutable-envelope acknowledgement."""
+    return (
+        receipt.get("durable") is True
+        and receipt.get("source") == source
+        and receipt.get("event_id") == event_id
+        and receipt.get("status") in {"pending", "launched", "delivered", "recorded"}
+        and isinstance(receipt.get("digest"), str)
+        and re.fullmatch(r"[a-f0-9]{64}", receipt["digest"]) is not None
+    )
+
+
 def maintenance_status(path: Path = MAINTENANCE) -> str:
     """Recognize the existing exclusive-create owner without deleting its lock."""
     try:

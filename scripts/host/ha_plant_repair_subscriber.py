@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from ha_smart_home_common import atomic_json
+from ha_smart_home_common import atomic_json, durable_delivery
 
 SOURCE = "plant-sensors"
 BROKER = str(Path.home() / ".local/bin/agent-sub")
@@ -99,6 +99,7 @@ class SharedBackend:
             and isinstance(loss.get("event_id"), str)
         ):
             incident["subscription_revision"] = loss["event_id"]
+            incident["subscription_native_ack"] = loss.get("native_ack_required", True)
 
     def launch(self, incident: dict, observation: dict) -> dict:
         """Publish once to the shared native lifecycle, preserving immutable retries."""
@@ -139,8 +140,13 @@ class SharedBackend:
                 },
             }
             atomic_json(path, event)
-        result = subprocess.run(  # noqa: S603 - fixed trusted broker and scoped arguments.
-            [
+        event = json.loads(path.read_text())
+        receipt_path = path.with_suffix(".receipt.json")
+        prior = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
+        argv = (
+            [BROKER, "status", "--source", SOURCE, "--event-id", event["event_id"]]
+            if durable_delivery(prior, SOURCE, event["event_id"])
+            else [
                 BROKER,
                 "publish",
                 "--source",
@@ -149,7 +155,10 @@ class SharedBackend:
                 str(path),
                 "--launch-profile",
                 SOURCE,
-            ],
+            ]
+        )
+        result = subprocess.run(  # noqa: S603 - fixed trusted broker and scoped arguments.
+            argv,
             text=True,
             capture_output=True,
             check=True,
@@ -160,8 +169,12 @@ class SharedBackend:
             message = "invalid_subscription_receipt"
             raise TypeError(message)
         native_status = receipt.get("status")
-        if incident.get("subscription_revision") and receipt.get("receipt_id"):
-            acknowledge_loss(incident["subscription_revision"])
+        if durable_delivery(receipt, SOURCE, event["event_id"]):
+            atomic_json(receipt_path, receipt)
+            if incident.get("subscription_revision") and incident.get(
+                "subscription_native_ack", True
+            ):
+                acknowledge_loss(incident["subscription_revision"])
         return {
             **receipt,
             "subscription_status": native_status,
@@ -177,8 +190,49 @@ class SharedBackend:
         path = self.local.root / "subscriber-loss.json"
         if result.get("status") == "healthy" and path.exists():
             event = json.loads(path.read_text())
-            if event.get("source") == SOURCE and isinstance(event.get("event_id"), str):
+            if (
+                event.get("source") == SOURCE
+                and isinstance(event.get("event_id"), str)
+                and event.get("native_ack_required", True)
+            ):
                 acknowledge_loss(event["event_id"])
+
+
+def startup_loss(event: dict, root: Path) -> dict | None:
+    """Reconcile pre-watch shared work only after authoritative startup vacancy."""
+    if (
+        event.get("native_state") != "vacant"
+        or event.get("source") != SOURCE
+        or not isinstance(event.get("authority_id"), str)
+        or not event["authority_id"]
+        or not isinstance(event.get("revision"), str)
+        or not event["revision"]
+    ):
+        return None
+    try:
+        state = json.loads((root / "state.json").read_text())
+        incident = state.get("incidents", {}).get(state.get("active"), {})
+        receipt = incident.get("launch_receipt", {})
+    except (OSError, ValueError, AttributeError):
+        return None
+    if (
+        receipt.get("source") != SOURCE
+        or receipt.get("durable") is not True
+        or receipt.get("subscription_status") != "delivered"
+        or not receipt.get("subscriber_id")
+    ):
+        return None
+    value = json.dumps(
+        [event["authority_id"], event["revision"], incident.get("id")]
+    ).encode()
+    return {
+        "type": "subscriber_lost",
+        "source": SOURCE,
+        "reason": "authority_vacant_after_restart",
+        "subscriber_id": receipt["subscriber_id"],
+        "event_id": "startup:" + hashlib.sha256(value).hexdigest(),
+        "native_ack_required": False,
+    }
 
 
 def acknowledge_loss(event_id: str) -> None:
@@ -219,6 +273,8 @@ def watch() -> None:
     ) as process:
         for line in process.stdout:
             event = json.loads(line)
+            if event.get("type") == "ready":
+                event = startup_loss(event, STATE_ROOT) or {}
             if (
                 event.get("type") != "subscriber_lost"
                 or event.get("source") != SOURCE

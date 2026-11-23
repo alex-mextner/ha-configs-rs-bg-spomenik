@@ -5,13 +5,17 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-
-sys.path.insert(
-    0, str(Path(__file__).resolve().parents[2] / "scripts/music-assistant-reconnect")
-)
 from typing import Never
 
-import ha_recovery_intent as intent
+# Native CI mounts this file directly under /tests and supplies PYTHONPATH.
+# Repository runs use the checked-in helper without assuming a minimum path depth.
+REPOSITORY_HELPERS = (
+    Path(__file__).resolve().parent.parent.parent / "scripts/music-assistant-reconnect"
+)
+if REPOSITORY_HELPERS.is_dir():
+    sys.path.insert(0, str(REPOSITORY_HELPERS))
+
+import ha_recovery_intent as intent  # noqa: E402 - repository or pinned-image helper path is configured above.
 
 
 class IntentTests(unittest.TestCase):
