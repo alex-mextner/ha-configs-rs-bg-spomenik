@@ -8,17 +8,17 @@ Runtime acceptance and deployment receipts belong to [issue #170](https://github
 
 | Item | Value |
 | --- | --- |
-| Frontend source | [38cd425ecdc43f35df473d415ce7bacb7f40c0be](https://github.com/alex-mextner/music-assistant-frontend/commit/38cd425ecdc43f35df473d415ce7bacb7f40c0be) |
+| Frontend source | [a520cdc4d6856a0084aa7feee05508c3650b433b](https://github.com/alex-mextner/music-assistant-frontend/commit/a520cdc4d6856a0084aa7feee05508c3650b433b) |
 | Installed frontend base | 2.17.297, source `e779b9d359e47cd210c2801f16a0ce6263571903` |
 | Server compatibility | Music Assistant 2.10.4, Python 3.14 package directory |
-| CI build | [Run 45221820963](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45221820963) |
-| Download | [Artifact 14841162484](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45221820963/artifacts/14841162484) |
-| Archive SHA-256 | `f16c17ad9e209f67da65ace0244c26f074180c87c1561038a6ebf9cafed36139` |
-| Manifest SHA-256 | `0f533482720fabf7d975c41e7197a9b0a7e5bcaef54bec624948f44fb7cbf5a5` |
+| CI build | [Run 45230718817](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45230718817) |
+| Download | [Artifact 14846219123](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45230718817/artifacts/14846219123) |
+| Archive SHA-256 | `47587cfdbc3b4a02d8582dccff333a2cf053ea98428c9e2a5e053f9e0683d937` |
+| Manifest SHA-256 | `4b810ce3dddbac0cb27eefcd3085f18f28c9feae45d9c42b8020b4c339758e27` |
 | Payload | `music_assistant_frontend/` (307 verified files), `manifest.json`, and `SHA256SUMS` |
 | Runtime mount | `/app/venv/lib/python3.14/site-packages/music_assistant_frontend`, read-only |
 
-The build passed 2,962 tests across 284 files, including all 22 transfer interaction tests, playback guards for player cards, queue menus and API commands, and the existing group membership and playback-confirmation suites. Native TypeScript checks, lint, the frontend build, Python package verification, and the unchanged-source check also passed. The [initial regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45200112538) failed six target/transfer checks against the unmodified installed-base code; the [follow-up regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45212691624) exposed 16 failures in the other playback entry points and member-availability guard.
+The build passed 2,968 tests across 284 files, including all 26 transfer interaction tests, playback guards for player cards, queue menus and API commands, and the existing group membership and playback-confirmation suites. Native TypeScript checks, lint, the frontend build, Python package verification, and the unchanged-source check also passed. The [initial regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45200112538) failed six target/transfer checks against the unmodified installed-base code; the [follow-up regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45212691624) exposed 16 failures in the other playback entry points and member-availability guard. The [latest regression run](https://github.com/alex-mextner/music-assistant-frontend/actions/runs/45229030713) failed six checks covering Keep-playing controls, the captured non-idle route, and queue clear/delete during a pending transfer.
 
 Retain the verified release locally before the Actions artifact expires. Its manifest records the source commit, workflow commit and run, actual tool versions, and the size and SHA-256 digest of every frontend file.
 
@@ -45,7 +45,7 @@ Each mutating operation acquires its own maintenance lock. Receipts and the exac
 1. Verify the downloaded archive digest against the pinned value. After safe extraction, check `SHA256SUMS` and every manifest entry, including the exact source SHA and CI run. Require the complete package, including `__init__.py`, `py.typed`, `index.html`, `sw.js`, `manifest.webmanifest`, and `assets/`.
 
 2. Stage the payload beneath the immutable release directory:
-   `/home/ultra/.local/share/music-assistant-frontend/releases/38cd425ecdc43f35df473d415ce7bacb7f40c0be/`.
+   `/home/ultra/.local/share/music-assistant-frontend/releases/a520cdc4d6856a0084aa7feee05508c3650b433b/`.
    The Compose source points to its `music_assistant_frontend/` child. Keep `manifest.json` and `SHA256SUMS` beside that child for later verification.
 
 3. Coordinate with the reconnect deployment through the shared `/home/ultra/.ma-maintenance.lock`. Use exclusive creation and a unique owner record; an existing or unknown owner stops this deployment. Release only the exact lock owned by this operation.
