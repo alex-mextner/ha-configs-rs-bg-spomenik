@@ -21,6 +21,24 @@ The build passed 2,934 tests across 284 files, including all 15 transfer interac
 
 Retain the verified release locally before the Actions artifact expires. Its manifest records the source commit, workflow commit and run, actual tool versions, and the size and SHA-256 digest of every frontend file.
 
+## Guarded deployment script
+
+Use the reviewed `scripts/ma_frontend_deploy.py` on the Odroid after its native review and CI gates pass. Its default `plan` operation reads live state and writes only private receipts and logs. An installation requires the exact Compose SHA-256 reported by a fresh plan; a changed file stops it. The script validates the actual running image ID against the image Compose would use, preserves the existing entrypoint, command, environment, and mounts, and refuses non-idle queues. It applies or removes the exact volume block without serializing or replacing unrelated configuration.
+
+```bash
+python3 scripts/ma_frontend_deploy.py plan
+python3 scripts/ma_frontend_deploy.py install --expected-compose-sha <fresh-plan-sha256>
+```
+
+For rollback, use the installation receipt and obtain a fresh preimage:
+
+```bash
+python3 scripts/ma_frontend_deploy.py plan --plan-action rollback --install-receipt <installation-receipt.json>
+python3 scripts/ma_frontend_deploy.py rollback --expected-compose-sha <fresh-plan-sha256> --install-receipt <installation-receipt.json>
+```
+
+Each mutating operation acquires its own maintenance lock. Receipts and the exact preimage backup remain under `/home/ultra/.local/state/ma-frontend-170/`; safe operational output is also written to a private timestamped `/tmp` log. A failed verification leaves its last completed phase in the receipt and does not silently restart again. Inspect that receipt and run a fresh guarded rollback when appropriate. The script never edits runtime databases or sends playback commands.
+
 ## Stage and install
 
 1. Verify the downloaded archive digest against the pinned value. After safe extraction, check `SHA256SUMS` and every manifest entry, including the exact source SHA and CI run. Require the complete package, including `__init__.py`, `py.typed`, `index.html`, `sw.js`, `manifest.webmanifest`, and `assets/`.
@@ -44,6 +62,8 @@ Retain the verified release locally before the Actions artifact expires. Its man
 The mount changes static files while leaving the image's distribution metadata in place. MA may still report frontend version 2.17.297; served asset hashes and observed behavior establish which build is running.
 
 ## Rollback
+
+Before any rollback, acquire the same shared maintenance lock with a fresh unique owner record, or verify that this operation still owns its existing lock. Capture a fresh queue snapshot and HA start time, and require every queue to be idle immediately before recreation; paused queues also defer rollback. Release only this operation's exact lock after verification. These checks apply even when rollback happens later, after the original installation lock was released.
 
 Remove only the volume entry whose source and target match this pinned release, then validate Compose and recreate only `music-assistant` with the same command. Check that any changes made after the initial backup remain intact; a wholesale backup restore is not the rollback procedure.
 
