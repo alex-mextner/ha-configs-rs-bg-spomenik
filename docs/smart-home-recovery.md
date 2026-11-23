@@ -1,57 +1,90 @@
 # Smart-home automatic repair
 
-The user service on ubuntu-pc checks Home Assistant and Music Assistant on Odroid every minute. It runs independently of both applications, and keeps their existing credentials on Odroid. A persistent fault starts one native OMP repair agent through the installed wrapper; it does not depend on Guardian.
+The user service on ubuntu-pc consumes live Home Assistant and Music Assistant events from Odroid. It keeps credentials on Odroid and uses the shared `agent-sub` subscriber lifecycle to reach a repair agent. There is no polling timer, periodic health scan or automatic service restart. The existing plant detector keeps its sensor thresholds and deterministic recovery sequence, while its last-resort agent delivery uses the same shared lifecycle under `plant-sensors`.
 
 ## Monitored failures
 
-The probe checks the authenticated Home Assistant API, Music Assistant API, and the enabled `hass` and `hass_players` providers. Missing expected provider configurations, an unloaded provider, or a provider error remain failures. Intentionally disabled providers are ignored. Player power state, old unavailable Kodi duplicates, and old logs are not fault signals.
+The source maintains authenticated WebSocket subscriptions to both local APIs and a new-lines-only Docker log stream. Music Assistant snapshots seed a baseline after connection; a startup or reconnect snapshot cannot manufacture a playback interruption. The log stream starts with `--tail 0`, so historical errors cannot open incidents.
 
-Selected Home Assistant integration domains are also checked: `music_assistant`, `yandex_station`, `yandex_smart_home`, `ekf_appliances`, and `aisis_speaker`. Enabled entries must be loaded. Unknown payloads and inaccessible probes become monitoring incidents instead of reporting a healthy home. Other integrations can be included explicitly through the probe configuration.
+Coverage is declarative:
 
-The existing plant sensor recovery controller stays independent and unchanged.
+- Core HA and MA connection failure, including source or SSH transport loss. A monitoring connection failure does not establish that a speaker stopped playing.
+- Current errors from every enabled Music Assistant provider. Deliberately disabled providers and error-free providers still starting up are ignored.
+- Enabled HA entries in `integration_domains`: initially `music_assistant`, `yandex_station`, `yandex_smart_home`, `ekf_appliances` and `aisis_speaker`. Setup errors and retry states are reported; unrelated integrations and powered-off television entities are not scanned.
+- Actual interruptions on the physical speakers listed in `players`. A scoped stream error must match the current item URI or an exact configured transport alias locally. Only the sanitized reason and endpoint identity leave Odroid.
+
+There is no generic alert for arbitrary unavailable entities, old Kodi entries, idle players, background audio analysis, or an unrelated historical log error. Extra critical integrations and speakers can be added explicitly to the configuration.
+
+## Playback and cause
+
+| Evidence | Agent behavior | Spoken message |
+| --- | --- | --- |
+| Network interruption shorter than five seconds | Observe MA's natural reconnect; no agent launch | None |
+| Network failure still present after five seconds | Notify the existing subscriber, or launch and subscribe one agent | `Подключаюсь к интернету.` only if the affected ongoing playback remains interrupted |
+| Confirmed authentication or configuration fault | Dispatch immediately | `Ошибка подключения к музыкальному сервису. Исправляю, минутку.` only on an actually interrupted endpoint |
+| Code or unclassified service fault | Dispatch immediately without pretending the cause is network or configuration | `Сбой музыкального сервиса. Исправляю, минутку.` only on an actually interrupted endpoint |
+| Monitoring transport failure | Reconnect with bounded backoff; report persistent monitoring failure | None without independent playback-failure evidence |
+
+Pause, stop, next, source changes and normal track endings are not fault evidence. The pinned MA intent hook runs after authentication and parsed input at both HTTP and WebSocket dispatch. Permission-aware target validation produces a private pending record before effects; only a successful handler produces an accepted record. Rejected, malformed and unauthorized commands do not produce accepted telemetry. These records are server logs, never events broadcast to guests or restricted users. Their payload contains only command, target, time and correlation, without media URLs or arguments.
+
+HA service-call events provide the corresponding explicit control intent for HA routes. A control intent or changed queue/item cancels a pending announcement. Group queue IDs stay separate from physical speaker IDs. Protocol aliases map to one physical endpoint, so a universal player and its AirPlay child cannot produce duplicate speech.
+
+Every event carries its source boot ID, stream ID, sequence, original time and monotonic timestamp. Delayed, missing or reordered evidence cannot turn a reconnect baseline into an interruption. Later authentication or code evidence upgrades a pending network cause immediately. A real device failure near the end of a track remains a failure; normal idle transitions without fault evidence remain quiet.
+
+## Announcements
+
+Speech is requested only for the specific speaker whose known ongoing playback failed. The controller persists a claim before the request, permits one attempt per incident and endpoint. A genuinely new interrupted playback is eligible immediately; there is no blanket endpoint cooldown. An ambiguous response is not retried. Speech runs independently of agent startup; neither failed speech nor a slow agent blocks event intake or cancellation.
+
+At the deadline, a one-shot local check verifies the same queue and current item, absence of newer user intent, unrecovered playback, current reachability and mute. A response arriving more than three seconds after its speech deadline is suppressed. This narrowly reactive path relies on the affected speaker's known ongoing playback; it has no invented wall-clock or person-home gate. Separate proactive watering-reminder policies are unchanged.
+
+Cached Ogg Opus clips are served from HA `/local/smart-home-recovery/` and verified by SHA256 before use. The network phrase therefore does not need cloud synthesis during a WAN outage, provided MA, HA's local HTTP service and the speaker's LAN route remain reachable. No other room is used as a fallback. A complete failure of those local audio components is repaired silently.
+
+The supported MA `players/cmd/play_announcement` API supplies announcement and volume restoration semantics. The announcement request does not pause, clear or rewrite a music queue. Emulated announcements are allowed only for an already interrupted standalone endpoint; the captured state is idle, so restoration must not start a queue. Group fan-out and ambiguous grouping are suppressed. Native regressions verify these installed MA semantics without physical playback.
+
+The request uses the current Music Assistant control volume, subject to its existing configured announcement limits, and native MA restoration retains the saved level. Muted speakers stay quiet. For the studio, each concrete attempt reads the exact connected Quasar device `M00ZRW3008RAJG` through the existing local read-only state endpoint; only a matching identity and boolean `SoundMuted: false` admit audio. The separate Quasar `SoundLevel` scale is never converted into an AirPlay percentage. Other devices use their own endpoint or actual active protocol. Unknown mute stays quiet; a stored nonzero volume is insufficient. Actual hardware volume preservation remains part of production verification; no audible acceptance test is implied by source-level restoration tests.
+
+Own announcement requests have a bounded private marker before submission. Their temporary playback transitions are excluded from recovery and new-failure detection. Recovery is established by fresh service or playback evidence, never by the announcement becoming `playing` or by an agent's written report. After an actual endpoint/provider reconnect, a still-idle original queue may receive one bounded resume attempt. It requires the same queue and item, a current unmuted standalone endpoint, and no subsequent user command. A pause, Stop, queue/source change or stale epoch cancels it. The request runs after any own announcement and carries a private correlation marker so it is not misclassified as user intent. Its accepted receipt is not proof that playback resumed.
 
 ## Repair lifecycle
 
-A fault must persist for 120 seconds. Correlated faults share one durable incident. For a Home Assistant provider fault, the controller requests one supported provider reload and waits another minute. An unresolved problem starts one bounded OMP service, with a persisted launch claim and service reconciliation before every retry.
+HA owns incident identities, immutable event envelopes and speech claims. **The shared agent-tools broker alone owns subscriptions and agent launches.** `agent-sub publish --source smart-home --event-file PATH --launch-profile smart-home` delivers to the existing verified native subscriber. With no holder, the broker reserves the native source, starts an idle OMP endpoint, binds it atomically, and only then delivers the event. No incident-specific prompt runs before binding.
 
-The service has a 25-minute lifetime limit; OMP has a 20-minute turn limit. A failed or exited repair can resume its saved session after a backoff of five minutes, increasing to one hour. An ambiguous launch never creates a second worker until systemd establishes that the first is absent. A previous incident's active worker prevents a new worker from starting. All agents use the usual review and deployment rules and must recheck the active incident before a mutation.
+`delivered` means native input acceptance, not completed repair. `launched` and `pending` require broker reconciliation. A recovered event with no subscriber is recorded without launching an agent. Identical event IDs and contents are safe to retry after an ambiguous response; changed content has a new event ID. The consumer reconciles once at startup, then schedules one-shot deadlines only while concrete delivery work is pending. After a durable pending receipt, the shared spool owns retries; the consumer does not race a second publication against reconciliation.
 
-A repair report does not close an incident. Closure requires two distinct, fresh successful probes at least 20 seconds apart. State survives monitor restarts and reboot. Invalid monitor state is preserved separately and rebuilt; systemd worker reconciliation still prevents overlapping launches.
+The consumer also subscribes to `agent-sub watch`. A positively confirmed native subscriber death triggers one fresh API reconciliation of still-open domain work, then a new immutable event revision. Unknown liveness never creates a replacement. A repaired domain closes without launching a new agent.
 
-## Spoken notice
+Durable state survives restarts. Invalid state is preserved separately and rebuilt; the shared native subscription still prevents competing agents. Speech claims are never replayed from a previous source epoch. The standing repair brief requires fresh evidence, preserves user stops and queues, and follows normal repository tests, review and shipping gates. It forbids manual edits of HA `.storage` or runtime databases and forbids unsolicited household audio or people-directed messages.
 
-After a repair has been scheduled, the monitor requests: “Умный дом настраивается, минутку.” It persists the attempt before sending, so an unknown delivery result is not repeated. There is at most one attempt per incident and a global 30-minute cooldown.
-
-The normal route is the living-room Yandex Station's supported native text announcement. It uses the existing YandexStation temporary-volume mechanism: 6/10 while a configured room player is playing, 4/10 otherwise, then the integration restores its previous level. The monitor does not replace a music queue or issue play/pause commands.
-
-Sound is suppressed when nobody is confirmed home, presence is unknown, the speaker is muted or unavailable, or during quiet hours (default **22:00–09:00 Europe/Belgrade**). An unchanged current `home` state is valid; the five-minute cache age limit applies only when HA cannot provide a current observation.
-
-When Home Assistant is unavailable, the monitor can use the existing Quasar API only if the exact living-room Station is connected there, cached occupancy is under five minutes old, and the direct speaker is idle and at a quiet nonzero volume. It never substitutes a speaker in another room. In the current installation only the studio Station is connected to Quasar, so a complete HA outage is repaired silently until a supported living-room route becomes available. Speech failure or suppression never prevents repair.
+The existing Odroid `/home/ultra/.ma-maintenance.lock` uses exclusive creation with an owner PID and nonce. A current or unknown owner suppresses ordinary detection during scoped maintenance; a positively absent or reused owner PID is classified stale without deleting its file. Linux file events notice its creation/removal; removal triggers one fresh MA baseline. A lock persisting for fifteen minutes produces a silent maintenance diagnostic instead of hiding a stuck maintenance operation forever. The repair agent must reconcile the lock owner before changing a service.
 
 ## Files and controls
 
 On ubuntu-pc:
 
-- Installed scripts: `~/.local/share/ha-smart-home-recovery/`.
-- State and incident evidence: `~/.local/state/ha-smart-home-recovery/`.
-- Timer: `ha-smart-home-recovery.timer`; user lingering is required for boot startup.
-- Each repair has a systemd service named `ha-smart-home-repair-<incident>.service`.
+- Install the reviewed `ha_smart_home_common.py`, `ha_smart_home_recovery.py` and `ha_smart_home_service.py` under `~/.local/share/ha-smart-home-recovery/`.
+- Install the shared agent-tools `agent-sub` command and the owned mode-0600 profile at `~/.config/agent-tools/subscriptions/profiles/smart-home.json`. Use the example profile with the reviewed standing instructions file; no event-file launch argument is allowed.
+- State and immutable delivery evidence live under `~/.local/state/ha-smart-home-recovery/`.
+- Install and enable `ha-smart-home-recovery.service` as a user service. User lingering must be enabled for boot startup. The superseded `ha-smart-home-recovery.timer` must remain absent or disabled.
 
-On Odroid, install `ha_smart_home_probe.py` at `~/.local/share/ha-smart-home-recovery/`. Optional configuration is `~/.config/ha-smart-home-recovery/config.json`, with `speaker`, `persons`, `playback_entities`, `integration_domains`, `quiet_start`, `quiet_end`, and `timezone`. It contains entity identifiers and policy only; credentials remain in their existing local stores.
+On Odroid:
 
-Inspect current evidence with:
+- Install `ha_smart_home_common.py`, `ha_smart_home_recovery.py`, `ha_smart_home_events.py`, `ha_smart_home_watch.py` and `ha_smart_home_probe.py` under `~/.local/share/ha-smart-home-recovery/`.
+- Create the small isolated `venv` there and install the SHA256-pinned pure Python `websockets` wheel from `ha-smart-home-events-requirements.txt`. It supports the host's Python 3.13 without a native build.
+- Install the reviewed configuration at `~/.config/ha-smart-home-recovery/config.json`, and the verified clips under `/home/ultra/homeassistant/www/smart-home-recovery/`.
+- Apply the checksum-guarded reconnect and intent startup wrapper only through the reviewed scoped MA deployment procedure. It validates complete original/output hashes before writes and refuses an unexpected image. There is no package download or database mutation at startup.
+
+The SSH source terminates with its parent channel. Source lifecycle, accepted intent and current announcement markers stay under Odroid `~/.local/state/ha-smart-home-events/`. Private rotating logs under `/tmp/ha-smart-home-events-<uid>/` retain two days of this service's own run logs. Credentials, raw service bodies and secret-bearing source URLs are never logged.
 
 ```sh
-python3 ~/.local/share/ha-smart-home-recovery/ha_smart_home_recovery.py status
-systemctl --user status ha-smart-home-recovery.timer
+systemctl --user status ha-smart-home-recovery.service
+systemctl --user is-enabled ha-smart-home-recovery.service
+systemctl --user is-enabled ha-smart-home-recovery.timer
 ```
 
-To pause new automated work, create the owned marker `~/.local/state/ha-smart-home-recovery/paused`; remove that marker to resume. To disable periodic checks, disable the timer. Existing repair processes are visible as separate systemd units and are not silently killed by a pause marker.
-
-Both scripts print progress and a unique private log path to stderr, with machine-readable JSON on stdout. Their own `/tmp/ha-smart-home-*` run logs expire after two days. No token, API response body, or credential file is logged.
+Stopping the event service pauses new automatic work. Existing subscribed repair sessions remain owned by the shared broker and are not silently killed by that action.
 
 ## Verification
 
-`tests/test_smart_home_recovery.py` is a standard-library regression suite included by the existing maintained test target. It checks persistence, debounce, deduplication, timeout ambiguity, dead-worker retries, single provider reload, malformed/stale health, recovery confirmation, volume policy, quiet hours and presence suppression.
+The `tests/test_smart_home_*.py` modules cover event order, short reconnects, cause upgrades, user controls, natural endings, aliases, groups, stale data, own announcements, mute and deadline rules, cached clip routing, maintenance file events and nonblocking agent delivery. They are included by the maintained CI target. Native pinned-image tests under `tests/music_assistant_reconnect/` exercise reconnect cleanup, complete-source guards, real HTTP/WS dispatch and native announcement restoration without devices.
 
-End-to-end dispatch verification uses an isolated state directory and a read-only brief. It must observe an actual native agent response and terminal process receipt, as well as a second monitor tick that does not create another worker. No production service needs to be broken for this check. Record accepted audio delivery separately from a person's confirmation that sound was heard.
+Acceptance requires an actual authenticated source snapshot plus controlled no-audio event replay into the shared subscription lifecycle: one native agent must receive and respond to a problem, a second problem must reach the same subscribed agent, and a stale subscriber must be reconciled safely. A mocked process start, old polling proof or prior global speaker announcement does not accept this event-based design. Production activation follows the verified merged artifact; no physical outage or unsolicited audible test is needed.

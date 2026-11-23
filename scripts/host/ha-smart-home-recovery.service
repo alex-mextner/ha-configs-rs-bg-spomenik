@@ -1,13 +1,18 @@
 [Unit]
-Description=Detect smart-home failures and coordinate one repair agent
-Wants=network-online.target
+Description=Smart-home event recovery and affected-speaker announcements
 After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 %h/.local/share/ha-smart-home-recovery/ha_smart_home_recovery.py run
-Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
-TimeoutStartSec=210
-Nice=10
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/share/ha-smart-home-recovery/ha_smart_home_service.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
 UMask=0077
-MemoryMax=256M
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "source": "smart-home",
+  "argv": [
+    "/home/ultra/.local/bin/omp",
+    "--session-dir", "{launch_dir}/sessions",
+    "--append-system-prompt", "/home/ultra/.local/share/ha-smart-home-recovery/ha-smart-home-recovery-instructions.md"
+  ],
+  "cwd": "{launch_dir}",
+  "startup_timeout_seconds": 90,
+  "reservation_seconds": 180,
+  "retry_seconds": 5,
+  "max_backoff_seconds": 60
+}

@@ -1,0 +1,17 @@
+{
+  "network.ogg": {
+    "text": "Подключаюсь к интернету.",
+    "sha256": "8c56a8bb345c79a7f18bbf5e74d770b1f31435d3c17cad2ce349c131f7eb9dcb",
+    "format": "Ogg Opus mono 48000 Hz"
+  },
+  "connection.ogg": {
+    "text": "Ошибка подключения к музыкальному сервису. Исправляю, минутку.",
+    "sha256": "551e97fac86ca0ad82c09bc216d466266d8a318225dcc5e4283017c9f774ceba",
+    "format": "Ogg Opus mono 48000 Hz"
+  },
+  "service.ogg": {
+    "text": "Сбой музыкального сервиса. Исправляю, минутку.",
+    "sha256": "339e7f11f7cc78b9039962a451d53bb2245bb42d2ab7a47c517972d2772e6f9f",
+    "format": "Ogg Opus mono 48000 Hz"
+  }
+}
