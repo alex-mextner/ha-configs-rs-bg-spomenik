@@ -13,7 +13,7 @@ rest_command:
     method: POST
     headers:
       X-HA-Host-Token: !secret host_actions_token
-    timeout: 12
+    timeout: 100
 
   host_kodi_start:
     url: !secret host_kodi_start_url
@@ -27,7 +27,7 @@ rest_command:
     method: POST
     headers:
       X-HA-Host-Token: !secret host_actions_token
-    timeout: 12
+    timeout: 100
 
   host_kodi_text_input:
     url: !secret host_kodi_text_input_url

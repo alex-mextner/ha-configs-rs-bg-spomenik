@@ -250,6 +250,8 @@ def _kodi_active_state(run: Callable[..., Any], unit: str) -> str:
     return state
 
 
+# `systemctl stop` blocks until Kodi has saved its state (TimeoutStopSec=60 in
+# scripts/host/kodi-clean-stop.conf): the subprocess timeout below must stay above that.
 def stop_kodi(
     run: Callable[..., Any],
     running: Callable[[], bool],
@@ -260,7 +262,7 @@ def stop_kodi(
     if not running():
         state = _kodi_active_state(run, unit)
         if state == "activating":
-            stop = run(["sudo", "-n", "systemctl", "stop", unit], timeout=20)
+            stop = run(["sudo", "-n", "systemctl", "stop", unit], timeout=70)
             return {
                 "kodi": (
                     "stopped"
@@ -285,7 +287,7 @@ def stop_kodi(
     if not running():
         return {"kodi": "stopped", "method": "jsonrpc", "jsonrpc": rpc_result}
 
-    stop = run(["sudo", "-n", "systemctl", "stop", unit], timeout=20)
+    stop = run(["sudo", "-n", "systemctl", "stop", unit], timeout=70)
     return {
         "kodi": "stopped" if not running() else "stop_requested",
         "method": "systemctl_stop",
