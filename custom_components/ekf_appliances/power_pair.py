@@ -250,7 +250,8 @@ class PowerPair:
         except HomeAssistantError:
             return False
         except asyncio.CancelledError:
-            if pending.cancelled() and not asyncio.current_task().cancelling():
+            caller = asyncio.current_task()
+            if pending.cancelled() and caller is not None and not caller.cancelling():
                 return False  # The pair unloaded, the caller is still running.
             raise
         return self._future is pending and self.confirmed_on
