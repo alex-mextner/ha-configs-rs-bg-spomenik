@@ -726,14 +726,14 @@ class RemoteController:
         pair = self.runtime.projector_power_pair
         if self._closed or pair is None or self.runtime.projector_shutting_down:
             return {"ready": False}
+        if pair.target is not True and self._pair_transition("projector"):
+            return {"ready": False}
         shutdown_at = self.runtime.shutdown.requested_at
         self.mode.select("projector")
         if pair.target is True:
             if not await pair.wait_for_start():
                 return {"ready": False}
-        else:
-            if self._pair_transition("projector"):
-                return {"ready": False}
+        elif not pair.confirmed_on:
             await self._async_owned_power(
                 "projector",
                 self._async_service(

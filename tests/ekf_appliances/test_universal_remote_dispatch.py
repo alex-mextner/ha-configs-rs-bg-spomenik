@@ -1295,6 +1295,68 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.service_response, {"ready": False})
         self.assertEqual(self.appliance_calls(), [])
 
+    async def test_playback_rejection_keeps_existing_focus_and_lease(self) -> None:
+        release = asyncio.Event()
+        release.set()
+        pair, started = self.install_playback_pair(release)
+        await pair.request(target=True)
+        started.clear()
+        release.clear()
+        off = asyncio.create_task(pair.request(target=False))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            self.assertFalse(self.runtime.projector_power_state)
+            self.assertFalse(self.runtime.projector_shutting_down)
+            self.controller.mode.select("tv")
+            self.controller.mode.set_audio(active=True, at=time.time())
+            await self.hass.async_block_till_done()
+            mode = self.controller.mode
+            lease, audio_lease = mode.expires_at, mode.audio_expires_at
+            result = await self.scripts["projector_start_for_playback"].async_run(
+                {}, context=Context()
+            )
+            self.assertEqual(result.service_response, {"ready": False})
+            self.assertEqual((mode.pair, mode.audio), ("tv", True))
+            self.assertEqual(
+                (mode.expires_at, mode.audio_expires_at), (lease, audio_lease)
+            )
+        finally:
+            release.set()
+            await off
+
+    async def test_playback_queue_reuses_confirmation_without_a_new_on(self) -> None:
+        release = asyncio.Event()
+        pair, started = self.install_playback_pair(release)
+        script = self.scripts["projector_start_for_playback"]
+
+        async def native_on(call) -> None:
+            await self.capture(call)
+            await pair.request(target=True)
+
+        async def queued(entered: asyncio.Event) -> Any:
+            entered.set()
+            return await script.async_run({}, context=Context())
+
+        self.hass.services.async_register("media_player", "turn_on", native_on)
+        first = asyncio.create_task(script.async_run({}, context=Context()))
+        await asyncio.wait_for(started.wait(), 1)
+        revision = pair.intent_revision
+        entered = asyncio.Event()
+        second = asyncio.create_task(queued(entered))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(script.runs, 2)
+        finally:
+            release.set()
+            results = await asyncio.gather(first, second)
+        self.assertEqual(
+            [result.service_response for result in results], [{"ready": True}] * 2
+        )
+        self.assertEqual(pair.intent_revision, revision)
+        self.assertEqual(
+            self.appliance_calls(), [("media_player.turn_on", {"entity_id": PROJECTOR})]
+        )
+
     async def test_transmission_playback_requires_confirmed_projector(self) -> None:
         config = yaml.safe_load((PACKAGE.parent / "transmission.yaml").read_text())
         script = Script(
