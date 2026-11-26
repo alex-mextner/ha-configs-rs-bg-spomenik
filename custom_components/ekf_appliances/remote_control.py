@@ -42,7 +42,6 @@ _LIGHT_COLORS = {
     "green": [0, 255, 0, 0],
     "yellow": [255, 255, 0, 0],
 }
-_YANDEX_STATION = "media_player.yandex_station_m0011hm00z86hg"
 _CAPTURED_ROUTE_LIMIT = 256
 _AUDIO_DOUBLE_SECONDS = 0.8
 _SPEAKER_CONTROLS = {
@@ -420,7 +419,9 @@ class RemoteController:
         finally:
             _SERVICE_CONTEXT.reset(token)
 
-    async def async_prepare(self, data: Mapping[str, Any]) -> RemoteRoute:
+    async def async_prepare(
+        self, data: Mapping[str, Any], *, mirror: bool = True
+    ) -> RemoteRoute:
         """Return the route captured for a physical press without replaying it."""
         received = data.get("received_ms")
         if received is None:
@@ -463,7 +464,8 @@ class RemoteController:
                     else "expired_remote_press"
                 )
                 route = {**self.resolve({}), "blocked": reason}
-        await self.async_mirror()
+        if mirror:
+            await self.async_mirror()
         if (
             data["button"] != "power"
             and not route.get("blocked")
@@ -795,6 +797,9 @@ class RemoteController:
 
         await self._async_check_control(entity)
         if button == "audio":
+            # Mirror before resolving the owner. Only synchronous capture checks
+            # remain between a successful owner response and native submission.
+            await self.async_mirror()
             owner = await self.hass.services.async_call(
                 "script",
                 "music_remote_resolve",
@@ -806,7 +811,7 @@ class RemoteController:
                 return {"sent": False}
             if service == "play_media":
                 if (
-                    entity != _YANDEX_STATION
+                    owner.get("speaker_entity_id") != entity
                     or owner.get("owner") != "speaker"
                     or owner.get("speaker_backend") != "yandex"
                 ):
@@ -819,7 +824,8 @@ class RemoteController:
         # Keep validation and submission in the same task. A separate YAML
         # service response can resume after newer physical power feedback.
         route = await self.async_prepare(
-            {"button": button, "received_ms": data["received_ms"]}
+            {"button": button, "received_ms": data["received_ms"]},
+            mirror=button != "audio",
         )
         if reason := route.get("blocked"):
             return {"sent": False, "blocked": reason}
@@ -1003,8 +1009,16 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
                 {
                     **received,
                     vol.Required("button"): vol.In(["channel_up", "channel_down"]),
+                    # HA accepts its displayed unit, converts to the native
+                    # Haier unit and validates that device's setpoint limits.
                     vol.Required("temperature"): vol.All(
-                        vol.Coerce(float), vol.Range(min=16, max=30)
+                        vol.Coerce(float),
+                        vol.Range(
+                            min=float("-inf"),
+                            max=float("inf"),
+                            min_included=False,
+                            max_included=False,
+                        ),
                     ),
                 },
                 {

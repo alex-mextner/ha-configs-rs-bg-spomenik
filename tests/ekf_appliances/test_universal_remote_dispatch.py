@@ -19,7 +19,13 @@ from unittest.mock import ANY, patch
 
 import yaml
 from homeassistant import loader
+from homeassistant.components.climate import (
+    ClimateEntity,
+    async_service_temperature_set,
+)
+from homeassistant.components.climate.const import ClimateEntityFeature
 from homeassistant.config_entries import ConfigEntries
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import (
     Context,
     HomeAssistant,
@@ -37,6 +43,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.script import Script, script_stack_cv
 from homeassistant.helpers.template import Template
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from custom_components import remote_announcements
 from custom_components.ekf_appliances.ir_decode import RemoteMapper
@@ -486,6 +493,53 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     self.hass.states.get("input_boolean.audio_mode").state, mode[1]
                 )
+
+    async def test_channel_accepts_ha_display_temperature_and_native_bounds(
+        self,
+    ) -> None:
+        self.hass.config.units = US_CUSTOMARY_SYSTEM
+        self.set_power_pair("on", "on")
+        self.controller.mode.select("projector")
+        self.hass.states.async_set(
+            AC,
+            "heat",
+            {"temperature": 75, "target_temp_step": 1, "min_temp": 61, "max_temp": 86},
+        )
+        native_temperatures = []
+
+        class NativeHaier(ClimateEntity):
+            _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+            _attr_min_temp = 16
+            _attr_max_temp = 30
+            _attr_temperature_unit = UnitOfTemperature.CELSIUS
+
+            async def async_set_temperature(self, **kwargs: Any) -> None:
+                native_temperatures.append(kwargs["temperature"])
+
+        haier = NativeHaier()
+        haier.hass = self.hass
+
+        async def handle(call) -> None:
+            await async_service_temperature_set(haier, call)
+
+        self.hass.services.async_register("climate", "set_temperature", handle)
+        await self.run_automation("universal_remote_dispatcher", "channel_up")
+        self.assertEqual(len(native_temperatures), 1)
+        self.assertAlmostEqual(native_temperatures[0], (76 - 32) * 5 / 9)
+        pressed = time.time()
+        self.controller.physical_press("channel_up", pressed)
+        with self.assertRaises(HomeAssistantError):
+            await self.hass.services.async_call(
+                "ekf_appliances",
+                "remote_captured_action",
+                {
+                    "button": "channel_up",
+                    "received_ms": pressed * 1000,
+                    "temperature": 100,
+                },
+                blocking=True,
+            )
+        self.assertEqual(len(native_temperatures), 1)
 
     async def test_channel_keeps_off_mode_and_does_not_repeat_a_bound_value(
         self,
@@ -1061,9 +1115,9 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0)
                     await mirror()
 
-                async def after_prepare(data, prepare=prepare) -> Any:
+                async def after_prepare(data, *, mirror=True, prepare=prepare) -> Any:
                     nonlocal scheduled
-                    route = await prepare(data)
+                    route = await prepare(data, mirror=mirror)
                     if not scheduled:
                         self.assertFalse(route.get("blocked"))
                         scheduled = True
@@ -1295,6 +1349,61 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             [("media_player.media_next_track", {"entity_id": station})],
         )
 
+    async def test_captured_wave_follows_the_resolved_yandex_station(self) -> None:
+        station = "media_player.renamed_yandex_station"
+        self.set_power_pair("on", "on")
+        self.controller.mode.select("projector")
+        self.hass.states.async_set(
+            station, "idle", {"supported_features": 512, "alice_state": "IDLE"}
+        )
+        route = {
+            "owner": "speaker",
+            "speaker_backend": "yandex",
+            "speaker_entity_id": station,
+            "entity_id": station,
+        }
+
+        async def resolve(_call) -> dict[str, str]:
+            return route
+
+        self.hass.services.async_register(
+            "script",
+            "music_remote_resolve",
+            resolve,
+            supports_response=SupportsResponse.ONLY,
+        )
+        self.hass.services.async_register("media_player", "play_media", self.capture)
+        config = yaml.safe_load(PACKAGE.with_name("music_remote.yaml").read_text())[
+            "script"
+        ]["music_remote_command"]
+        music = Script(
+            self.hass,
+            cv.SCRIPT_SCHEMA(config["sequence"]),
+            "captured music",
+            "script",
+            script_mode="queued",
+        )
+        pressed = time.time() - 1
+        self.controller.physical_press("audio", pressed)
+        result = await music.async_run(
+            {"command": "play_pause", "audio_received_ms": pressed * 1000},
+            context=Context(),
+        )
+        self.assertEqual(result.service_response["status"], "accepted")
+        self.assertEqual(
+            self.appliance_calls(),
+            [
+                (
+                    "media_player.play_media",
+                    {
+                        "entity_id": station,
+                        "media_content_type": "command",
+                        "media_content_id": "Включи мою волну",
+                    },
+                )
+            ],
+        )
+
     async def test_captured_audio_checks_live_music_owner_before_play_and_bookkeeping(
         self,
     ) -> None:
@@ -1318,15 +1427,31 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.controller.mode.select("projector")
                 context = Context()
                 self.hass.states.async_set(remembered, "previous")
-                owners = iter(
-                    (player, "media_player.other" if owner_changed else player)
-                )
+                active = {"owner": "ma", "entity_id": player}
+                entered, resume = asyncio.Event(), asyncio.Event()
+                handler = self.controller.async_captured_action
+                mirror = self.controller.async_mirror
+                submission = SimpleNamespace(task=None)
+
+                async def mark_submission(
+                    data, handler=handler, submission=submission
+                ) -> Any:
+                    submission.task = asyncio.current_task()
+                    return await handler(data)
+
+                async def held_mirror(
+                    mirror=mirror, entered=entered, resume=resume, submission=submission
+                ) -> None:
+                    if asyncio.current_task() is submission.task:
+                        entered.set()
+                        await resume.wait()
+                    await mirror()
 
                 async def resolve(
-                    call, owners=owners, context=context
+                    call, active=active, context=context
                 ) -> dict[str, str]:
                     self.assertIs(call.context, context)
-                    return {"owner": "ma", "entity_id": next(owners)}
+                    return dict(active)
 
                 async def play(call, context=context) -> None:
                     self.assertIs(call.context, context)
@@ -1341,10 +1466,28 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.hass.services.async_register("media_player", "media_play", play)
                 pressed = time.time() - 1
                 self.controller.physical_press("audio", pressed)
-                result = await music.async_run(
-                    {"command": "play_pause", "audio_received_ms": pressed * 1000},
-                    context=context,
-                )
+                with (
+                    patch.object(
+                        self.controller, "async_captured_action", mark_submission
+                    ),
+                    patch.object(self.controller, "async_mirror", held_mirror),
+                ):
+                    request = asyncio.create_task(
+                        music.async_run(
+                            {
+                                "command": "play_pause",
+                                "audio_received_ms": pressed * 1000,
+                            },
+                            context=context,
+                        )
+                    )
+                    try:
+                        await asyncio.wait_for(entered.wait(), 1)
+                        if owner_changed:
+                            active["entity_id"] = "media_player.other"
+                    finally:
+                        resume.set()
+                        result = await request
                 self.assertEqual(
                     result.service_response["status"],
                     "rejected" if owner_changed else "accepted",

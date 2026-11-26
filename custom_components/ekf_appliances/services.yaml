@@ -104,7 +104,8 @@ remote_captured_action:
       required: true
       selector: {number: {min: 1, max: 9999999999999, mode: box}}
     temperature:
-      selector: {number: {min: 16, max: 30, mode: box}}
+      description: Setpoint in Home Assistant display units.
+      selector: {number: {mode: box}}
     hvac_mode:
       selector: {select: {options: ["off", heat, cool]}}
     entity_id:
