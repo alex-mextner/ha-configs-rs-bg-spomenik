@@ -93,6 +93,26 @@ remote_reject:
       description: Stable physical press identity. When omitted, uses the physical press that remote_prepare bound to the caller context, else the caller context ID.
       selector: {text: {}}
 
+remote_captured_action:
+  name: Forward captured household key
+  description: Recheck the physical key and target before sending its light, climate or single-Audio action.
+  fields:
+    button:
+      required: true
+      selector: {select: {options: [smart, red, green, yellow, channel_up, channel_down, prime, audio]}}
+    received_ms:
+      required: true
+      selector: {number: {min: 1, max: 9999999999999, mode: box}}
+    temperature:
+      selector: {number: {min: 16, max: 30, mode: box}}
+    hvac_mode:
+      selector: {select: {options: ["off", heat, cool]}}
+    entity_id:
+      description: Player selected by the music remote for a single Audio press.
+      selector: {entity: {domain: media_player}}
+    playback:
+      selector: {select: {options: [play, pause, wave]}}
+
 remote_dispatch:
   name: Dispatch guarded remote command
   description: Final command boundary for the universal remote package; preserves native service responses.

@@ -1031,6 +1031,115 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             await off
         self.assertEqual(self.appliance_calls(), [])
 
+    async def test_household_keys_do_not_forward_after_prepared_projector_turns_off(
+        self,
+    ) -> None:
+        for button in (
+            "smart",
+            "red",
+            "green",
+            "yellow",
+            "channel_up",
+            "channel_down",
+            "prime",
+            "audio",
+        ):
+            with self.subTest(button=button):
+                self.reset()
+                self.set_power_pair("on", "on")
+                self.controller.mode.select("projector")
+                await self.hass.async_block_till_done()
+                pressed = time.time() - 0.9 if button == "audio" else time.time()
+                self.controller.physical_press(button, pressed)
+                await self.hass.async_block_till_done()
+                prepare = self.controller.async_prepare
+                mirror = self.controller.async_mirror
+                scheduled = False
+
+                async def delayed_mirror(mirror=mirror) -> None:
+                    # A helper write suspends the real named HA script.
+                    await asyncio.sleep(0)
+                    await mirror()
+
+                async def after_prepare(data, prepare=prepare) -> Any:
+                    nonlocal scheduled
+                    route = await prepare(data)
+                    if not scheduled:
+                        self.assertFalse(route.get("blocked"))
+                        scheduled = True
+                        self.hass.loop.call_soon(self.set_power_pair, "on", "off")
+                    return route
+
+                with (
+                    patch.object(self.controller, "async_mirror", delayed_mirror),
+                    patch.object(self.controller, "async_prepare", after_prepare),
+                ):
+                    if button in ("channel_up", "channel_down"):
+                        await self.scripts["remote_ac_temperature"].async_run(
+                            {
+                                "delta": 1 if button == "channel_up" else -1,
+                                "received_ms": pressed * 1000,
+                            },
+                            context=Context(),
+                        )
+                    elif button == "prime":
+                        await self.scripts["remote_ac_toggle"].async_run(
+                            {"received_ms": pressed * 1000}, context=Context()
+                        )
+                    elif button == "audio":
+                        station = "media_player.yandex_station_m0011hm00z86hg"
+                        self.hass.states.async_set(
+                            station,
+                            "paused",
+                            {
+                                "supported_features": 16384,
+                                "media_title": "Current item",
+                            },
+                        )
+
+                        async def resolve(_call, station=station) -> dict[str, str]:
+                            return {
+                                "owner": "speaker",
+                                "speaker_backend": "yandex",
+                                "entity_id": station,
+                            }
+
+                        self.hass.services.async_register(
+                            "script",
+                            "music_remote_resolve",
+                            resolve,
+                            supports_response=SupportsResponse.ONLY,
+                        )
+                        config = yaml.safe_load(
+                            PACKAGE.with_name("music_remote.yaml").read_text()
+                        )["script"]["music_remote_command"]
+                        music = Script(
+                            self.hass,
+                            cv.SCRIPT_SCHEMA(config["sequence"]),
+                            "music_remote_command",
+                            "script",
+                            script_mode="queued",
+                        )
+                        await music.async_run(
+                            {
+                                "command": "play_pause",
+                                "audio_received_ms": pressed * 1000,
+                            },
+                            context=Context(),
+                        )
+                    else:
+                        await self.dispatch_captured(button, pressed)
+                self.assertTrue(scheduled)
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(
+                    [
+                        data["reason"]
+                        for action, data in self.calls
+                        if action == "remote_announcements.reject"
+                    ],
+                    ["projector_off"],
+                )
+
     async def test_power_loss_while_preparation_mirrors_blocks_the_light_key(
         self,
     ) -> None:
@@ -1185,6 +1294,71 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             self.appliance_calls(),
             [("media_player.media_next_track", {"entity_id": station})],
         )
+
+    async def test_captured_audio_checks_live_music_owner_before_play_and_bookkeeping(
+        self,
+    ) -> None:
+        player = "media_player.test_music_queue"
+        remembered = "input_text.music_remote_ma_last"
+        self.hass.states.async_set(player, "paused", {"supported_features": 16384})
+        config = yaml.safe_load(PACKAGE.with_name("music_remote.yaml").read_text())[
+            "script"
+        ]["music_remote_command"]
+        music = Script(
+            self.hass,
+            cv.SCRIPT_SCHEMA(config["sequence"]),
+            "captured music",
+            "script",
+            script_mode="queued",
+        )
+        for owner_changed in (False, True):
+            with self.subTest(owner_changed=owner_changed):
+                self.reset()
+                self.set_power_pair("on", "on")
+                self.controller.mode.select("projector")
+                context = Context()
+                self.hass.states.async_set(remembered, "previous")
+                owners = iter(
+                    (player, "media_player.other" if owner_changed else player)
+                )
+
+                async def resolve(
+                    call, owners=owners, context=context
+                ) -> dict[str, str]:
+                    self.assertIs(call.context, context)
+                    return {"owner": "ma", "entity_id": next(owners)}
+
+                async def play(call, context=context) -> None:
+                    self.assertIs(call.context, context)
+                    await self.capture(call)
+
+                self.hass.services.async_register(
+                    "script",
+                    "music_remote_resolve",
+                    resolve,
+                    supports_response=SupportsResponse.ONLY,
+                )
+                self.hass.services.async_register("media_player", "media_play", play)
+                pressed = time.time() - 1
+                self.controller.physical_press("audio", pressed)
+                result = await music.async_run(
+                    {"command": "play_pause", "audio_received_ms": pressed * 1000},
+                    context=context,
+                )
+                self.assertEqual(
+                    result.service_response["status"],
+                    "rejected" if owner_changed else "accepted",
+                )
+                self.assertEqual(
+                    self.hass.states.get(remembered).state,
+                    "previous" if owner_changed else player,
+                )
+                self.assertEqual(
+                    self.appliance_calls(),
+                    []
+                    if owner_changed
+                    else [("media_player.media_play", {"entity_id": player})],
+                )
 
     async def test_off_projector_does_not_cue_for_oem_ir_or_leaving_speaker(
         self,

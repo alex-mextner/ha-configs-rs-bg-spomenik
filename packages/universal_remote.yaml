@@ -109,9 +109,17 @@ script:
             {{ [[current_target | float + (delta | int) * step, high] | min, low] | max }}
       - if: "{{ next_target | float != current_target | float }}"
         then:
-          - action: climate.set_temperature
-            target: { entity_id: climate.kondei_1 }
-            data: { temperature: "{{ next_target }}" }
+          - if: "{{ received_ms is defined }}"
+            then:
+              - action: ekf_appliances.remote_captured_action
+                data:
+                  received_ms: "{{ received_ms }}"
+                  button: "{{ 'channel_up' if delta | int > 0 else 'channel_down' }}"
+                  temperature: "{{ next_target }}"
+            else:
+              - action: climate.set_temperature
+                target: { entity_id: climate.kondei_1 }
+                data: { temperature: "{{ next_target }}" }
         else:
           - action: ekf_appliances.remote_reject
             data: { reason: ac_setpoint_limit }
@@ -150,10 +158,18 @@ script:
                     data: { reason: ac_weather_unavailable }
                   - stop: "Outdoor temperature from weather.forecast_home_assistant is unavailable in Celsius; AC remains off"
                     error: true
-              - action: climate.set_hvac_mode
-                target: { entity_id: climate.kondei_1 }
-                data:
-                  hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
+              - if: "{{ received_ms is defined }}"
+                then:
+                  - action: ekf_appliances.remote_captured_action
+                    data:
+                      received_ms: "{{ received_ms }}"
+                      button: prime
+                      hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
+                else:
+                  - action: climate.set_hvac_mode
+                    target: { entity_id: climate.kondei_1 }
+                    data:
+                      hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
           - conditions: "{{ states('climate.kondei_1') in ['unknown', 'unavailable'] }}"
             sequence:
               - action: ekf_appliances.remote_reject
@@ -161,8 +177,16 @@ script:
               - stop: "AC state is unavailable; power command was not sent"
                 error: true
         default:
-          - action: climate.turn_off
-            target: { entity_id: climate.kondei_1 }
+          - if: "{{ received_ms is defined }}"
+            then:
+              - action: ekf_appliances.remote_captured_action
+                data:
+                  received_ms: "{{ received_ms }}"
+                  button: prime
+                  hvac_mode: "off"
+            else:
+              - action: climate.turn_off
+                target: { entity_id: climate.kondei_1 }
 
   # The integration owns mode, INPUT timing and focus expiry.
   # Keep these public script names and helpers for existing callers.
@@ -1121,11 +1145,12 @@ automation:
                 data:
                   delta: "{{ 1 if button == 'channel_up' else -1 }}"
                   received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
-          - conditions: "{{ button == 'smart' }}"
+          - conditions: "{{ button in ['smart', 'red', 'green', 'yellow'] }}"
             sequence:
-              - action: light.toggle
-                target:
-                  entity_id: light.gostinaia_globus_socket_1
+              - action: ekf_appliances.remote_captured_action
+                data:
+                  button: "{{ button }}"
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
           - conditions: "{{ button == 'power' }}"
             sequence:
               - action: ekf_appliances.remote_power
@@ -1137,15 +1162,6 @@ automation:
               {{ button in ['prime','prime_hold','disney','disney_hold'] or (button | string).startswith('samsung_ir_') }}
             sequence:
               - stop: Handled by a dedicated appliance automation or direct physical remote
-          - conditions: "{{ button in ['red','green','yellow'] }}"
-            sequence:
-              - action: light.turn_on
-                target:
-                  entity_id: light.rgbw_lamp_rgbw
-                data:
-                  rgbw_color: >-
-                    {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
-                  brightness: 255
           - conditions: "{{ button == 'audio' or route.audio_action | default('') == 'handled' }}"
             sequence:
               - if: "{{ route.audio_action | default('') == 'pending' }}"

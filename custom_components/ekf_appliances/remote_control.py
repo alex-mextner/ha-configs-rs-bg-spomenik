@@ -37,6 +37,12 @@ _ON = {"on", "playing", "paused", "idle", "buffering"}
 _SERVICE_CONTEXT = ContextVar("universal_remote_service_context", default=None)
 
 
+_LIGHT_COLORS = {
+    "red": [255, 0, 0, 0],
+    "green": [0, 255, 0, 0],
+    "yellow": [255, 255, 0, 0],
+}
+_YANDEX_STATION = "media_player.yandex_station_m0011hm00z86hg"
 _CAPTURED_ROUTE_LIMIT = 256
 _AUDIO_DOUBLE_SECONDS = 0.8
 _SPEAKER_CONTROLS = {
@@ -758,6 +764,73 @@ class RemoteController:
             )
         }
 
+    async def async_captured_action(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        """Authorize a fixed physical key action before forwarding to its target."""
+        button = data["button"]
+        payload: dict[str, Any] = {}
+        if button == "smart":
+            domain, service, entity = (
+                "light",
+                "toggle",
+                "light.gostinaia_globus_socket_1",
+            )
+        elif button in _LIGHT_COLORS:
+            domain, service, entity = "light", "turn_on", "light.rgbw_lamp_rgbw"
+            payload = {"rgbw_color": _LIGHT_COLORS[button], "brightness": 255}
+        elif button in {"channel_up", "channel_down"}:
+            domain, service, entity = "climate", "set_temperature", "climate.kondei_1"
+            payload = {"temperature": data["temperature"]}
+        elif button == "prime":
+            domain, entity = "climate", "climate.kondei_1"
+            service = "turn_off" if data["hvac_mode"] == "off" else "set_hvac_mode"
+            if service == "set_hvac_mode":
+                payload = {"hvac_mode": data["hvac_mode"]}
+        else:
+            domain, entity = "media_player", data["entity_id"]
+            service = {
+                "play": "media_play",
+                "pause": "media_pause",
+                "wave": "play_media",
+            }[data["playback"]]
+
+        await self._async_check_control(entity)
+        if button == "audio":
+            owner = await self.hass.services.async_call(
+                "script",
+                "music_remote_resolve",
+                blocking=True,
+                return_response=True,
+                context=_SERVICE_CONTEXT.get(),
+            )
+            if not owner or owner.get("entity_id") != entity:
+                return {"sent": False}
+            if service == "play_media":
+                if (
+                    entity != _YANDEX_STATION
+                    or owner.get("owner") != "speaker"
+                    or owner.get("speaker_backend") != "yandex"
+                ):
+                    return {"sent": False}
+                payload = {
+                    "media_content_type": "command",
+                    "media_content_id": "Включи мою волну",
+                }
+
+        # Keep validation and submission in the same task. A separate YAML
+        # service response can resume after newer physical power feedback.
+        route = await self.async_prepare(
+            {"button": button, "received_ms": data["received_ms"]}
+        )
+        if reason := route.get("blocked"):
+            return {"sent": False, "blocked": reason}
+        if button == "audio" and route.get("audio_action") != "play_pause":
+            return {"sent": False}
+        payload["entity_id"] = entity if button == "audio" else [entity]
+        return await self._async_service(
+            {"domain": domain, "service": service, "service_data": payload},
+            projector_action=False,
+        )
+
     async def async_dispatch(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """Forward a native service with caller context and final shutdown checks."""
         domain, service = data["domain"], data["service"]
@@ -898,6 +971,9 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
     async def dispatch(call: ServiceCall) -> ServiceResponse:
         return await controller().async_dispatch(call.data)
 
+    async def captured(call: ServiceCall) -> ServiceResponse:
+        return await controller().async_captured_action(call.data)
+
     async def playback(_call: ServiceCall) -> ServiceResponse:
         return await controller().async_start_projector_for_playback()
 
@@ -913,7 +989,37 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
         vol.Optional("pair"): vol.In(["tv", "projector"]),
         vol.Optional("native"): cv.boolean,
     }
+    received = {
+        vol.Required("received_ms"): vol.All(
+            vol.Coerce(float),
+            vol.Range(min=0, max=float("inf"), min_included=False, max_included=False),
+        )
+    }
     services = {
+        "remote_captured_action": (
+            captured,
+            vol.Any(
+                {**received, vol.Required("button"): vol.In(["smart", *_LIGHT_COLORS])},
+                {
+                    **received,
+                    vol.Required("button"): vol.In(["channel_up", "channel_down"]),
+                    vol.Required("temperature"): vol.All(
+                        vol.Coerce(float), vol.Range(min=16, max=30)
+                    ),
+                },
+                {
+                    **received,
+                    vol.Required("button"): "prime",
+                    vol.Required("hvac_mode"): vol.In(["off", "heat", "cool"]),
+                },
+                {
+                    **received,
+                    vol.Required("button"): "audio",
+                    vol.Required("entity_id"): cv.entity_domain("media_player"),
+                    vol.Required("playback"): vol.In(["play", "pause", "wave"]),
+                },
+            ),
+        ),
         "remote_prepare": (
             prepare,
             {

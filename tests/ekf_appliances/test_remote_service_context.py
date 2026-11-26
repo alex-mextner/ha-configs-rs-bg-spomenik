@@ -334,6 +334,31 @@ class RemoteServiceContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.mode.pair, "tv")
         self.assertFalse(self.calls)
 
+    async def test_captured_actions_authorize_each_target_before_resolving_or_forwarding(
+        self,
+    ) -> None:
+        context = Context(user_id="denied")
+        self.permissions.check_entity.return_value = False
+        for button, entity, fields in (
+            ("smart", "light.gostinaia_globus_socket_1", {}),
+            ("red", "light.rgbw_lamp_rgbw", {}),
+            ("channel_up", "climate.kondei_1", {"temperature": 25}),
+            ("prime", "climate.kondei_1", {"hvac_mode": "cool"}),
+            (
+                "audio",
+                "media_player.test_music",
+                {"entity_id": "media_player.test_music", "playback": "play"},
+            ),
+        ):
+            with self.subTest(button=button), self.assertRaises(Unauthorized):
+                await self.call(
+                    "remote_captured_action",
+                    {"button": button, "received_ms": time.time() * 1000, **fields},
+                    context,
+                )
+            self.permissions.check_entity.assert_called_with(entity, "control")
+        self.assertFalse(self.calls)
+
     async def test_authorized_power_keeps_context_after_permission_check(self) -> None:
         context = Context(user_id="power-caller")
         self.runtime.projector_power_state = True
