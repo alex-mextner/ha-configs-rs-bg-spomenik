@@ -153,35 +153,30 @@ class TelevisionMediaRouting:
         return states or ([native] if native is not None else [])
 
     def command_candidates(self, native: State | None, service: str) -> list[State]:
-        """List the selected source and its supported Android fallback."""
+        """List same-device playback adapters in dispatch order for this service."""
         primary = self.choose(native)
         if primary is None:
             return []
         if primary.entity_id != self.entity_id(CONF_TV_CAST_ENTITY_ID):
             return [primary]
 
-        # An idle receiver app can advertise PLAY even without a Cast media
-        # session. Android still accepts physical transport keys on this device.
-        # Cast only publishes a position for an explicit media status. A
-        # finished item can report IDLE at 0 while its queue accepts track keys.
+        android = self.state(CONF_TV_ANDROIDTV_ENTITY_ID)
+        candidates = [android] if android is not None and self.ready(android) else []
+        if service not in _CAST_SESSION_SERVICES or primary.state in _ACTIVE:
+            return [primary, *candidates]
+
+        # An idle app can advertise media commands without a live session.
+        # Prefer Android. A reported position distinguishes explicit idle media
+        # status, allowing a supported Cast queue key as a last resort.
         position = primary.attributes.get("media_position")
-        idle_queue = (
+        if (
             primary.state == "idle"
             and service in {"media_next_track", "media_previous_track"}
             and type(position) in (float, int)
             and 0 <= position < float("inf")
-        )
-        result = (
-            [primary]
-            if service not in _CAST_SESSION_SERVICES
-            or primary.state in _ACTIVE
-            or idle_queue
-            else []
-        )
-        android = self.state(CONF_TV_ANDROIDTV_ENTITY_ID)
-        if android is not None and self.ready(android):
-            result.append(android)
-        return result
+        ):
+            candidates.append(primary)
+        return candidates
 
     def renamed_data(self) -> dict[str, str]:
         """Collect configured entity IDs changed in the registry."""

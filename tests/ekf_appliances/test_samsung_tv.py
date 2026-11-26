@@ -1473,12 +1473,19 @@ class SamsungMediaRoutingTests(SamsungAdapterTests):
         attrs = {"app_id": "2C6A6E3D", "supported_features": NATIVE_FEATURES}
         self.hass.states.async_set(cast, "idle", {**attrs, "media_position": 0})
         await self.player.async_media_previous_track()
+        self.hass.states.async_set(
+            android, "on", {"supported_features": int(Feature.NEXT_TRACK)}
+        )
+        await self.player.async_media_previous_track()
+        await self.player.async_media_next_track()
         self.hass.states.async_set(android, "unavailable")
         await self.player.async_media_next_track()
         self.assertEqual(
             self.native_calls,
             [
+                ("media_previous_track", {"entity_id": android}),
                 ("media_previous_track", {"entity_id": cast}),
+                ("media_next_track", {"entity_id": android}),
                 ("media_next_track", {"entity_id": cast}),
             ],
         )
