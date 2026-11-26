@@ -272,7 +272,7 @@ script:
         value_template: "{{ torrent_path | length > 1 }}"
       - action: script.projector_start_for_playback
         response_variable: projector_start
-      - if: "{{ projector_start.sent | default(false) is not sameas true }}"
+      - if: "{{ projector_start.ready | default(false) is not sameas true }}"
         then:
           - stop: Projector power was rejected
             error: true

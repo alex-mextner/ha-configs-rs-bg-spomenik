@@ -198,7 +198,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         if self.ready:
             self.hass.states.async_set(KODI, "idle")
         self.power_returned.set()
-        return {"sent": True}
+        return {"ready": True}
 
     async def start_playback(self, call) -> dict[str, Any]:
         payload = self.package["rest_command"]["host_kodi_fireplace"]["payload"]

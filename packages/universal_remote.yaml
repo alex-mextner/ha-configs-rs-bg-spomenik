@@ -81,6 +81,16 @@ script:
       delta:
         description: Temperature steps (+1 or -1)
     sequence:
+      - if: "{{ received_ms is defined }}"
+        then:
+          - action: ekf_appliances.remote_prepare
+            data:
+              button: "{{ 'channel_up' if delta | int > 0 else 'channel_down' }}"
+              received_ms: "{{ received_ms }}"
+            response_variable: route
+          - if: "{{ route.blocked | default('') != '' }}"
+            then:
+              - stop: Captured AC key is no longer available
       - variables:
           current_target: "{{ state_attr('climate.kondei_1', 'temperature') }}"
       - if: >-
@@ -112,6 +122,16 @@ script:
     alias: Remote AC power
     mode: single
     sequence:
+      - if: "{{ received_ms is defined }}"
+        then:
+          - action: ekf_appliances.remote_prepare
+            data:
+              button: "prime"
+              received_ms: "{{ received_ms }}"
+            response_variable: route
+          - if: "{{ route.blocked | default('') != '' }}"
+            then:
+              - stop: Captured AC key is no longer available
       - choose:
           - conditions: "{{ is_state('climate.kondei_1', 'off') }}"
             sequence:
@@ -598,6 +618,27 @@ script:
     mode: queued
     sequence:
       - action: script.source_to_projector
+      - if: "{{ state_attr('media_player.projector', 'power_sync_target') is sameas true }}"
+        then:
+          # Join the existing ON without issuing a second power intent. A newer
+          # OFF or failed startup cancels playback even if feedback is delayed.
+          - variables:
+              revision: "{{ state_attr('media_player.projector', 'power_intent_revision') }}"
+          - wait_template: >-
+              {{ state_attr('media_player.projector', 'power_sync_target') is not sameas true
+                 or state_attr('media_player.projector', 'power_intent_revision') != revision }}
+            timeout: "00:02:00"
+            continue_on_timeout: true
+          - variables:
+              result: >-
+                {{ {'ready': wait.completed and revision is not none
+                   and state_attr('media_player.projector', 'power_intent_revision') == revision
+                   and state_attr('media_player.projector', 'last_power_intent') is sameas true
+                   and state_attr('media_player.projector', 'power_sync_target') is none
+                   and state_attr('media_player.projector', 'power_sync_error') is none
+                   and states('media_player.projector') in ['on', 'idle', 'playing', 'paused', 'buffering']} }}
+          - stop: Return the existing projector startup result
+            response_variable: result
       - action: ekf_appliances.remote_dispatch
         data:
           domain: media_player
@@ -605,7 +646,9 @@ script:
           pair: projector
           service_data:
             entity_id: media_player.projector
-        response_variable: result
+        response_variable: dispatch
+      - variables:
+          result: "{{ {'ready': dispatch.sent | default(false) is sameas true} }}"
       - stop: Return the guarded projector start result
         response_variable: result
 
@@ -1107,6 +1150,7 @@ automation:
               - action: script.remote_ac_temperature
                 data:
                   delta: "{{ 1 if button == 'channel_up' else -1 }}"
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
           - conditions: "{{ button == 'smart' }}"
             sequence:
               - action: light.toggle
@@ -1153,7 +1197,9 @@ automation:
               - if: "{{ route.audio_action | default('') == 'play_pause' }}"
                 then:
                   - action: script.music_remote_command
-                    data: { command: play_pause }
+                    data:
+                      command: play_pause
+                      audio_received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
               - stop: Physical Audio gesture or speaker dismissal handled
           - conditions: >-
               {{ button != 'audio' and
@@ -1285,14 +1331,9 @@ automation:
              and current.attributes.event_type == 'prime' }}
     action:
       # A held key also emits prime_hold; it must not send a second command.
-      - action: script.remote_modes_prepare
-        data:
-          button: prime
-          received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
-        response_variable: route
-      - condition: template
-        value_template: "{{ route.blocked | default('') == '' }}"
       - action: script.remote_ac_toggle
+        data:
+          received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
 
   # ===== Remember the AC's last non-off mode =====
   # Retain the legacy helper for external callers; it does not select the

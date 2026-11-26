@@ -354,7 +354,8 @@ class RemoteController:
             self._pending_audio = None
             if self.mode.audio:
                 self.mode.set_audio(active=False, at=at)
-            elif (
+                return {**route, "speaker": True, "audio_action": "handled"}
+            if (
                 previous is not None
                 and self._captured_routes.get(previous, {}).get("audio_action")
                 == "pending"
@@ -456,18 +457,20 @@ class RemoteController:
                     else "expired_remote_press"
                 )
                 route = {**self.resolve({}), "blocked": reason}
-            elif data["button"] != "power" and not route.get("blocked"):
-                # Preserve the captured owner and recheck it after the YAML queue.
-                route = self._prepare_press(
-                    data["button"], route=route, reserve_power=False
-                )
+        await self.async_mirror()
+        if data["button"] != "power" and not route.get("blocked"):
+            # Mirroring can wait for helper service calls. Keep the captured
+            # owner and recheck its power after the last suspension point.
+            self.refresh()
+            route = self._prepare_press(
+                data["button"], route=route, reserve_power=False
+            )
         if reason := route.get("blocked"):
             press_id = None
             if received is not None:
                 key = self._capture_key(data["button"], received)
                 press_id = self._captured_press_ids.get(key, f"{key[0]}:{key[1]:.3f}")
             await self.async_reject(reason, press_id=press_id)
-        await self.async_mirror()
         return route
 
     def _pending_power_request(self) -> tuple[str, str, float] | None:
@@ -526,6 +529,7 @@ class RemoteController:
             and not route.get("speaker", self.mode.audio)
             and button not in {"input", "power"}
             and button not in INTERNAL_KEYS
+            and not button.startswith("samsung_ir_")
             and self.runtime.projector_power_state is not True
         ):
             return self._ordinary_command_blocked("projector")

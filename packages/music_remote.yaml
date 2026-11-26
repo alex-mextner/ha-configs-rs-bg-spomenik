@@ -247,6 +247,18 @@ script:
             error: true
       - action: script.music_remote_resolve
         response_variable: route
+      - if: "{{ audio_received_ms is defined }}"
+        then:
+          # A physical single Audio press can wait in this queue behind another
+          # music request. Its captured display must still allow the command.
+          - action: ekf_appliances.remote_prepare
+            data:
+              button: audio
+              received_ms: "{{ audio_received_ms }}"
+            response_variable: captured
+          - if: "{{ captured.blocked | default('') != '' or captured.audio_action | default('') != 'play_pause' }}"
+            then:
+              - stop: Captured Audio press no longer authorizes playback
       - variables:
           target_entity: >-
             {{ route.speaker_entity_id
