@@ -140,6 +140,19 @@ class StartupCancellationTests(unittest.TestCase):
         self.assertEqual(self.stop_calls(), [])
         self.assertFalse(any(argv[1] == "show" for argv, _ in self.unit.calls))
 
+    def test_unit_stop_outlasts_the_unit_stop_window(self) -> None:
+        # kodi.service blocks `systemctl stop` until Kodi has saved its state (TimeoutStopSec=60).
+        self.unit.state = "active"
+        self.host.kodi_jsonrpc_quit = Mock(return_value={"ok": True})
+        clock = iter([0, 100])
+        self.host.time = types.SimpleNamespace(
+            monotonic=lambda: next(clock), sleep=Mock()
+        )
+        self.host._fireplace_http.time = self.host.time
+        self.host.stop_kodi()
+        ((_, timeout),) = self.stop_calls()
+        self.assertGreater(timeout, 60)
+
     def test_start_completing_during_status_read_uses_graceful_shutdown(self) -> None:
         self.unit.before_show = "active"
         result = self.host.stop_kodi()

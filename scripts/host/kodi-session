@@ -1,0 +1,42 @@
+#!/bin/sh
+# Kodi session for kodi.service (ODROID-N2). With a display on the HDMI connector Kodi drives it
+# directly through GBM/KMS; with nothing connected it runs inside a virtual X server so the JSON-RPC
+# API, library scans and HA's media_player entity still work. The projector/TV is plugged in
+# after boot. The power-pair controller may take 5s to see Kodi start and the projector
+# needs about 18s to boot; allow its full startup deadline before choosing headless.
+#
+# Kodi runs as kodi.bin directly, not through the Debian /usr/bin/kodi wrapper: the wrapper traps
+# SIGTERM, forwards it and exits 143 at once without waiting for Kodi, so every `systemctl stop`
+# ended as Result=exit-code with Kodi still shutting down and later SIGKILLed. kodi.bin quits
+# cleanly with exit 0 on SIGTERM. Kept from the wrapper: its malloc threshold and the locale unset
+# ("Turkish I", xbmc/xbmc#19883); its restart loop on exit 65 is RestartForceExitStatus= in
+# kodi-clean-stop.conf.
+set -eu
+
+KODI_BIN=/usr/lib/aarch64-linux-gnu/kodi/kodi.bin
+export MALLOC_MMAP_THRESHOLD_=131072
+unset LC_CTYPE LC_ALL LANG
+
+hdmi_connected() {
+    for status in /sys/class/drm/*-HDMI-A-*/status; do
+        [ -r "$status" ] && [ "$(cat "$status")" = connected ] && return 0
+    done
+    return 1
+}
+
+waited=0
+while [ "$waited" -lt 90 ] && ! hdmi_connected; do
+    sleep 1
+    waited=$((waited + 1))
+done
+
+if hdmi_connected; then
+    exec "$KODI_BIN" --standalone --windowing=gbm
+fi
+
+# KillMode=mixed SIGKILLs Xvfb after Kodi exits, which leaves its lock and socket behind.
+pgrep -u "$(id -u)" -x Xvfb >/dev/null || rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+Xvfb :99 -screen 0 1280x720x24 -nolisten tcp &
+export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1
+sleep 2
+exec "$KODI_BIN" --standalone --windowing=x11
