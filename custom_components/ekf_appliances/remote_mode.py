@@ -66,7 +66,7 @@ class RemoteMode:
 
     The scheduler takes seconds and returns a cancellable handle. No Home
     Assistant timer rounding or subsequent keypress is needed for expiration.
-    Hardware writes are delegated only for the existing single-INPUT wake rule.
+    Mode selection has no hardware callback.
     """
 
     def __init__(
@@ -75,14 +75,12 @@ class RemoteMode:
         clock: Callable[[], float],
         schedule: Callable[[float, Callable[[], None]], TimerHandle],
         changed: Callable[[], None],
-        wake: Callable[[str, str], None],
     ) -> None:
-        """Bind timing, publication and wake callbacks to automatic routing."""
-        self.clock, self.schedule, self.changed, self.wake = (
+        """Bind timing and publication to automatic routing."""
+        self.clock, self.schedule, self.changed = (
             clock,
             schedule,
             changed,
-            wake,
         )
         self.pair, self.native, self.audio = "tv", False, False
         self.audio_expires_at = 0.0
@@ -330,16 +328,7 @@ class RemoteMode:
         if pending is None or not self._valid(pending):
             return
         destination = "tv" if pending.pair == "projector" else "projector"
-        wake = (
-            destination == "projector"
-            and self.displays["projector"] is False
-            and self.displays["tv"] is True
-            and self.targets["projector"] is not True
-            and not self.shutting_down
-        )
         self.select(destination, at=pending.at)
-        if wake:
-            self.wake(destination, pending.revisions[destination])
 
     def press(self, button: str, at: float | None = None) -> RemoteRoute:
         """Apply one accepted logical press at its trusted physical capture time."""
@@ -360,6 +349,14 @@ class RemoteMode:
         if self.audio and button in DISPLAY_ONLY_KEYS:
             # The display owns this press, including guards at physical reception.
             self.set_audio(active=False, at=at)
+        if (
+            self.pair == "projector"
+            and self.displays["projector"] is not True
+            and not self.audio
+            and button != "power"
+        ):
+            # An unavailable control cannot extend the selected display's lease.
+            return self.resolve()
         if self.expires_at:
             self.expires_at = max(self.expires_at, at + LEASE_SECONDS)
             self._arm_lease()

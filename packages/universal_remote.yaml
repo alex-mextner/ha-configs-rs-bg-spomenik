@@ -144,7 +144,7 @@ script:
           - action: climate.turn_off
             target: { entity_id: climate.kondei_1 }
 
-  # The integration owns mode, INPUT timing, focus expiry and wake intent.
+  # The integration owns mode, INPUT timing and focus expiry.
   # Keep these public script names and helpers for existing callers.
   remote_mode_select_pair:
     alias: Пульт — выбрать пару
@@ -565,15 +565,10 @@ script:
         data:
           pair: tv
           received_ms: "{{ received_ms | default(none) }}"
-      - action: ekf_appliances.remote_dispatch
-        data:
-          domain: media_player
-          service: turn_on
-          pair: tv
-          service_data:
-            entity_id: [media_player.ue48j5500_ue48j5500]
-        response_variable: result
-      - stop: Return the source power admission
+        response_variable: selected
+      - variables:
+          result: "{{ {'sent': selected.pair | default('') == 'tv'} }}"
+      - stop: Return the selection result
         response_variable: result
   source_to_pc:
     alias: Source → Kodi and projector
@@ -583,7 +578,7 @@ script:
         data:
           received_ms: "{{ received_ms | default(none) }}"
         response_variable: result
-      - stop: Return the named projector source admission
+      - stop: Return the projector selection result
         response_variable: result
   source_to_projector:
     alias: Source → projector
@@ -593,17 +588,27 @@ script:
         data:
           pair: projector
           received_ms: "{{ received_ms | default(none) }}"
+        response_variable: selected
+      - variables:
+          result: "{{ {'sent': selected.pair | default('') == 'projector'} }}"
+      - stop: Return the selection result
+        response_variable: result
+  projector_start_for_playback:
+    alias: Start the projector and Kodi for requested playback
+    mode: queued
+    sequence:
+      - action: script.source_to_projector
       - action: ekf_appliances.remote_dispatch
         data:
           domain: media_player
           service: turn_on
           pair: projector
           service_data:
-            entity_id:
-            - media_player.projector
+            entity_id: media_player.projector
         response_variable: result
-      - stop: Return the source power admission
+      - stop: Return the guarded projector start result
         response_variable: result
+
   app_launch_on_chromecast:
     alias: Launch app on Chromecast
     mode: single
@@ -617,7 +622,7 @@ script:
         response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:
-          - stop: Source power request was rejected
+          - stop: Source selection was rejected
       - action: ekf_appliances.remote_dispatch
         data:
           domain: remote
@@ -1142,6 +1147,9 @@ automation:
                       button: audio
                       received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                     response_variable: route
+              - if: "{{ route.blocked | default('') != '' }}"
+                then:
+                  - stop: Audio was rejected after the double-tap window
               - if: "{{ route.audio_action | default('') == 'play_pause' }}"
                 then:
                   - action: script.music_remote_command
@@ -1149,7 +1157,7 @@ automation:
               - stop: Physical Audio gesture or speaker dismissal handled
           - conditions: >-
               {{ button != 'audio' and
-                 route.speaker | default(is_state('input_boolean.audio_mode', 'on')) }}
+                 route.speaker | default(false) }}
             sequence:
               - action: script.audio_mode_dispatch
                 data:
@@ -1277,6 +1285,13 @@ automation:
              and current.attributes.event_type == 'prime' }}
     action:
       # A held key also emits prime_hold; it must not send a second command.
+      - action: script.remote_modes_prepare
+        data:
+          button: prime
+          received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+        response_variable: route
+      - condition: template
+        value_template: "{{ route.blocked | default('') == '' }}"
       - action: script.remote_ac_toggle
 
   # ===== Remember the AC's last non-off mode =====
@@ -1340,30 +1355,30 @@ automation:
       - if: "{{ route.blocked | default('') != '' }}"
         then:
           - stop: Projector command was rejected when received
-      - choose:
-          - conditions: "{{ ev == 'disney_hold' }}"
-            sequence:
-              - action: script.source_to_pc
-                data:
-                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
-                response_variable: source_result
-          - conditions: "{{ ev == 'disney' }}"
-            sequence:
-              # Wait 300ms for a possible disney_hold. If it arrives we abort.
-              - wait_for_trigger:
-                  - platform: state
-                    entity_id: event.ekf_universal_remote
-                timeout: "00:00:00.300"
-                continue_on_timeout: true
-              - if: >-
-                  {{ wait.trigger is not none and
-                     (wait.trigger.to_state.attributes.event_type | default('', true)) == 'disney_hold' }}
-                then:
-                  - stop: "hold detected, disney short suppressed"
-              - action: script.source_to_pc
-                data:
-                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
-                response_variable: source_result
+      - if: "{{ ev == 'disney' }}"
+        then:
+          - wait_for_trigger:
+              - platform: state
+                entity_id: event.ekf_universal_remote
+            timeout: "00:00:00.300"
+            continue_on_timeout: true
+          - if: >-
+              {{ wait.trigger is not none and
+                 (wait.trigger.to_state.attributes.event_type | default('', true)) == 'disney_hold' }}
+            then:
+              - stop: Hold detected
+          - action: script.remote_modes_prepare
+            data:
+              button: "{{ ev }}"
+              received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+            response_variable: route
+          - if: "{{ route.blocked | default('') != '' }}"
+            then:
+              - stop: Projector command was rejected after the hold window
+      - action: script.source_to_pc
+        data:
+          received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+        response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:
           - if: "{{ source_result.blocked | default('') == '' }}"

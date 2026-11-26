@@ -286,7 +286,6 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             clock=time.time,
             schedule=self.controller._schedule,
             changed=self.controller._changed,
-            wake=self.controller._wake,
         )
         self.controller._audio_mirror = None
         self.controller._pending_audio = None
@@ -471,6 +470,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(mode=mode, button=button):
                 self.reset(mode, target=target)
+                self.set_power_pair("on", "on")
                 await self.run_automation("universal_remote_dispatcher", button)
                 wanted = 25 if button == "channel_up" else 23
                 self.assertEqual(
@@ -515,6 +515,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         for mode in MODES:
             with self.subTest(mode=mode):
                 self.reset(mode)
+                self.set_power_pair("on", "on")
                 await self.run_automation("universal_remote_dispatcher", "smart")
                 self.assertEqual(
                     self.appliance_calls(), [("light.toggle", {"entity_id": [GLOBUS]})]
@@ -551,6 +552,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             wanted = "heat" if outdoor == 23.9 else "cool"
             with self.subTest(mode=mode, outdoor=outdoor):
                 self.reset(mode, ac_mode="off", target=30)
+                self.set_power_pair("on", "on")
                 self.weather(outdoor)
                 await self.run_automation("universal_remote_dispatcher", "prime")
                 await self.run_automation("universal_remote_prime", "prime")
@@ -572,6 +574,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         for mode in MODES:
             with self.subTest(mode=mode):
                 self.reset(mode, ac_mode="heat", target=30)
+                self.set_power_pair("on", "on")
                 await self.run_automation("universal_remote_dispatcher", "prime")
                 await self.run_automation("universal_remote_prime", "prime")
                 self.assertEqual(
@@ -834,6 +837,187 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(mode.expires_at, 0)
                 self.assertEqual(self.appliance_calls(), [])
 
+    async def test_selected_off_projector_rejects_every_device_key(self) -> None:
+        buttons = (
+            "up",
+            "down",
+            "left",
+            "right",
+            "ok",
+            "ok_hold",
+            "menu",
+            "back",
+            "home",
+            "guide",
+            "info",
+            "exit",
+            "play",
+            "prev",
+            "next",
+            "volume_up",
+            "volume_down",
+            "mute",
+            "t9_add_2_a",
+            "t9_cycle_2_b",
+            "dash",
+            "netflix",
+            "youtube",
+            "apple_tv",
+            "disney",
+            "disney_hold",
+            "audio",
+            "prime",
+            "prime_hold",
+            "smart",
+            "red",
+            "green",
+            "yellow",
+            "channel_up",
+            "channel_down",
+        )
+        for native in (False, True):
+            self.reset()
+            self.set_power_pair("on", "off")
+            self.controller.mode.select("projector", native=native)
+            deadline = self.controller.mode.expires_at
+            for button in buttons:
+                with self.subTest(native=native, button=button):
+                    await self.run_automation("universal_remote_dispatcher", button)
+                    if button == "prime":
+                        await self.run_automation("universal_remote_prime", button)
+                    if button in {"disney", "disney_hold"}:
+                        await self.run_automation("universal_remote_disney", button)
+                    self.assertEqual(self.controller.mode.pair, "projector")
+                    self.assertFalse(self.controller.mode.audio)
+                    self.assertEqual(self.controller.mode.expires_at, deadline)
+                    self.assertEqual(self.appliance_calls(), [])
+            await self.run_automation("universal_remote_dispatcher", "power")
+            self.assertEqual(
+                self.appliance_calls(),
+                [
+                    ("media_player.turn_on", {"entity_id": PROJECTOR}),
+                ],
+            )
+
+    async def test_queued_projector_key_keeps_off_guard_after_automatic_fallback(
+        self,
+    ) -> None:
+        for button in ("play", "smart", "red", "channel_up", "audio", "netflix"):
+            with self.subTest(button=button):
+                self.reset()
+                self.set_power_pair("on", "on")
+                self.controller.mode.select("projector")
+                pressed = time.time()
+                self.controller.physical_press(button, pressed)
+                self.set_power_pair("on", "off")
+                self.controller.refresh()
+                await self.dispatch_captured(button, pressed)
+                self.assertEqual(self.appliance_calls(), [])
+
+    async def test_projector_turns_off_during_gesture_wait(self) -> None:
+        for button, automation in [
+            ("audio", "universal_remote_dispatcher"),
+            ("disney", "universal_remote_disney"),
+            ("disney_hold", "universal_remote_disney"),
+        ]:
+            with self.subTest(button=button):
+                self.reset()
+                self.set_power_pair("on", "on")
+                self.controller.mode.select("projector")
+                admitted = asyncio.Event()
+                selected = asyncio.Event()
+
+                async def select(call, selected=selected) -> Any:
+                    if stack := script_stack_cv.get():
+                        script_stack_cv.set(stack.copy())
+                    result = await self.scripts["source_to_pc"].async_run(
+                        dict(call.data), context=call.context
+                    )
+                    selected.set()
+                    return result.service_response
+
+                self.hass.services.async_register(
+                    "script",
+                    "source_to_pc",
+                    select,
+                    supports_response=SupportsResponse.OPTIONAL,
+                )
+                original = self.controller.async_prepare
+
+                async def prepare(data, admitted=admitted, original=original) -> Any:
+                    route = await original(data)
+                    admitted.set()
+                    return route
+
+                with patch.object(self.controller, "async_prepare", prepare):
+                    task = asyncio.create_task(self.run_automation(automation, button))
+                    try:
+                        await asyncio.wait_for(admitted.wait(), 1)
+                        if button == "disney_hold":
+                            await asyncio.wait_for(selected.wait(), 1)
+                        self.set_power_pair("on", "off")
+                        self.controller.refresh()
+                        await asyncio.wait_for(task, 3)
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                self.assertEqual(self.appliance_calls(), [])
+                self.assertEqual(self.controller.mode.pair, "tv")
+
+    async def test_app_activity_cannot_wake_off_or_unknown_tv(self) -> None:
+        for state in ("off", "unknown", "unavailable"):
+            self.reset()
+            self.set_power_pair(state, "on")
+            await self.scripts["app_launch_on_chromecast"].async_run(
+                {"activity": "com.netflix.ninja"}, context=Context()
+            )
+            self.assertEqual(self.appliance_calls(), [])
+            reasons = [
+                data["reason"]
+                for action, data in self.calls
+                if action == "remote_announcements.reject"
+            ]
+            self.assertEqual(
+                reasons, ["tv_off" if state == "off" else "tv_power_unknown"]
+            )
+
+    async def test_explicit_projector_playback_starts_its_guarded_pair(self) -> None:
+        self.reset()
+        self.set_power_pair("on", "off")
+        await self.scripts["projector_start_for_playback"].async_run(
+            {}, context=Context()
+        )
+        self.assertEqual(self.controller.mode.pair, "projector")
+        self.assertEqual(
+            self.appliance_calls(), [("media_player.turn_on", {"entity_id": PROJECTOR})]
+        )
+
+        self.calls.clear()
+        self.runtime.projector_shutting_down = True
+        result = await self.scripts["projector_start_for_playback"].async_run(
+            {}, context=Context()
+        )
+        self.assertEqual(
+            result.service_response,
+            {"sent": False, "blocked": "projector_shutting_down"},
+        )
+        self.assertEqual(self.appliance_calls(), [])
+
+    async def test_source_scripts_select_off_displays_without_hardware(self) -> None:
+        for name, target in [
+            ("source_to_projector", "projector"),
+            ("source_to_pc", "projector"),
+            ("source_to_chromecast", "tv"),
+        ]:
+            with self.subTest(name=name):
+                self.reset()
+                self.set_power_pair("off", "off")
+                self.controller.mode.select("projector" if target == "tv" else "tv")
+                result = await self.scripts[name].async_run({}, context=Context())
+                self.assertTrue(result.service_response["sent"])
+                self.assertEqual(self.controller.mode.pair, target)
+                self.assertEqual(self.appliance_calls(), [])
+
     async def test_standalone_source_scripts_still_dismiss_speaker_focus(self) -> None:
         for name in ("source_to_pc", "source_to_projector", "source_to_chromecast"):
             with self.subTest(script=name):
@@ -1076,6 +1260,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.reset()
+        self.set_power_pair("on", "on")
         at = time.time()
         self.controller.mode.clock = lambda: at
         self.controller.physical_press("audio", at)
@@ -1534,6 +1719,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(button=button, audio=audio):
                 self.reset(("projector", audio, "off"))
+                self.set_power_pair("on", "on")
                 self.controller.mode.expires_at = time.time() + 1
                 received_ms = time.time() * 1000
                 await self.prepare_mode(button, received_ms=received_ms)
@@ -1843,7 +2029,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 await self.hass.async_block_till_done()
                 self.assertEqual(
                     self.appliance_calls(),
-                    [("script.music_remote_command", {"command": "play_pause"})],
+                    [],
                 )
                 clock.now = deadline + 0.01
                 self.controller.refresh()
@@ -2282,7 +2468,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.mode.expires_at, 0)
         self.assertEqual(self.appliance_calls(), [])
 
-    async def test_single_input_selects_either_pair_but_only_wakes_projector(
+    async def test_single_input_selects_either_off_pair_without_waking(
         self,
     ) -> None:
         for tv, projector in [("on", "off"), ("off", "on")]:
@@ -2298,20 +2484,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                     route,
                     {"pair": selected, "native": False, "blocked": f"{selected}_off"},
                 )
-                self.assertEqual(
-                    self.appliance_calls(),
-                    [
-                        (
-                            "ekf_appliances.wake_if_current",
-                            {
-                                "entity_id": PROJECTOR,
-                                "expected_revision": "projector:0",
-                            },
-                        )
-                    ]
-                    if selected == "projector"
-                    else [],
-                )
+                self.assertEqual(self.appliance_calls(), [])
                 self.assertLessEqual(self.controller.mode.expires_at - time.time(), 60)
                 self.assertEqual(
                     self.hass.states.get(
@@ -2568,6 +2741,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         for button in ("disney", "disney_hold"):
             with self.subTest(button=button):
                 self.reset()
+                self.set_power_pair("on", "on")
                 await self.run_automation("universal_remote_disney", button)
                 cues = [
                     data

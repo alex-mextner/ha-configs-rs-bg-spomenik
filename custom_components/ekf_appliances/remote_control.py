@@ -81,7 +81,6 @@ _MEDIA_BUTTONS = {
     "dash",
     *map(str, range(10)),
 }
-_WAKE_SERVICES = {"turn_on", "turn_off", "toggle", "select_source", "play_media"}
 
 
 class PowerConfirmationTimeoutError(HomeAssistantError):
@@ -128,7 +127,6 @@ class RemoteController:
             clock=time.time,
             schedule=self._schedule,
             changed=self._changed,
-            wake=self._wake,
         )
         self.mode.shutting_down = runtime.projector_shutting_down
 
@@ -344,35 +342,6 @@ class RemoteController:
                 if state is not None and state.state == ("on" if audio else "off"):
                     self._audio_mirror = None
 
-    def _wake(self, pair: str, revision: str) -> None:
-        async def wake() -> None:
-            self.refresh()
-            if reason := self._pair_transition(pair):
-                await self.async_reject(reason)
-                return
-            try:
-                await self._async_owned_power(
-                    pair,
-                    self.hass.services.async_call(
-                        DOMAIN,
-                        "wake_if_current",
-                        {
-                            "entity_id": PROJECTOR if pair == "projector" else TV,
-                            "expected_revision": revision,
-                        },
-                        blocking=True,
-                        context=_SERVICE_CONTEXT.get(),
-                    ),
-                )
-            except HomeAssistantError as err:
-                if not isinstance(err, PowerConfirmationTimeoutError):
-                    await self.async_reject("wake_rejected")
-                _LOGGER.warning("Remote single INPUT wake was not accepted: %s", err)
-            finally:
-                self.refresh()
-
-        self._spawn(wake())
-
     @staticmethod
     def _capture_key(button: str, received_ms: float) -> tuple[str, float]:
         return button, round(received_ms, 3)
@@ -422,7 +391,8 @@ class RemoteController:
                 return
             self.refresh(physical_at=received_at)
             route = self.mode.press(button, received_at)
-            route = self._capture_speaker(button, received_at, key, route)
+            if not self._projector_key_blocked(button, route):
+                route = self._capture_speaker(button, received_at, key, route)
             if button == "ok_hold" and press_id is not None:
                 # Both events from one physical OK share the first event's owner
                 # even if focus changes between separate receiver frames.
@@ -480,9 +450,17 @@ class RemoteController:
                 if route.get("audio_action") == "pending":
                     route["audio_action"] = "play_pause"
             if route is None:
-                route = self.resolve({})
-                if data["button"] == "power":
-                    route = {**route, "blocked": "expired_power_press"}
+                reason = (
+                    "expired_power_press"
+                    if data["button"] == "power"
+                    else "expired_remote_press"
+                )
+                route = {**self.resolve({}), "blocked": reason}
+            elif data["button"] != "power" and not route.get("blocked"):
+                # Preserve the captured owner and recheck it after the YAML queue.
+                route = self._prepare_press(
+                    data["button"], route=route, reserve_power=False
+                )
         if reason := route.get("blocked"):
             press_id = None
             if received is not None:
@@ -542,6 +520,17 @@ class RemoteController:
             return f"{pair}_power_unknown"
         return f"{pair}_off" if observed is False else None
 
+    def _projector_key_blocked(self, button: str, route: RemoteRoute) -> str | None:
+        if (
+            route["pair"] == "projector"
+            and not route.get("speaker", self.mode.audio)
+            and button not in {"input", "power"}
+            and button not in INTERNAL_KEYS
+            and self.runtime.projector_power_state is not True
+        ):
+            return self._ordinary_command_blocked("projector")
+        return None
+
     def _prepare_press(
         self,
         button: str,
@@ -563,12 +552,14 @@ class RemoteController:
                     asyncio.get_running_loop().time() + _POWER_CAPTURE_TIMEOUT,
                 )
                 return {**route, "power_request_id": request_id}
+        elif reason := self._projector_key_blocked(button, route):
+            return {**route, "blocked": reason}
         elif button in _MEDIA_BUTTONS and not speaker:
             reason = self._ordinary_command_blocked(route["pair"])
         elif button in {"netflix", "youtube", "apple_tv"} and not speaker:
-            reason = self._pair_transition("tv")
+            reason = self._ordinary_command_blocked("tv")
         elif button in {"disney", "disney_hold"}:
-            reason = self._pair_transition("projector")
+            reason = self._ordinary_command_blocked("projector")
         return {**route, "blocked": reason} if reason else route
 
     async def async_reject(
@@ -751,19 +742,22 @@ class RemoteController:
         for entity in entities:
             await self._async_check_control(entity)
         self.refresh()
-        if pair is not None:
-            reason = (
-                self._pair_transition(pair)
-                if service in _WAKE_SERVICES
-                else self._ordinary_command_blocked(pair)
-            )
-            if reason:
-                return await self.async_reject(reason)
+        # Android TV accepts an app activity through remote.turn_on. It is an
+        # ordinary app command and may run only while the display is confirmed on.
         power_action = (
             pair is not None
             and domain in {"media_player", "remote"}
             and service in {"turn_on", "turn_off", "toggle"}
+            and "activity" not in payload
         )
+        if pair is not None:
+            reason = (
+                self._pair_transition(pair)
+                if power_action
+                else self._ordinary_command_blocked(pair)
+            )
+            if reason:
+                return await self.async_reject(reason)
         operation = self._async_service(
             data,
             projector_action=projector_action

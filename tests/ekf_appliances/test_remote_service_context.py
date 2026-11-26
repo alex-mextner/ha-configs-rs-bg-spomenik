@@ -303,12 +303,13 @@ class RemoteServiceContextTests(unittest.IsolatedAsyncioTestCase):
         for call in self.calls:
             self.assertIs(call.context, context)
 
-    async def test_delayed_wake_keeps_the_input_context(self) -> None:
+    async def test_delayed_input_only_publishes_the_selected_mode(self) -> None:
         context = Context(user_id="input-caller")
         await self.call("remote_prepare", {"button": "input"}, context)
-        await asyncio.wait_for(self.wake_seen.wait(), 2)
-        wake = next(call for call in self.calls if call.service == "wake_if_current")
-        self.assertIs(wake.context, context)
+        await asyncio.sleep(1.05)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.controller.mode.target, "kodi")
+        self.assertFalse(self.wake_seen.is_set())
 
     async def test_permission_denial_precedes_off_latch_or_device_call(self) -> None:
         context = Context(user_id="denied-by-policy")

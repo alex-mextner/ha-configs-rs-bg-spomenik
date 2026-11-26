@@ -270,7 +270,12 @@ script:
                     {{ base.rstrip('/') ~ '/' ~ title if base and title else '' }}
       - condition: template
         value_template: "{{ torrent_path | length > 1 }}"
-      - action: script.source_to_projector
+      - action: script.projector_start_for_playback
+        response_variable: projector_start
+      - if: "{{ projector_start.sent | default(false) is not sameas true }}"
+        then:
+          - stop: Projector power was rejected
+            error: true
       - action: rest_command.host_kodi_start
         continue_on_error: true
       - action: rest_command.host_kodi_sync_library

@@ -695,24 +695,6 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         await self.controller.async_close()
         self.assertEqual(self.controller._context_press_ids, {})
 
-    async def test_single_input_timeout_reports_one_rejection(self) -> None:
-        original = self.hass.services.async_call
-
-        async def waiting(domain, service, data, **kwargs: Any) -> Any:
-            if (domain, service) == ("ekf_appliances", "wake_if_current"):
-                await asyncio.Event().wait()
-            return await original(domain, service, data, **kwargs)
-
-        self.hass.services.async_call = waiting
-        with patch.object(controller_module, "_POWER_OPERATION_TIMEOUT", 0.01):
-            self.controller._wake("tv", "tv:0")
-            await asyncio.gather(*tuple(self.controller._tasks))
-        self.assertEqual(
-            [call[2]["reason"] for call in self.rejection_calls()],
-            ["power_confirmation_timeout"],
-        )
-        self.assertEqual(self.controller._power_operations, {})
-
     async def test_shutdown_refresh_during_rejection_preserves_blocked_response(
         self,
     ) -> None:
@@ -1163,7 +1145,9 @@ class RemoteControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         route = await self.controller.async_prepare(
             {"button": "input", "received_ms": 1000000.0}
         )
-        self.assertEqual(route, {"pair": "tv", "native": True})
+        self.assertEqual(
+            route, {"pair": "tv", "native": True, "blocked": "expired_remote_press"}
+        )
         self.assertIsNone(self.controller.mode.pending)
         self.assertEqual(self.controller.mode.expires_at, deadline)
 

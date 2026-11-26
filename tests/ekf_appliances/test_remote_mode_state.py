@@ -51,12 +51,10 @@ class RemoteModeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = Clock()
         self.targets = []
-        self.wakes = []
         self.mode = module.RemoteMode(
             clock=lambda: self.clock.now,
             schedule=self.clock.schedule,
             changed=lambda: self.targets.append(self.mode.target),
-            wake=lambda pair, revision: self.wakes.append((pair, revision)),
         )
         self.observe(tv=False, projector=False)
 
@@ -102,7 +100,6 @@ class RemoteModeTests(unittest.TestCase):
         self.clock.advance(1.011)
         self.assertEqual(self.mode.target, "kodi")
         self.assertFalse(self.mode.native)
-        self.assertEqual(self.wakes, [])
 
     def test_double_uses_original_pair_including_inclusive_1000ms(self) -> None:
         for gap in (0.150, 0.999, 1.000):
@@ -111,7 +108,6 @@ class RemoteModeTests(unittest.TestCase):
             self.assertEqual(self.mode.target, "tv")
             self.clock.advance(1.1)
             self.assertEqual(self.mode.target, "tv")
-            self.assertEqual(self.wakes, [])
 
     def test_projector_double_toggles_back_to_kodi(self) -> None:
         self.observe(tv=False, projector=True)
@@ -152,19 +148,16 @@ class RemoteModeTests(unittest.TestCase):
         self.input()
         self.clock.advance(1.011)
         self.assertEqual(self.mode.target, "chromecast")
-        self.assertEqual(self.wakes, [])
         self.double()
         self.assertEqual(self.mode.target, "tv")
-        self.assertEqual(self.wakes, [])
 
-    def test_single_wake_keeps_exact_60_seconds(self) -> None:
+    def test_single_selection_keeps_exact_60_seconds(self) -> None:
         self.observe(
             tv=True, projector=False, revisions={"tv": "t:1", "projector": "p:1"}
         )
         first = self.clock.now
         self.input()
         self.clock.advance(1.011)
-        self.assertEqual(self.wakes, [("projector", "p:1")])
         self.assertAlmostEqual(self.mode.expires_at, first + 60)
         self.clock.advance(60 - 1.011)
         self.assertEqual(self.mode.target, "chromecast")
@@ -191,7 +184,6 @@ class RemoteModeTests(unittest.TestCase):
             self.clock.advance(0.501)
         self.assertFalse(self.mode.audio)
         self.assertIsNotNone(self.mode.pending)
-        self.assertEqual(self.wakes, [])
 
         self.clock.advance(0.510)
         self.assertIsNone(self.mode.pending)
@@ -200,24 +192,22 @@ class RemoteModeTests(unittest.TestCase):
                 self.mode.pair,
                 self.mode.target,
                 self.mode.native,
-                self.wakes,
                 self.mode.expires_at,
             ),
             (
                 "tv" if from_projector else "projector",
                 "chromecast" if from_projector else "kodi",
                 False,
-                [] if from_projector else [("projector", "p:1")],
                 received + 60,
             ),
         )
 
-    def test_single_input_after_audio_timer_expiry_selects_and_wakes_projector(
+    def test_single_input_after_audio_timer_expiry_selects_off_projector(
         self,
     ) -> None:
         self.check_single_input_after_audio_expiry(observed=False, from_projector=False)
 
-    def test_single_input_after_observed_audio_expiry_selects_and_wakes_projector(
+    def test_single_input_after_observed_audio_expiry_selects_off_projector(
         self,
     ) -> None:
         self.check_single_input_after_audio_expiry(observed=True, from_projector=False)
@@ -293,7 +283,6 @@ class RemoteModeTests(unittest.TestCase):
         )
         self.clock.advance(1.1)
         self.assertEqual(self.mode.target, "chromecast")
-        self.assertEqual(self.wakes, [])
 
     def test_shutdown_forces_tv_and_blocks_manual_and_stale_route(self) -> None:
         self.observe(tv=False, projector=True)
@@ -313,7 +302,6 @@ class RemoteModeTests(unittest.TestCase):
         self.observe(tv=False, projector=True, shutdown=True)
         self.clock.advance(1.1)
         self.assertEqual(self.mode.target, "chromecast")
-        self.assertEqual(self.wakes, [])
 
     def test_fresh_tv_double_still_works_while_projector_shuts_down(self) -> None:
         self.observe(tv=True, projector=True, shutdown=True)
@@ -325,7 +313,6 @@ class RemoteModeTests(unittest.TestCase):
         self.input()
         self.clock.advance(1.011)
         self.assertEqual(self.mode.target, "chromecast")
-        self.assertEqual(self.wakes, [])
 
     def test_atomic_target_has_no_intermediate_projector_on_single(self) -> None:
         self.mode.select("tv", native=True)

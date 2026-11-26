@@ -145,17 +145,18 @@ projector commands until fresh HDMI OFF, without permanently locking TV Power.
 
 Ordinary navigation, text, volume and transport are rejected while their pair is
 busy, OFF or unknown. A rejection captured while busy cannot be replayed after
-completion. Explicit source/app selection and INPUT can address an idle named
-pair, while lighting, AC and speaker controls remain independent. Recognized
+completion. Source selection leaves both displays at their observed power state.
+App shortcuts require their destination display to be on. While the off projector
+is selected, only Power and INPUT are available. Explicit speaker mode retains
+its own controls. Recognized
 rejections produce a short quiet error cue. Receiver identities give a held OK
 or repeating navigation/volume key one cue for its original press, while separate
 rapid taps stay distinct. Voice search rechecks the same guard before each step.
 The remote boundary does not change the native adapter's explicit power
 reconciliation described above.
 
-A single INPUT changes the display group. Selecting TV leaves an off TV asleep.
-Selecting the projector when the TV is on can wake the projector using the
-captured power-intent revision. A double INPUT keeps
+A single INPUT changes the display group without issuing a hardware command.
+A double INPUT keeps
 the original group and toggles Chromecast/TV or Kodi/projector. INPUT decisions
 use the first physical press's snapshot; intervening OFF invalidates that snapshot.
 
@@ -198,13 +199,6 @@ with `explicit: false` keeps it. Delayed physical app/source selection retains t
 original press time, so it cannot replace a newer speaker/display choice or restart
 its sixty-second lease. Direct source-script calls still select immediately.
 
-
-Queued INPUT wakes call `ekf_appliances.wake_if_current` on the canonical media
-entity with its captured `power_intent_revision`. The controller compares that
-opaque token and records ON atomically, without awaiting between the two steps.
-A newer request, including a coalesced duplicate OFF, rejects the old wake before
-any appliance command. A new controller instance has a different token, so a
-restored helper cannot authorize an old request after reload.
 
 `last_power_intent` and `power_intent_revision` remain available after completion;
 `power_sync_target` describes only a pending operation. Unchanged feedback,
