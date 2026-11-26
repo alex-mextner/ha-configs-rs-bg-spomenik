@@ -519,7 +519,7 @@ class SamsungTvMediaPlayer(
             error_message = "The television is off"
             raise HomeAssistantError(error_message)
         required = _NATIVE_SERVICES[service]
-        candidates = self.media_routing.command_candidates(self._backend_state)
+        candidates = self.media_routing.command_candidates(self._backend_state, service)
         if service == "play_media" and data.get("media_content_type") == "app":
             android = self.media_routing.state(CONF_TV_ANDROIDTV_ENTITY_ID)
             if self.media_routing.source == "chromecast" and self.media_routing.ready(

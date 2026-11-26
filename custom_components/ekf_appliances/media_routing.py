@@ -30,6 +30,14 @@ MEDIA_CONFIG_KEYS = (
     CONF_TV_SOURCE_ENTITY_ID,
 )
 _ACTIVE = {"playing", "paused", "buffering"}
+_CAST_SESSION_SERVICES = {
+    "media_play",
+    "media_pause",
+    "media_play_pause",
+    "media_stop",
+    "media_next_track",
+    "media_previous_track",
+}
 _UNAVAILABLE = {"off", "unknown", "unavailable"}
 _MA_CAST_APP = "C35B0678"
 
@@ -144,20 +152,24 @@ class TelevisionMediaRouting:
         ]
         return states or ([native] if native is not None else [])
 
-    def command_candidates(self, native: State | None) -> list[State]:
+    def command_candidates(self, native: State | None, service: str) -> list[State]:
         """List the selected source and its supported Android fallback."""
         primary = self.choose(native)
-        result = [primary] if primary is not None else []
-        # Cast has complete metadata but some Android apps lack MediaSession
-        # actions. Only those unsupported actions fall back to Android Remote.
-        if (
-            primary is not None
-            and self.source == "chromecast"
-            and primary.entity_id == self.entity_id(CONF_TV_CAST_ENTITY_ID)
-        ):
-            android = self.state(CONF_TV_ANDROIDTV_ENTITY_ID)
-            if self.ready(android):
-                result.append(android)
+        if primary is None:
+            return []
+        if primary.entity_id != self.entity_id(CONF_TV_CAST_ENTITY_ID):
+            return [primary]
+
+        # An idle receiver app can advertise PLAY even without a Cast media
+        # session. Android still accepts physical transport keys on this device.
+        result = (
+            []
+            if service in _CAST_SESSION_SERVICES and primary.state not in _ACTIVE
+            else [primary]
+        )
+        android = self.state(CONF_TV_ANDROIDTV_ENTITY_ID)
+        if android is not None and self.ready(android):
+            result.append(android)
         return result
 
     def renamed_data(self) -> dict[str, str]:
