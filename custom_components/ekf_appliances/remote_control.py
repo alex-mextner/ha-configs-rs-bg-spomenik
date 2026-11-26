@@ -458,7 +458,11 @@ class RemoteController:
                 )
                 route = {**self.resolve({}), "blocked": reason}
         await self.async_mirror()
-        if data["button"] != "power" and not route.get("blocked"):
+        if (
+            data["button"] != "power"
+            and not route.get("blocked")
+            and route.get("audio_action") != "handled"
+        ):
             # Mirroring can wait for helper service calls. Keep the captured
             # owner and recheck its power after the last suspension point.
             self.refresh()
@@ -715,6 +719,45 @@ class RemoteController:
             owns_shutdown=pair == "projector" and service == "turn_off",
         )
 
+    async def async_start_projector_for_playback(self) -> dict[str, bool]:
+        """Authorize, select and confirm the projector pair for requested playback."""
+        await self._async_check_control(PROJECTOR)
+        self.refresh()
+        pair = self.runtime.projector_power_pair
+        if self._closed or pair is None or self.runtime.projector_shutting_down:
+            return {"ready": False}
+        shutdown_at = self.runtime.shutdown.requested_at
+        self.mode.select("projector")
+        if pair.target is True:
+            if not await pair.wait_for_start():
+                return {"ready": False}
+        else:
+            if self._pair_transition("projector"):
+                return {"ready": False}
+            await self._async_owned_power(
+                "projector",
+                self._async_service(
+                    {
+                        "domain": "media_player",
+                        "service": "turn_on",
+                        "service_data": {"entity_id": PROJECTOR},
+                    },
+                    projector_action=True,
+                    power_lifecycle=True,
+                ),
+            )
+        self.refresh()
+        return {
+            "ready": (
+                not self._closed
+                and self.runtime.projector_power_pair is pair
+                and not self.runtime.projector_shutting_down
+                and self.runtime.shutdown.requested_at == shutdown_at
+                and self.runtime.projector_power_state is True
+                and pair.confirmed_on
+            )
+        }
+
     async def async_dispatch(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """Forward a native service with caller context and final shutdown checks."""
         domain, service = data["domain"], data["service"]
@@ -752,7 +795,9 @@ class RemoteController:
             pair is not None
             and domain in {"media_player", "remote"}
             and service in {"turn_on", "turn_off", "toggle"}
-            and "activity" not in payload
+            and not (
+                domain == "remote" and service == "turn_on" and "activity" in payload
+            )
         )
         if pair is not None:
             reason = (
@@ -853,6 +898,9 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
     async def dispatch(call: ServiceCall) -> ServiceResponse:
         return await controller().async_dispatch(call.data)
 
+    async def playback(_call: ServiceCall) -> ServiceResponse:
+        return await controller().async_start_projector_for_playback()
+
     async def power(call: ServiceCall) -> ServiceResponse:
         return await controller().async_power(call.data)
 
@@ -885,6 +933,7 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
             },
         ),
         "remote_resolve": (resolve, pair),
+        "projector_start_for_playback": (playback, {}),
         "remote_power": (power, {**pair, vol.Optional("power_request_id"): cv.string}),
         "remote_reject": (
             reject,

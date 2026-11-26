@@ -27,6 +27,10 @@ wake_if_current:
       selector:
         text:
 
+projector_start_for_playback:
+  name: Start projector for playback
+  description: Select the projector and wait for both the display and Kodi to confirm startup.
+
 remote_prepare:
   name: Prepare universal remote mode
   description: Resolve one accepted physical key through the canonical mode controller.

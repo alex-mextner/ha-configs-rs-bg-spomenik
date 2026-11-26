@@ -107,6 +107,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.calls, self.scripts = [], {}
         self.completed, self.last_trace = [], []
         self.power_failure = False
+        self.power_result = True
         self.projector_refresh_attributes = None
         self.projector_refresh_error = False
         self.projector_refresh_states = []
@@ -198,7 +199,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         if self.ready:
             self.hass.states.async_set(KODI, "idle")
         self.power_returned.set()
-        return {"ready": True}
+        return {"ready": self.power_result}
 
     async def start_playback(self, call) -> dict[str, Any]:
         payload = self.package["rest_command"]["host_kodi_fireplace"]["payload"]
@@ -452,6 +453,12 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.launches())
         self.assertEqual(self.counter, 0)
         self.assertEqual(self.hass.states.get(PROJECTOR).state, "off")
+
+    async def test_rejected_playback_readiness_never_opens_fireplace(self) -> None:
+        self.power_result = False
+        await self.launch()
+        self.assert_aborted()
+        self.assertFalse(self.launches())
 
     async def test_pair_failure_never_opens_media(self) -> None:
         self.power_failure = True

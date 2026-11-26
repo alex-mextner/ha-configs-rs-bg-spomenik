@@ -501,6 +501,54 @@ class PowerPairTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.pair.last_intent, expr2=False)
         self.assertEqual(self.calls, [])
 
+    async def test_playback_waiters_share_one_start_and_caller_cancellation(
+        self,
+    ) -> None:
+        self.hold["display"] = asyncio.Event()
+        first = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        retained = asyncio.create_task(self.pair.wait_for_start())
+        cancelled = asyncio.create_task(self.pair.wait_for_start())
+        duplicate = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        cancelled.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await cancelled
+        self.hold["display"].set()
+        await asyncio.gather(first, duplicate)
+        self.assertTrue(await retained)
+        self.assertEqual(self.calls, [("display", True), ("player", True)])
+
+    async def test_playback_waiter_rejects_confirmation_failure(self) -> None:
+        self.hold["display"] = asyncio.Event()
+        self.failed_endpoints.add("display")
+        first = asyncio.create_task(self.pair.request(target=True))
+        await self.settle()
+        joined = asyncio.create_task(self.pair.wait_for_start())
+        await self.settle()
+        self.hold["display"].set()
+        with self.assertRaises(HomeAssistantError):
+            await first
+        self.assertFalse(await joined)
+
+    async def test_playback_waiter_rejects_superseding_off_or_unload(self) -> None:
+        for unload in (False, True):
+            with self.subTest(unload=unload):
+                self.hold["display"] = asyncio.Event()
+                first = asyncio.create_task(self.pair.request(target=True))
+                await self.settle()
+                joined = asyncio.create_task(self.pair.wait_for_start())
+                await self.settle()
+                if unload:
+                    await self.pair.close()
+                else:
+                    off = asyncio.create_task(self.pair.request(target=False))
+                    await self.settle()
+                    self.hold["display"].set()
+                    await off
+                self.assertFalse(await joined)
+                await asyncio.gather(first, return_exceptions=True)
+
     async def test_coalesced_request_records_a_new_intent_without_duplicate_commands(
         self,
     ) -> None:

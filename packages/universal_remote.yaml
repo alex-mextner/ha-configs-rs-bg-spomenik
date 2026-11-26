@@ -617,39 +617,9 @@ script:
     alias: Start the projector and Kodi for requested playback
     mode: queued
     sequence:
-      - action: script.source_to_projector
-      - if: "{{ state_attr('media_player.projector', 'power_sync_target') is sameas true }}"
-        then:
-          # Join the existing ON without issuing a second power intent. A newer
-          # OFF or failed startup cancels playback even if feedback is delayed.
-          - variables:
-              revision: "{{ state_attr('media_player.projector', 'power_intent_revision') }}"
-          - wait_template: >-
-              {{ state_attr('media_player.projector', 'power_sync_target') is not sameas true
-                 or state_attr('media_player.projector', 'power_intent_revision') != revision }}
-            timeout: "00:02:00"
-            continue_on_timeout: true
-          - variables:
-              result: >-
-                {{ {'ready': wait.completed and revision is not none
-                   and state_attr('media_player.projector', 'power_intent_revision') == revision
-                   and state_attr('media_player.projector', 'last_power_intent') is sameas true
-                   and state_attr('media_player.projector', 'power_sync_target') is none
-                   and state_attr('media_player.projector', 'power_sync_error') is none
-                   and states('media_player.projector') in ['on', 'idle', 'playing', 'paused', 'buffering']} }}
-          - stop: Return the existing projector startup result
-            response_variable: result
-      - action: ekf_appliances.remote_dispatch
-        data:
-          domain: media_player
-          service: turn_on
-          pair: projector
-          service_data:
-            entity_id: media_player.projector
-        response_variable: dispatch
-      - variables:
-          result: "{{ {'ready': dispatch.sent | default(false) is sameas true} }}"
-      - stop: Return the guarded projector start result
+      - action: ekf_appliances.projector_start_for_playback
+        response_variable: result
+      - stop: Return the confirmed playback readiness
         response_variable: result
 
   app_launch_on_chromecast:

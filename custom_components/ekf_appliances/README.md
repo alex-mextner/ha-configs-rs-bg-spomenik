@@ -204,8 +204,9 @@ its sixty-second lease. Direct source-script calls still select immediately.
 `power_sync_target` describes only a pending operation. Unchanged feedback,
 volume and media metadata do not create a new power intent. Duplicate requests
 advance intent history without restarting an in-flight physical transition.
-The guarded service requires known display power and a usable IR transmitter
-when the display needs waking; it never turns unknown power into permission.
+The public `ekf_appliances.wake_if_current` service accepts a matching intent
+revision and requires known display power and a usable IR transmitter when the
+display needs waking.
 
 
 ### Odroid native IR reception

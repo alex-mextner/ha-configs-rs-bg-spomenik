@@ -32,7 +32,6 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame, trigger
-from homeassistant.helpers import script as ha_script
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.script import Script, script_stack_cv
@@ -41,6 +40,7 @@ from homeassistant.util import dt as dt_util
 
 from custom_components import remote_announcements
 from custom_components.ekf_appliances.ir_decode import RemoteMapper
+from custom_components.ekf_appliances.power_pair import PowerEndpoint, PowerPair
 from custom_components.remote_announcements.rejection import CueResult, RejectionQueue
 
 PACKAGE = Path(__file__).resolve().parents[2] / "packages/universal_remote.yaml"
@@ -1000,6 +1000,37 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 reasons, ["tv_off" if state == "off" else "tv_power_unknown"]
             )
 
+    async def test_remote_off_with_activity_remains_a_power_lifecycle(self) -> None:
+        self.set_power_pair("on", "off")
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def held(_call) -> None:
+            entered.set()
+            await release.wait()
+
+        self.hass.services.async_register("remote", "turn_off", held)
+        off = asyncio.create_task(
+            self.controller.async_dispatch(
+                {
+                    "domain": "remote",
+                    "service": "turn_off",
+                    "pair": "tv",
+                    "service_data": {
+                        "entity_id": "remote.televizor",
+                        "activity": "test",
+                    },
+                }
+            )
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            blocked = await self.controller.async_power({"pair": "tv"})
+            self.assertEqual(blocked["blocked"], "tv_power_transition")
+        finally:
+            release.set()
+            await off
+        self.assertEqual(self.appliance_calls(), [])
+
     async def test_power_loss_while_preparation_mirrors_blocks_the_light_key(
         self,
     ) -> None:
@@ -1167,66 +1198,156 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             any(action == "remote_announcements.reject" for action, _ in self.calls)
         )
 
+    def install_playback_pair(
+        self, release: asyncio.Event
+    ) -> tuple[PowerPair, asyncio.Event]:
+        self.set_power_pair("on", "off")
+        player_on = False
+        started = asyncio.Event()
+
+        async def display(target) -> None:
+            self.hass.states.async_set(PROJECTOR, "on" if target else "off")
+            pair.observe()
+
+        async def player(target) -> None:
+            nonlocal player_on
+            started.set()
+            await release.wait()
+            player_on = target
+            pair.observe()
+
+        pair = PowerPair(
+            "projector",
+            PowerEndpoint(lambda: self.runtime.projector_power_state, display),
+            PowerEndpoint(lambda: player_on, player),
+        )
+        self.runtime.projector_power_pair = pair
+        pair.start()
+        self.addAsyncCleanup(pair.close)
+        return pair, started
+
     async def test_requested_playback_joins_an_existing_projector_start(self) -> None:
-        for completed in (True, False):
-            with self.subTest(completed=completed):
+        for event in ("confirm", "raw_shutdown", "cleared_shutdown", "replacement"):
+            with self.subTest(event=event):
+                self.runtime.projector_power_pair = None
                 self.reset()
-                self.set_power_pair(
-                    "on", "off", power_sync_target=True, last_power_intent=True
-                )
-                ready = asyncio.Event()
+                release, admitted = asyncio.Event(), asyncio.Event()
+                pair, started = self.install_playback_pair(release)
+                existing = asyncio.create_task(pair.request(target=True))
+                await asyncio.wait_for(started.wait(), 1)
+                revision = pair.intent_revision
+                wait_for_start = pair.wait_for_start
 
-                original = ha_script.async_track_template
+                async def watch(
+                    admitted=admitted, wait_for_start=wait_for_start
+                ) -> bool:
+                    admitted.set()
+                    return await wait_for_start()
 
-                def tracking(
-                    *args: Any, ready=ready, original=original, **kwargs: Any
-                ) -> Any:
-                    unsubscribe = original(*args, **kwargs)
-                    ready.set()
-                    return unsubscribe
-
-                with patch.object(ha_script, "async_track_template", tracking):
+                with patch.object(pair, "wait_for_start", watch):
                     pending = asyncio.create_task(
                         self.scripts["projector_start_for_playback"].async_run(
                             {}, context=Context()
                         )
                     )
-                    await asyncio.wait_for(ready.wait(), 1)
-                try:
-                    self.assertFalse(pending.done())
-                    self.set_power_pair(
-                        "on",
-                        "on" if completed else "off",
-                        power_intent_revision="projector:0"
-                        if completed
-                        else "projector:1",
-                        last_power_intent=completed,
-                    )
-                    result = await asyncio.wait_for(pending, 1)
-                finally:
-                    pending.cancel()
-                    await asyncio.gather(pending, return_exceptions=True)
-                self.assertEqual(result.service_response, {"ready": completed})
+                    try:
+                        await asyncio.wait_for(admitted.wait(), 1)
+                        if event in ("raw_shutdown", "cleared_shutdown"):
+                            self.runtime.note_projector_off_requested()
+                            if event == "cleared_shutdown":
+                                self.runtime.projector_shutting_down = False
+                        elif event == "replacement":
+                            self.runtime.projector_power_pair = None
+                        release.set()
+                        result = await asyncio.wait_for(pending, 1)
+                    finally:
+                        release.set()
+                        await existing
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+                self.assertEqual(pair.intent_revision, revision)
+                self.assertEqual(result.service_response, {"ready": event == "confirm"})
                 self.assertEqual(self.appliance_calls(), [])
 
     async def test_explicit_projector_playback_starts_its_guarded_pair(self) -> None:
-        self.reset()
-        self.set_power_pair("on", "off")
-        await self.scripts["projector_start_for_playback"].async_run(
+        release = asyncio.Event()
+        release.set()
+        pair, _ = self.install_playback_pair(release)
+
+        async def native_on(call) -> None:
+            await self.capture(call)
+            await pair.request(target=True)
+
+        self.hass.services.async_register("media_player", "turn_on", native_on)
+        result = await self.scripts["projector_start_for_playback"].async_run(
             {}, context=Context()
         )
+        self.assertEqual(result.service_response, {"ready": True})
         self.assertEqual(self.controller.mode.pair, "projector")
         self.assertEqual(
             self.appliance_calls(), [("media_player.turn_on", {"entity_id": PROJECTOR})]
         )
-
         self.calls.clear()
-        self.runtime.projector_shutting_down = True
+        self.runtime.note_projector_off_requested()
         result = await self.scripts["projector_start_for_playback"].async_run(
             {}, context=Context()
         )
         self.assertEqual(result.service_response, {"ready": False})
         self.assertEqual(self.appliance_calls(), [])
+
+    async def test_transmission_playback_requires_confirmed_projector(self) -> None:
+        config = yaml.safe_load((PACKAGE.parent / "transmission.yaml").read_text())
+        script = Script(
+            self.hass,
+            cv.SCRIPT_SCHEMA(config["script"]["transmission_play_torrent"]["sequence"]),
+            "transmission_play_torrent",
+            "script",
+        )
+        for name in (
+            "host_kodi_start",
+            "host_kodi_sync_library",
+            "host_kodi_play_path",
+        ):
+            self.hass.services.async_register("rest_command", name, self.capture)
+        release = asyncio.Event()
+        release.set()
+        pair, _ = self.install_playback_pair(release)
+
+        async def native_on(_call) -> None:
+            await pair.request(target=True)
+
+        self.hass.services.async_register("media_player", "turn_on", native_on)
+        data = {"name": "Test Film", "id": 17, "download_dir": "/media"}
+        self.runtime.projector_shutting_down = True
+        await script.async_run(data, context=Context())
+        self.assertFalse(
+            any(action.startswith("rest_command.") for action, _ in self.calls)
+        )
+        self.runtime.projector_shutting_down = False
+        await script.async_run(data, context=Context())
+        self.assertEqual(
+            [action for action, _ in self.calls if action.startswith("rest_command.")],
+            [
+                "rest_command.host_kodi_start",
+                "rest_command.host_kodi_sync_library",
+                "rest_command.host_kodi_play_path",
+            ],
+        )
+
+    async def test_handled_audio_double_does_not_cue_after_projector_turns_off(
+        self,
+    ) -> None:
+        self.set_power_pair("on", "on")
+        self.controller.mode.select("projector")
+        first = time.time() - 0.3
+        self.controller.physical_press("audio", first)
+        self.controller.physical_press("audio", first + 0.1)
+        self.set_power_pair("on", "off")
+        await self.dispatch_captured("audio", first)
+        self.assertEqual(self.appliance_calls(), [])
+        self.assertFalse(
+            any(action == "remote_announcements.reject" for action, _ in self.calls)
+        )
 
     async def test_source_scripts_select_off_displays_without_hardware(self) -> None:
         for name, target in [

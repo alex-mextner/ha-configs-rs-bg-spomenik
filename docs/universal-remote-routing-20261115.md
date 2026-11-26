@@ -29,8 +29,9 @@ the route without reserving or adopting a physical Power request.
 
 Ordinary navigation, text, volume and transport keys are rejected for a busy,
 confirmed-off, or unknown display. A rejection captured during a transition stays
-rejected if YAML runs after confirmation. Selecting an off projector leaves only Power and INPUT available in
-projector/Kodi mode. This also covers AC, lighting and speaker shortcuts. Speaker
+rejected if YAML runs after confirmation. When the selected projector is off or its power is unknown, only Power and INPUT
+remain available in projector/Kodi mode. Rejections report `projector_off` or
+`projector_power_unknown` respectively. This also covers AC, lighting and speaker shortcuts. Speaker
 mode has its own controls when already selected. In TV mode, AC and lighting
 remain independent of display power.
 

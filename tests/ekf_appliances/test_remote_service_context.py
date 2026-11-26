@@ -321,6 +321,19 @@ class RemoteServiceContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(call.domain == "media_player" for call in self.calls))
         self.permissions.check_entity.assert_called_once_with(PROJECTOR, "control")
 
+    async def test_denied_playback_cannot_select_or_join_pending_start(self) -> None:
+        self.permissions.check_entity.return_value = False
+        pair = SimpleNamespace(target=True, wait_for_start=AsyncMock())
+        self.runtime.projector_power_pair = pair
+        with self.assertRaises(Unauthorized):
+            await self.call(
+                "projector_start_for_playback", {}, Context(user_id="denied")
+            )
+        pair.wait_for_start.assert_not_awaited()
+        self.permissions.check_entity.assert_called_once_with(PROJECTOR, "control")
+        self.assertEqual(self.controller.mode.pair, "tv")
+        self.assertFalse(self.calls)
+
     async def test_authorized_power_keeps_context_after_permission_check(self) -> None:
         context = Context(user_id="power-caller")
         self.runtime.projector_power_state = True
