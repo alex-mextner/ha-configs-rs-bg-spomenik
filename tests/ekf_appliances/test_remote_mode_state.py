@@ -232,6 +232,7 @@ class RemoteModeTests(unittest.TestCase):
         self.assertFalse(self.mode.native)
 
     def test_old_timer_cannot_expire_a_refreshed_lease(self) -> None:
+        self.observe(tv=True, projector=True)
         self.mode.select("projector", native=True)
         old_callback = self.clock.tasks[-1][1]
         self.clock.advance(30)
@@ -243,12 +244,14 @@ class RemoteModeTests(unittest.TestCase):
         self.assertEqual(self.mode.expires_at, last + 60)
 
     def test_every_accepted_universal_key_renews_current_mode(self) -> None:
+        self.observe(tv=True, projector=True)
         self.mode.select("projector", native=True)
         self.clock.advance(30)
         self.mode.press("channel_up", self.clock.now)
         self.assertEqual(self.mode.expires_at, self.clock.now + 60)
 
     def test_action_captured_before_expiry_renews_when_processing_is_late(self) -> None:
+        self.observe(tv=True, projector=True)
         self.mode.select("projector", native=True)
         deadline = self.mode.expires_at
         self.clock.now = deadline + 0.2
@@ -330,6 +333,7 @@ class RemoteModeTests(unittest.TestCase):
     def test_following_key_flushes_single_and_renews_from_that_physical_action(
         self,
     ) -> None:
+        self.observe(tv=True, projector=True)
         self.input()
         self.clock.advance(0.2)
         result = self.mode.press("up", self.clock.now)

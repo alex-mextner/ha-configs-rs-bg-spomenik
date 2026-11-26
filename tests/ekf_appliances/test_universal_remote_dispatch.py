@@ -899,6 +899,24 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
+    async def test_off_projector_press_captured_before_expiry_cannot_reach_tv(
+        self,
+    ) -> None:
+        self.reset()
+        self.set_power_pair("on", "off")
+        self.controller.refresh()
+        self.controller.mode.select("projector", native=True)
+        deadline = self.controller.mode.expires_at
+        self.controller.mode.clock = lambda: deadline + 0.2
+        self.controller.physical_press("play", deadline - 0.1)
+        route = await self.controller.async_prepare(
+            {"button": "play", "received_ms": (deadline - 0.1) * 1000}
+        )
+        self.assertEqual(route["pair"], "projector")
+        self.assertEqual(route["blocked"], "projector_off")
+        self.assertEqual(self.controller.mode.pair, "tv")
+        self.assertEqual(self.appliance_calls(), [])
+
     async def test_queued_projector_key_keeps_off_guard_after_automatic_fallback(
         self,
     ) -> None:

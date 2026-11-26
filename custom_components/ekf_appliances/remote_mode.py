@@ -355,8 +355,9 @@ class RemoteMode:
             and not self.audio
             and button != "power"
         ):
-            # An unavailable control cannot extend the selected display's lease.
-            return self.resolve()
+            # Admit at capture time. Expiry during processing may update the
+            # published target but cannot send this rejected key to that target.
+            return self.resolve(self.pair, native=self.native)
         if self.expires_at:
             self.expires_at = max(self.expires_at, at + LEASE_SECONDS)
             self._arm_lease()
