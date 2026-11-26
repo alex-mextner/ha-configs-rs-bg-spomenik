@@ -10,8 +10,8 @@ an intermediate projector or native state to announcements.
 The controller uses physical capture timestamps and cancellable callback
 ownership for two independent deadlines: the inclusive one-second INPUT double
 window and exactly sixty seconds of inactivity. Single INPUT retains its original
-pair snapshot. When INPUT selects the TV pair, an off TV stays off. Explicit app
-and source commands can still wake it. The lease starts at the physical action, including
+pair snapshot. Changing between TV/Chromecast and projector/Kodi only selects a route.
+App shortcuts require the destination display to be on. The lease starts at the physical action, including
 the first INPUT of a single, and every accepted universal-remote action renews it.
 Display OFF or projector shutdown invalidates stale pending input and affected
 manual focus. Unknown observations never mean OFF.
@@ -29,9 +29,11 @@ the route without reserving or adopting a physical Power request.
 
 Ordinary navigation, text, volume and transport keys are rejected for a busy,
 confirmed-off, or unknown display. A rejection captured during a transition stays
-rejected if YAML runs after confirmation. Explicit source/app selection may start its named idle pair. Single INPUT may
-wake the projector when the TV is on; Power remains busy until all active pairs
-settle. Independent AC, lighting and speaker controls remain available.
+rejected if YAML runs after confirmation. When the selected projector is off or its power is unknown, only Power and INPUT
+remain available in projector/Kodi mode. Rejections report `projector_off` or
+`projector_power_unknown` respectively. This also covers AC, lighting and speaker shortcuts. Speaker
+mode has its own controls when already selected. In TV mode, AC and lighting
+remain independent of display power.
 
 A single Audio press toggles playback. On the living-room Yandex Station,
 Play resumes the current track or starts My Wave when the local Station reports
@@ -86,8 +88,8 @@ The selected receiver commits each mapped physical press synchronously, before
 publishing the HA event. YAML retrieves its captured route from a bounded
 256-entry cache and cannot replay the press. Only that receiver supplies trusted
 physical timestamps; unknown or evicted event timestamps never renew a lease.
-Physical speaker dispatch keeps that ownership when it falls back to the current
-speaker mode. Direct `audio_mode_dispatch` calls without a physical marker still
+A missing capture is rejected before any device command, even if speaker mode
+is active when the automation runs. Direct `audio_mode_dispatch` calls without a physical marker still
 renew speaker activity through their compatibility pulse.
 Before an INPUT or inactivity callback commits, the controller drains already
 ready native input, so a second capture at exactly 1000 ms wins even when HA
@@ -123,7 +125,7 @@ gate now preserves silence accounting across those semantic resets.
 The old YAML timeout could run up to 999 ms before its millisecond deadline,
 leave native mode active, and never rearm. The new state tests cover fractional
 expiry without another key, old callbacks after renewal, both displays ending
-OFF, original-pair doubles at 1000 ms, sixty-second wake focus, atomic target
+OFF, original-pair doubles at 1000 ms, sixty-second selection focus, atomic target
 publication, and fresh TV doubles while the projector shuts down.
 Review regressions additionally cover a 1000 ms second INPUT processed 20 ms
 late without a premature wake, a key captured 100 ms before lease expiry and

@@ -107,6 +107,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.calls, self.scripts = [], {}
         self.completed, self.last_trace = [], []
         self.power_failure = False
+        self.power_result = True
         self.projector_refresh_attributes = None
         self.projector_refresh_error = False
         self.projector_refresh_states = []
@@ -146,11 +147,16 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
 
     def register_boundaries(self) -> None:
         for domain, service in (
-            ("script", "source_to_pc"),
             ("media_player", "turn_on"),
             ("homeassistant", "update_entity"),
         ):
             self.hass.services.async_register(domain, service, self.boundary)
+        self.hass.services.async_register(
+            "script",
+            "projector_start_for_playback",
+            self.boundary,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
         self.hass.services.async_register(
             "rest_command",
             "host_kodi_fireplace",
@@ -162,7 +168,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         action = f"{call.domain}.{call.service}"
         self.calls.append((action, deepcopy(dict(call.data))))
         handlers = {
-            "script.source_to_pc": self.power_on,
+            "script.projector_start_for_playback": self.power_on,
             "rest_command.host_kodi_fireplace": self.start_playback,
             "homeassistant.update_entity": self.refresh_readiness,
         }
@@ -171,7 +177,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
     async def ignore_call(self, _call) -> None:
         return None
 
-    async def power_on(self, _call) -> None:
+    async def power_on(self, _call) -> dict[str, bool]:
         self.power_entered.set()
         await self.power_release.wait()
         if self.power_failure:
@@ -193,6 +199,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         if self.ready:
             self.hass.states.async_set(KODI, "idle")
         self.power_returned.set()
+        return {"ready": self.power_result}
 
     async def start_playback(self, call) -> dict[str, Any]:
         payload = self.package["rest_command"]["host_kodi_fireplace"]["payload"]
@@ -377,7 +384,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             self.calls,
             [
                 ("homeassistant.update_entity", {"entity_id": [PROJECTOR]}),
-                ("script.source_to_pc", {}),
+                ("script.projector_start_for_playback", {}),
                 (
                     "rest_command.host_kodi_fireplace",
                     {"fireplace_request": {"id": "voice-request"}},
@@ -414,7 +421,7 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
             self.calls[:2],
             [
                 ("homeassistant.update_entity", {"entity_id": [PROJECTOR]}),
-                ("script.source_to_pc", {}),
+                ("script.projector_start_for_playback", {}),
             ],
         )
         self.assertEqual(len(self.launches()), 1)
@@ -446,6 +453,12 @@ class LivingRoomFireplaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.launches())
         self.assertEqual(self.counter, 0)
         self.assertEqual(self.hass.states.get(PROJECTOR).state, "off")
+
+    async def test_rejected_playback_readiness_never_opens_fireplace(self) -> None:
+        self.power_result = False
+        await self.launch()
+        self.assert_aborted()
+        self.assertFalse(self.launches())
 
     async def test_pair_failure_never_opens_media(self) -> None:
         self.power_failure = True

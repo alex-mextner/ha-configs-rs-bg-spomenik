@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
-    from homeassistant.core import Event, HomeAssistant, ServiceCall, ServiceResponse
+    from homeassistant.core import (
+        Event,
+        HomeAssistant,
+        ServiceCall,
+        ServiceResponse,
+        State,
+    )
 
     from .remote_mode import RemoteRoute
     from .runtime import ApplianceRuntime
@@ -37,6 +43,11 @@ _ON = {"on", "playing", "paused", "idle", "buffering"}
 _SERVICE_CONTEXT = ContextVar("universal_remote_service_context", default=None)
 
 
+_LIGHT_COLORS = {
+    "red": [255, 0, 0, 0],
+    "green": [0, 255, 0, 0],
+    "yellow": [255, 255, 0, 0],
+}
 _CAPTURED_ROUTE_LIMIT = 256
 _AUDIO_DOUBLE_SECONDS = 0.8
 _SPEAKER_CONTROLS = {
@@ -81,11 +92,37 @@ _MEDIA_BUTTONS = {
     "dash",
     *map(str, range(10)),
 }
-_WAKE_SERVICES = {"turn_on", "turn_off", "toggle", "select_source", "play_media"}
 
 
 class PowerConfirmationTimeoutError(HomeAssistantError):
     """A bounded owned operation timed out and already emitted its rejection."""
+
+
+def _station_can_start_wave(state: State | None) -> bool:
+    """Recheck the music script's local empty-Station decision before replacement."""
+    if state is None:
+        return False
+    attrs = state.attributes
+    alice = attrs.get("alice_state")
+    return (
+        (
+            state.state in {"idle", "paused", "standby", "off"}
+            or (state.state == "playing" and alice in ("SPEAKING", "NONE"))
+        )
+        and alice not in (None, "", "unknown", "unavailable")
+        and not any(
+            attrs.get(key)
+            for key in (
+                "assumed_state",
+                "restored",
+                "media_content_id",
+                "media_title",
+                "media_content_type",
+                "media_playlist",
+                "media_duration",
+            )
+        )
+    )
 
 
 def _with_service_context(
@@ -128,7 +165,6 @@ class RemoteController:
             clock=time.time,
             schedule=self._schedule,
             changed=self._changed,
-            wake=self._wake,
         )
         self.mode.shutting_down = runtime.projector_shutting_down
 
@@ -344,35 +380,6 @@ class RemoteController:
                 if state is not None and state.state == ("on" if audio else "off"):
                     self._audio_mirror = None
 
-    def _wake(self, pair: str, revision: str) -> None:
-        async def wake() -> None:
-            self.refresh()
-            if reason := self._pair_transition(pair):
-                await self.async_reject(reason)
-                return
-            try:
-                await self._async_owned_power(
-                    pair,
-                    self.hass.services.async_call(
-                        DOMAIN,
-                        "wake_if_current",
-                        {
-                            "entity_id": PROJECTOR if pair == "projector" else TV,
-                            "expected_revision": revision,
-                        },
-                        blocking=True,
-                        context=_SERVICE_CONTEXT.get(),
-                    ),
-                )
-            except HomeAssistantError as err:
-                if not isinstance(err, PowerConfirmationTimeoutError):
-                    await self.async_reject("wake_rejected")
-                _LOGGER.warning("Remote single INPUT wake was not accepted: %s", err)
-            finally:
-                self.refresh()
-
-        self._spawn(wake())
-
     @staticmethod
     def _capture_key(button: str, received_ms: float) -> tuple[str, float]:
         return button, round(received_ms, 3)
@@ -385,7 +392,8 @@ class RemoteController:
             self._pending_audio = None
             if self.mode.audio:
                 self.mode.set_audio(active=False, at=at)
-            elif (
+                return {**route, "speaker": True, "audio_action": "handled"}
+            if (
                 previous is not None
                 and self._captured_routes.get(previous, {}).get("audio_action")
                 == "pending"
@@ -422,7 +430,8 @@ class RemoteController:
                 return
             self.refresh(physical_at=received_at)
             route = self.mode.press(button, received_at)
-            route = self._capture_speaker(button, received_at, key, route)
+            if not self._projector_key_blocked(button, route):
+                route = self._capture_speaker(button, received_at, key, route)
             if button == "ok_hold" and press_id is not None:
                 # Both events from one physical OK share the first event's owner
                 # even if focus changes between separate receiver frames.
@@ -443,7 +452,9 @@ class RemoteController:
         finally:
             _SERVICE_CONTEXT.reset(token)
 
-    async def async_prepare(self, data: Mapping[str, Any]) -> RemoteRoute:
+    async def async_prepare(
+        self, data: Mapping[str, Any], *, mirror: bool = True
+    ) -> RemoteRoute:
         """Return the route captured for a physical press without replaying it."""
         received = data.get("received_ms")
         if received is None:
@@ -480,16 +491,31 @@ class RemoteController:
                 if route.get("audio_action") == "pending":
                     route["audio_action"] = "play_pause"
             if route is None:
-                route = self.resolve({})
-                if data["button"] == "power":
-                    route = {**route, "blocked": "expired_power_press"}
+                reason = (
+                    "expired_power_press"
+                    if data["button"] == "power"
+                    else "expired_remote_press"
+                )
+                route = {**self.resolve({}), "blocked": reason}
+        if mirror:
+            await self.async_mirror()
+        if (
+            data["button"] != "power"
+            and not route.get("blocked")
+            and route.get("audio_action") != "handled"
+        ):
+            # Mirroring can wait for helper service calls. Keep the captured
+            # owner and recheck its power after the last suspension point.
+            self.refresh()
+            route = self._prepare_press(
+                data["button"], route=route, reserve_power=False
+            )
         if reason := route.get("blocked"):
             press_id = None
             if received is not None:
                 key = self._capture_key(data["button"], received)
                 press_id = self._captured_press_ids.get(key, f"{key[0]}:{key[1]:.3f}")
             await self.async_reject(reason, press_id=press_id)
-        await self.async_mirror()
         return route
 
     def _pending_power_request(self) -> tuple[str, str, float] | None:
@@ -542,6 +568,18 @@ class RemoteController:
             return f"{pair}_power_unknown"
         return f"{pair}_off" if observed is False else None
 
+    def _projector_key_blocked(self, button: str, route: RemoteRoute) -> str | None:
+        if (
+            route["pair"] == "projector"
+            and not route.get("speaker", self.mode.audio)
+            and button not in {"input", "power"}
+            and button not in INTERNAL_KEYS
+            and not button.startswith("samsung_ir_")
+            and self.runtime.projector_power_state is not True
+        ):
+            return self._ordinary_command_blocked("projector")
+        return None
+
     def _prepare_press(
         self,
         button: str,
@@ -563,12 +601,14 @@ class RemoteController:
                     asyncio.get_running_loop().time() + _POWER_CAPTURE_TIMEOUT,
                 )
                 return {**route, "power_request_id": request_id}
+        elif reason := self._projector_key_blocked(button, route):
+            return {**route, "blocked": reason}
         elif button in _MEDIA_BUTTONS and not speaker:
             reason = self._ordinary_command_blocked(route["pair"])
         elif button in {"netflix", "youtube", "apple_tv"} and not speaker:
-            reason = self._pair_transition("tv")
+            reason = self._ordinary_command_blocked("tv")
         elif button in {"disney", "disney_hold"}:
-            reason = self._pair_transition("projector")
+            reason = self._ordinary_command_blocked("projector")
         return {**route, "blocked": reason} if reason else route
 
     async def async_reject(
@@ -720,6 +760,122 @@ class RemoteController:
             owns_shutdown=pair == "projector" and service == "turn_off",
         )
 
+    async def async_start_projector_for_playback(self) -> dict[str, bool]:
+        """Authorize, select and confirm the projector pair for requested playback."""
+        await self._async_check_control(PROJECTOR)
+        self.refresh()
+        pair = self.runtime.projector_power_pair
+        if self._closed or pair is None or self.runtime.projector_shutting_down:
+            return {"ready": False}
+        if pair.target is not True and self._pair_transition("projector"):
+            return {"ready": False}
+        shutdown_at = self.runtime.shutdown.requested_at
+        self.mode.select("projector")
+        if pair.target is True:
+            if not await pair.wait_for_start():
+                return {"ready": False}
+        elif not pair.confirmed_on:
+            await self._async_owned_power(
+                "projector",
+                self._async_service(
+                    {
+                        "domain": "media_player",
+                        "service": "turn_on",
+                        "service_data": {"entity_id": PROJECTOR},
+                    },
+                    projector_action=True,
+                    power_lifecycle=True,
+                ),
+            )
+        self.refresh()
+        return {
+            "ready": (
+                not self._closed
+                and self.runtime.projector_power_pair is pair
+                and not self.runtime.projector_shutting_down
+                and self.runtime.shutdown.requested_at == shutdown_at
+                and self.runtime.projector_power_state is True
+                and pair.confirmed_on
+            )
+        }
+
+    async def async_captured_action(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        """Authorize a fixed physical key action before forwarding to its target."""
+        button = data["button"]
+        payload: dict[str, Any] = {}
+        if button == "smart":
+            domain, service, entity = (
+                "light",
+                "toggle",
+                "light.gostinaia_globus_socket_1",
+            )
+        elif button in _LIGHT_COLORS:
+            domain, service, entity = "light", "turn_on", "light.rgbw_lamp_rgbw"
+            payload = {"rgbw_color": _LIGHT_COLORS[button], "brightness": 255}
+        elif button in {"channel_up", "channel_down"}:
+            domain, service, entity = "climate", "set_temperature", "climate.kondei_1"
+            payload = {"temperature": data["temperature"]}
+        elif button == "prime":
+            domain, entity = "climate", "climate.kondei_1"
+            service = "turn_off" if data["hvac_mode"] == "off" else "set_hvac_mode"
+            if service == "set_hvac_mode":
+                payload = {"hvac_mode": data["hvac_mode"]}
+        else:
+            domain, entity = "media_player", data["entity_id"]
+            service = {
+                "play": "media_play",
+                "pause": "media_pause",
+                "wave": "play_media",
+            }[data["playback"]]
+
+        await self._async_check_control(entity)
+        if button == "audio":
+            # Mirror before resolving the owner. Only synchronous capture checks
+            # remain between a successful owner response and native submission.
+            await self.async_mirror()
+            owner = await self.hass.services.async_call(
+                "script",
+                "music_remote_resolve",
+                blocking=True,
+                return_response=True,
+                context=_SERVICE_CONTEXT.get(),
+            )
+            if not owner or owner.get("entity_id") != entity:
+                return {"sent": False}
+            if service == "play_media":
+                if (
+                    owner.get("speaker_entity_id") != entity
+                    or owner.get("owner") != "speaker"
+                    or owner.get("speaker_backend") != "yandex"
+                ):
+                    return {"sent": False}
+                payload = {
+                    "media_content_type": "command",
+                    "media_content_id": "Включи мою волну",
+                }
+
+        # Keep validation and submission in the same task. A separate YAML
+        # service response can resume after newer physical power feedback.
+        route = await self.async_prepare(
+            {"button": button, "received_ms": data["received_ms"]},
+            mirror=button != "audio",
+        )
+        if reason := route.get("blocked"):
+            return {"sent": False, "blocked": reason}
+        if button == "audio" and (
+            route.get("audio_action") != "play_pause"
+            or (
+                service == "play_media"
+                and not _station_can_start_wave(self.hass.states.get(entity))
+            )
+        ):
+            return {"sent": False}
+        payload["entity_id"] = entity if button == "audio" else [entity]
+        return await self._async_service(
+            {"domain": domain, "service": service, "service_data": payload},
+            projector_action=False,
+        )
+
     async def async_dispatch(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """Forward a native service with caller context and final shutdown checks."""
         domain, service = data["domain"], data["service"]
@@ -751,19 +907,24 @@ class RemoteController:
         for entity in entities:
             await self._async_check_control(entity)
         self.refresh()
-        if pair is not None:
-            reason = (
-                self._pair_transition(pair)
-                if service in _WAKE_SERVICES
-                else self._ordinary_command_blocked(pair)
-            )
-            if reason:
-                return await self.async_reject(reason)
+        # Android TV accepts an app activity through remote.turn_on. It is an
+        # ordinary app command and may run only while the display is confirmed on.
         power_action = (
             pair is not None
             and domain in {"media_player", "remote"}
             and service in {"turn_on", "turn_off", "toggle"}
+            and not (
+                domain == "remote" and service == "turn_on" and "activity" in payload
+            )
         )
+        if pair is not None:
+            reason = (
+                self._pair_transition(pair)
+                if power_action
+                else self._ordinary_command_blocked(pair)
+            )
+            if reason:
+                return await self.async_reject(reason)
         operation = self._async_service(
             data,
             projector_action=projector_action
@@ -855,6 +1016,12 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
     async def dispatch(call: ServiceCall) -> ServiceResponse:
         return await controller().async_dispatch(call.data)
 
+    async def captured(call: ServiceCall) -> ServiceResponse:
+        return await controller().async_captured_action(call.data)
+
+    async def playback(_call: ServiceCall) -> ServiceResponse:
+        return await controller().async_start_projector_for_playback()
+
     async def power(call: ServiceCall) -> ServiceResponse:
         return await controller().async_power(call.data)
 
@@ -867,7 +1034,45 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
         vol.Optional("pair"): vol.In(["tv", "projector"]),
         vol.Optional("native"): cv.boolean,
     }
+    received = {
+        vol.Required("received_ms"): vol.All(
+            vol.Coerce(float),
+            vol.Range(min=0, max=float("inf"), min_included=False, max_included=False),
+        )
+    }
     services = {
+        "remote_captured_action": (
+            captured,
+            vol.Any(
+                {**received, vol.Required("button"): vol.In(["smart", *_LIGHT_COLORS])},
+                {
+                    **received,
+                    vol.Required("button"): vol.In(["channel_up", "channel_down"]),
+                    # HA accepts its displayed unit, converts to the native
+                    # Haier unit and validates that device's setpoint limits.
+                    vol.Required("temperature"): vol.All(
+                        vol.Coerce(float),
+                        vol.Range(
+                            min=float("-inf"),
+                            max=float("inf"),
+                            min_included=False,
+                            max_included=False,
+                        ),
+                    ),
+                },
+                {
+                    **received,
+                    vol.Required("button"): "prime",
+                    vol.Required("hvac_mode"): vol.In(["off", "heat", "cool"]),
+                },
+                {
+                    **received,
+                    vol.Required("button"): "audio",
+                    vol.Required("entity_id"): cv.entity_domain("media_player"),
+                    vol.Required("playback"): vol.In(["play", "pause", "wave"]),
+                },
+            ),
+        ),
         "remote_prepare": (
             prepare,
             {
@@ -887,6 +1092,7 @@ def async_register_remote_services(hass: HomeAssistant) -> None:
             },
         ),
         "remote_resolve": (resolve, pair),
+        "projector_start_for_playback": (playback, {}),
         "remote_power": (power, {**pair, vol.Optional("power_request_id"): cv.string}),
         "remote_reject": (
             reject,

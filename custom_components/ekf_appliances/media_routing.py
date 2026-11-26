@@ -30,6 +30,14 @@ MEDIA_CONFIG_KEYS = (
     CONF_TV_SOURCE_ENTITY_ID,
 )
 _ACTIVE = {"playing", "paused", "buffering"}
+_CAST_SESSION_SERVICES = {
+    "media_play",
+    "media_pause",
+    "media_play_pause",
+    "media_stop",
+    "media_next_track",
+    "media_previous_track",
+}
 _UNAVAILABLE = {"off", "unknown", "unavailable"}
 _MA_CAST_APP = "C35B0678"
 
@@ -144,21 +152,31 @@ class TelevisionMediaRouting:
         ]
         return states or ([native] if native is not None else [])
 
-    def command_candidates(self, native: State | None) -> list[State]:
-        """List the selected source and its supported Android fallback."""
+    def command_candidates(self, native: State | None, service: str) -> list[State]:
+        """List same-device playback adapters in dispatch order for this service."""
         primary = self.choose(native)
-        result = [primary] if primary is not None else []
-        # Cast has complete metadata but some Android apps lack MediaSession
-        # actions. Only those unsupported actions fall back to Android Remote.
+        if primary is None:
+            return []
+        if primary.entity_id != self.entity_id(CONF_TV_CAST_ENTITY_ID):
+            return [primary]
+
+        android = self.state(CONF_TV_ANDROIDTV_ENTITY_ID)
+        candidates = [android] if android is not None and self.ready(android) else []
+        if service not in _CAST_SESSION_SERVICES or primary.state in _ACTIVE:
+            return [primary, *candidates]
+
+        # An idle app can advertise media commands without a live session.
+        # Prefer Android. A reported position distinguishes explicit idle media
+        # status, allowing a supported Cast queue key as a last resort.
+        position = primary.attributes.get("media_position")
         if (
-            primary is not None
-            and self.source == "chromecast"
-            and primary.entity_id == self.entity_id(CONF_TV_CAST_ENTITY_ID)
+            primary.state == "idle"
+            and service in {"media_next_track", "media_previous_track"}
+            and type(position) in (float, int)
+            and 0 <= position < float("inf")
         ):
-            android = self.state(CONF_TV_ANDROIDTV_ENTITY_ID)
-            if self.ready(android):
-                result.append(android)
-        return result
+            candidates.append(primary)
+        return candidates
 
     def renamed_data(self) -> dict[str, str]:
         """Collect configured entity IDs changed in the registry."""

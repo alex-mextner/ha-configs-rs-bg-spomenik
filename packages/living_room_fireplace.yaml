@@ -72,7 +72,12 @@ script:
         then:
           - stop: Не настроено подтверждённое совместное управление проектором и Kodi.
             error: true
-      - action: script.source_to_pc
+      - action: script.projector_start_for_playback
+        response_variable: projector_start
+      - if: "{{ projector_start.ready | default(false) is not sameas true }}"
+        then:
+          - stop: Projector power was rejected
+            error: true
       - variables:
           power_revision: "{{ state_attr('media_player.projector', 'power_intent_revision') }}"
       - wait_template: >-

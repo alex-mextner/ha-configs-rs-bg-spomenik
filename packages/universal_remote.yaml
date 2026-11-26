@@ -81,6 +81,16 @@ script:
       delta:
         description: Temperature steps (+1 or -1)
     sequence:
+      - if: "{{ received_ms is defined }}"
+        then:
+          - action: ekf_appliances.remote_prepare
+            data:
+              button: "{{ 'channel_up' if delta | int > 0 else 'channel_down' }}"
+              received_ms: "{{ received_ms }}"
+            response_variable: route
+          - if: "{{ route.blocked | default('') != '' }}"
+            then:
+              - stop: Captured AC key is no longer available
       - variables:
           current_target: "{{ state_attr('climate.kondei_1', 'temperature') }}"
       - if: >-
@@ -99,9 +109,17 @@ script:
             {{ [[current_target | float + (delta | int) * step, high] | min, low] | max }}
       - if: "{{ next_target | float != current_target | float }}"
         then:
-          - action: climate.set_temperature
-            target: { entity_id: climate.kondei_1 }
-            data: { temperature: "{{ next_target }}" }
+          - if: "{{ received_ms is defined }}"
+            then:
+              - action: ekf_appliances.remote_captured_action
+                data:
+                  received_ms: "{{ received_ms }}"
+                  button: "{{ 'channel_up' if delta | int > 0 else 'channel_down' }}"
+                  temperature: "{{ next_target }}"
+            else:
+              - action: climate.set_temperature
+                target: { entity_id: climate.kondei_1 }
+                data: { temperature: "{{ next_target }}" }
         else:
           - action: ekf_appliances.remote_reject
             data: { reason: ac_setpoint_limit }
@@ -112,6 +130,16 @@ script:
     alias: Remote AC power
     mode: single
     sequence:
+      - if: "{{ received_ms is defined }}"
+        then:
+          - action: ekf_appliances.remote_prepare
+            data:
+              button: "prime"
+              received_ms: "{{ received_ms }}"
+            response_variable: route
+          - if: "{{ route.blocked | default('') != '' }}"
+            then:
+              - stop: Captured AC key is no longer available
       - choose:
           - conditions: "{{ is_state('climate.kondei_1', 'off') }}"
             sequence:
@@ -130,10 +158,18 @@ script:
                     data: { reason: ac_weather_unavailable }
                   - stop: "Outdoor temperature from weather.forecast_home_assistant is unavailable in Celsius; AC remains off"
                     error: true
-              - action: climate.set_hvac_mode
-                target: { entity_id: climate.kondei_1 }
-                data:
-                  hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
+              - if: "{{ received_ms is defined }}"
+                then:
+                  - action: ekf_appliances.remote_captured_action
+                    data:
+                      received_ms: "{{ received_ms }}"
+                      button: prime
+                      hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
+                else:
+                  - action: climate.set_hvac_mode
+                    target: { entity_id: climate.kondei_1 }
+                    data:
+                      hvac_mode: "{{ 'heat' if outdoor | float < 24 else 'cool' }}"
           - conditions: "{{ states('climate.kondei_1') in ['unknown', 'unavailable'] }}"
             sequence:
               - action: ekf_appliances.remote_reject
@@ -141,10 +177,18 @@ script:
               - stop: "AC state is unavailable; power command was not sent"
                 error: true
         default:
-          - action: climate.turn_off
-            target: { entity_id: climate.kondei_1 }
+          - if: "{{ received_ms is defined }}"
+            then:
+              - action: ekf_appliances.remote_captured_action
+                data:
+                  received_ms: "{{ received_ms }}"
+                  button: prime
+                  hvac_mode: "off"
+            else:
+              - action: climate.turn_off
+                target: { entity_id: climate.kondei_1 }
 
-  # The integration owns mode, INPUT timing, focus expiry and wake intent.
+  # The integration owns mode, INPUT timing and focus expiry.
   # Keep these public script names and helpers for existing callers.
   remote_mode_select_pair:
     alias: Пульт — выбрать пару
@@ -565,15 +609,10 @@ script:
         data:
           pair: tv
           received_ms: "{{ received_ms | default(none) }}"
-      - action: ekf_appliances.remote_dispatch
-        data:
-          domain: media_player
-          service: turn_on
-          pair: tv
-          service_data:
-            entity_id: [media_player.ue48j5500_ue48j5500]
-        response_variable: result
-      - stop: Return the source power admission
+        response_variable: selected
+      - variables:
+          result: "{{ {'sent': selected.pair | default('') == 'tv'} }}"
+      - stop: Return the selection result
         response_variable: result
   source_to_pc:
     alias: Source → Kodi and projector
@@ -583,7 +622,7 @@ script:
         data:
           received_ms: "{{ received_ms | default(none) }}"
         response_variable: result
-      - stop: Return the named projector source admission
+      - stop: Return the projector selection result
         response_variable: result
   source_to_projector:
     alias: Source → projector
@@ -593,17 +632,20 @@ script:
         data:
           pair: projector
           received_ms: "{{ received_ms | default(none) }}"
-      - action: ekf_appliances.remote_dispatch
-        data:
-          domain: media_player
-          service: turn_on
-          pair: projector
-          service_data:
-            entity_id:
-            - media_player.projector
+        response_variable: selected
+      - variables:
+          result: "{{ {'sent': selected.pair | default('') == 'projector'} }}"
+      - stop: Return the selection result
         response_variable: result
-      - stop: Return the source power admission
+  projector_start_for_playback:
+    alias: Start the projector and Kodi for requested playback
+    mode: queued
+    sequence:
+      - action: ekf_appliances.projector_start_for_playback
         response_variable: result
+      - stop: Return the confirmed playback readiness
+        response_variable: result
+
   app_launch_on_chromecast:
     alias: Launch app on Chromecast
     mode: single
@@ -617,7 +659,7 @@ script:
         response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:
-          - stop: Source power request was rejected
+          - stop: Source selection was rejected
       - action: ekf_appliances.remote_dispatch
         data:
           domain: remote
@@ -1102,11 +1144,13 @@ automation:
               - action: script.remote_ac_temperature
                 data:
                   delta: "{{ 1 if button == 'channel_up' else -1 }}"
-          - conditions: "{{ button == 'smart' }}"
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+          - conditions: "{{ button in ['smart', 'red', 'green', 'yellow'] }}"
             sequence:
-              - action: light.toggle
-                target:
-                  entity_id: light.gostinaia_globus_socket_1
+              - action: ekf_appliances.remote_captured_action
+                data:
+                  button: "{{ button }}"
+                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
           - conditions: "{{ button == 'power' }}"
             sequence:
               - action: ekf_appliances.remote_power
@@ -1118,15 +1162,6 @@ automation:
               {{ button in ['prime','prime_hold','disney','disney_hold'] or (button | string).startswith('samsung_ir_') }}
             sequence:
               - stop: Handled by a dedicated appliance automation or direct physical remote
-          - conditions: "{{ button in ['red','green','yellow'] }}"
-            sequence:
-              - action: light.turn_on
-                target:
-                  entity_id: light.rgbw_lamp_rgbw
-                data:
-                  rgbw_color: >-
-                    {{ {'red':[255,0,0,0],'green':[0,255,0,0],'yellow':[255,255,0,0]}[button] }}
-                  brightness: 255
           - conditions: "{{ button == 'audio' or route.audio_action | default('') == 'handled' }}"
             sequence:
               - if: "{{ route.audio_action | default('') == 'pending' }}"
@@ -1142,14 +1177,19 @@ automation:
                       button: audio
                       received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
                     response_variable: route
+              - if: "{{ route.blocked | default('') != '' }}"
+                then:
+                  - stop: Audio was rejected after the double-tap window
               - if: "{{ route.audio_action | default('') == 'play_pause' }}"
                 then:
                   - action: script.music_remote_command
-                    data: { command: play_pause }
+                    data:
+                      command: play_pause
+                      audio_received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
               - stop: Physical Audio gesture or speaker dismissal handled
           - conditions: >-
               {{ button != 'audio' and
-                 route.speaker | default(is_state('input_boolean.audio_mode', 'on')) }}
+                 route.speaker | default(false) }}
             sequence:
               - action: script.audio_mode_dispatch
                 data:
@@ -1278,6 +1318,8 @@ automation:
     action:
       # A held key also emits prime_hold; it must not send a second command.
       - action: script.remote_ac_toggle
+        data:
+          received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
 
   # ===== Remember the AC's last non-off mode =====
   # Retain the legacy helper for external callers; it does not select the
@@ -1340,30 +1382,30 @@ automation:
       - if: "{{ route.blocked | default('') != '' }}"
         then:
           - stop: Projector command was rejected when received
-      - choose:
-          - conditions: "{{ ev == 'disney_hold' }}"
-            sequence:
-              - action: script.source_to_pc
-                data:
-                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
-                response_variable: source_result
-          - conditions: "{{ ev == 'disney' }}"
-            sequence:
-              # Wait 300ms for a possible disney_hold. If it arrives we abort.
-              - wait_for_trigger:
-                  - platform: state
-                    entity_id: event.ekf_universal_remote
-                timeout: "00:00:00.300"
-                continue_on_timeout: true
-              - if: >-
-                  {{ wait.trigger is not none and
-                     (wait.trigger.to_state.attributes.event_type | default('', true)) == 'disney_hold' }}
-                then:
-                  - stop: "hold detected, disney short suppressed"
-              - action: script.source_to_pc
-                data:
-                  received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
-                response_variable: source_result
+      - if: "{{ ev == 'disney' }}"
+        then:
+          - wait_for_trigger:
+              - platform: state
+                entity_id: event.ekf_universal_remote
+            timeout: "00:00:00.300"
+            continue_on_timeout: true
+          - if: >-
+              {{ wait.trigger is not none and
+                 (wait.trigger.to_state.attributes.event_type | default('', true)) == 'disney_hold' }}
+            then:
+              - stop: Hold detected
+          - action: script.remote_modes_prepare
+            data:
+              button: "{{ ev }}"
+              received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+            response_variable: route
+          - if: "{{ route.blocked | default('') != '' }}"
+            then:
+              - stop: Projector command was rejected after the hold window
+      - action: script.source_to_pc
+        data:
+          received_ms: "{{ trigger.to_state.attributes.last_received | float * 1000 }}"
+        response_variable: source_result
       - if: "{{ source_result.sent | default(false) is not sameas true }}"
         then:
           - if: "{{ source_result.blocked | default('') == '' }}"

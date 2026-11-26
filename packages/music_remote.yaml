@@ -247,6 +247,21 @@ script:
             error: true
       - action: script.music_remote_resolve
         response_variable: route
+      - if: "{{ audio_received_ms is defined and cmd != 'play_pause' }}"
+        then:
+          - stop: A single Audio press only controls playback
+      - if: "{{ audio_received_ms is defined }}"
+        then:
+          # A physical single Audio press can wait in this queue behind another
+          # music request. Its captured display must still allow the command.
+          - action: ekf_appliances.remote_prepare
+            data:
+              button: audio
+              received_ms: "{{ audio_received_ms }}"
+            response_variable: captured
+          - if: "{{ captured.blocked | default('') != '' or captured.audio_action | default('') != 'play_pause' }}"
+            then:
+              - stop: Captured Audio press no longer authorizes playback
       - variables:
           target_entity: >-
             {{ route.speaker_entity_id
@@ -415,19 +430,35 @@ script:
         then:
           - stop: "У владельца воспроизведения нет достоверного состояния mute."
             error: true
-      - action: "{{ 'media_player.' ~ service_name }}"
-        data: >-
-          {% if start_wave %}
-            {{ dict(entity_id=target_entity, media_content_type='command',
-                    media_content_id='Включи мою волну') }}
-          {% elif cmd == 'volume_set' %}
-            {{ dict(entity_id=target_entity, volume_level=volume_level | float) }}
-          {% elif cmd == 'mute_toggle' %}
-            {{ dict(entity_id=target_entity,
-                    is_volume_muted=not state_attr(target_entity, 'is_volume_muted')) }}
-          {% else %}
-            {{ dict(entity_id=target_entity) }}
-          {% endif %}
+      - if: "{{ audio_received_ms is defined }}"
+        then:
+          - action: ekf_appliances.remote_captured_action
+            data:
+              button: audio
+              received_ms: "{{ audio_received_ms }}"
+              entity_id: "{{ target_entity }}"
+              playback: "{{ {'media_play': 'play', 'media_pause': 'pause', 'play_media': 'wave'}[service_name] }}"
+            response_variable: forwarded
+          - if: "{{ forwarded.sent | default(false) is not sameas true }}"
+            then:
+              - variables:
+                  rejected: "{{ dict(route, command=cmd, status='rejected') }}"
+              - stop: Captured Audio action was rejected
+                response_variable: rejected
+        else:
+          - action: "{{ 'media_player.' ~ service_name }}"
+            data: >-
+              {% if start_wave %}
+                {{ dict(entity_id=target_entity, media_content_type='command',
+                        media_content_id='Включи мою волну') }}
+              {% elif cmd == 'volume_set' %}
+                {{ dict(entity_id=target_entity, volume_level=volume_level | float) }}
+              {% elif cmd == 'mute_toggle' %}
+                {{ dict(entity_id=target_entity,
+                        is_volume_muted=not state_attr(target_entity, 'is_volume_muted')) }}
+              {% else %}
+                {{ dict(entity_id=target_entity) }}
+              {% endif %}
       - if: "{{ route.owner == 'ma' }}"
         then:
           - action: input_text.set_value

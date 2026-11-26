@@ -229,6 +229,33 @@ class PowerPair:
             raise HomeAssistantError(error_message)
         await asyncio.shield(self._request(target=target))
 
+    @property
+    def confirmed_on(self) -> bool:
+        """Both live endpoints confirmed the latest completed ON."""
+        return (
+            self._started
+            and self.target is None
+            and self.last_intent is True
+            and self.last_error is None
+            and all(endpoint.read() is True for endpoint in self.endpoints.values())
+        )
+
+    async def wait_for_start(self) -> bool:
+        """Join the current ON confirmation without submitting another intent."""
+        pending = self._future
+        if not self._started or self.target is not True or pending is None:
+            return False
+        try:
+            await asyncio.shield(pending)
+        except HomeAssistantError:
+            return False
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if pending.cancelled() and caller is not None and not caller.cancelling():
+                return False  # The pair unloaded, the caller is still running.
+            raise
+        return self._future is pending and self.confirmed_on
+
     async def wake_if_current(self, expected_revision: str) -> None:
         """Accept queued ON only if no newer power intent has been received."""
         if not self._started:

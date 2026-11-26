@@ -303,12 +303,13 @@ class RemoteServiceContextTests(unittest.IsolatedAsyncioTestCase):
         for call in self.calls:
             self.assertIs(call.context, context)
 
-    async def test_delayed_wake_keeps_the_input_context(self) -> None:
+    async def test_delayed_input_only_publishes_the_selected_mode(self) -> None:
         context = Context(user_id="input-caller")
         await self.call("remote_prepare", {"button": "input"}, context)
-        await asyncio.wait_for(self.wake_seen.wait(), 2)
-        wake = next(call for call in self.calls if call.service == "wake_if_current")
-        self.assertIs(wake.context, context)
+        await asyncio.sleep(1.05)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.controller.mode.target, "kodi")
+        self.assertFalse(self.wake_seen.is_set())
 
     async def test_permission_denial_precedes_off_latch_or_device_call(self) -> None:
         context = Context(user_id="denied-by-policy")
@@ -319,6 +320,44 @@ class RemoteServiceContextTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.note_projector_off_requested.assert_not_called()
         self.assertFalse(any(call.domain == "media_player" for call in self.calls))
         self.permissions.check_entity.assert_called_once_with(PROJECTOR, "control")
+
+    async def test_denied_playback_cannot_select_or_join_pending_start(self) -> None:
+        self.permissions.check_entity.return_value = False
+        pair = SimpleNamespace(target=True, wait_for_start=AsyncMock())
+        self.runtime.projector_power_pair = pair
+        with self.assertRaises(Unauthorized):
+            await self.call(
+                "projector_start_for_playback", {}, Context(user_id="denied")
+            )
+        pair.wait_for_start.assert_not_awaited()
+        self.permissions.check_entity.assert_called_once_with(PROJECTOR, "control")
+        self.assertEqual(self.controller.mode.pair, "tv")
+        self.assertFalse(self.calls)
+
+    async def test_captured_actions_authorize_each_target_before_resolving_or_forwarding(
+        self,
+    ) -> None:
+        context = Context(user_id="denied")
+        self.permissions.check_entity.return_value = False
+        for button, entity, fields in (
+            ("smart", "light.gostinaia_globus_socket_1", {}),
+            ("red", "light.rgbw_lamp_rgbw", {}),
+            ("channel_up", "climate.kondei_1", {"temperature": 25}),
+            ("prime", "climate.kondei_1", {"hvac_mode": "cool"}),
+            (
+                "audio",
+                "media_player.test_music",
+                {"entity_id": "media_player.test_music", "playback": "play"},
+            ),
+        ):
+            with self.subTest(button=button), self.assertRaises(Unauthorized):
+                await self.call(
+                    "remote_captured_action",
+                    {"button": button, "received_ms": time.time() * 1000, **fields},
+                    context,
+                )
+            self.permissions.check_entity.assert_called_with(entity, "control")
+        self.assertFalse(self.calls)
 
     async def test_authorized_power_keeps_context_after_permission_check(self) -> None:
         context = Context(user_id="power-caller")

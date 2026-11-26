@@ -1428,6 +1428,85 @@ class SamsungMediaRoutingTests(SamsungAdapterTests):
             "A video",
         )
 
+    async def test_idle_cast_receiver_uses_android_transport_until_playback_starts(
+        self,
+    ) -> None:
+        await self.configure_media_sources()
+        cast = "media_player.living_cast"
+        android = "media_player.living_remote"
+        attrs = {"supported_features": NATIVE_FEATURES, "app_id": "2C6A6E3D"}
+        self.hass.states.async_set(cast, "idle", attrs)
+
+        await self.player.async_media_play_pause()
+        await self.player.async_media_next_track()
+        await self.player.async_media_previous_track()
+        await self.player.async_volume_up()
+        self.assertEqual(
+            self.native_calls,
+            [
+                ("media_play_pause", {"entity_id": android}),
+                ("media_next_track", {"entity_id": android}),
+                ("media_previous_track", {"entity_id": android}),
+                ("volume_up", {"entity_id": cast}),
+            ],
+        )
+        self.native_calls.clear()
+        self.hass.states.async_set(android, "unavailable")
+        with self.assertRaises(HomeAssistantError):
+            await self.player.async_media_play_pause()
+
+        self.assertEqual(self.native_calls, [])
+        for state in ("playing", "paused", "buffering"):
+            with self.subTest(state=state):
+                self.hass.states.async_set(cast, state, attrs)
+                await self.player.async_media_play_pause()
+                self.assertEqual(
+                    self.native_calls, [("media_play_pause", {"entity_id": cast})]
+                )
+                self.native_calls.clear()
+        self.assertEqual(self.commands, [])
+
+    async def test_idle_cast_queue_retains_supported_track_controls(self) -> None:
+        await self.configure_media_sources()
+        cast = "media_player.living_cast"
+        android = "media_player.living_remote"
+        attrs = {"app_id": "2C6A6E3D", "supported_features": NATIVE_FEATURES}
+        self.hass.states.async_set(cast, "idle", {**attrs, "media_position": 0})
+        await self.player.async_media_previous_track()
+        self.hass.states.async_set(
+            android, "on", {"supported_features": int(Feature.NEXT_TRACK)}
+        )
+        await self.player.async_media_previous_track()
+        await self.player.async_media_next_track()
+        self.hass.states.async_set(android, "unavailable")
+        await self.player.async_media_next_track()
+        self.assertEqual(
+            self.native_calls,
+            [
+                ("media_previous_track", {"entity_id": android}),
+                ("media_previous_track", {"entity_id": cast}),
+                ("media_next_track", {"entity_id": android}),
+                ("media_next_track", {"entity_id": cast}),
+            ],
+        )
+        self.native_calls.clear()
+        with self.assertRaises(HomeAssistantError):
+            await self.player.async_media_play_pause()
+        self.hass.states.async_set(
+            cast, "idle", {"media_position": 0, "app_id": "2C6A6E3D"}
+        )
+        with self.assertRaises(HomeAssistantError):
+            await self.player.async_media_next_track()
+        for position in (None, False, "0"):
+            with self.subTest(position=position):
+                self.hass.states.async_set(
+                    cast, "idle", {**attrs, "media_position": position}
+                )
+                with self.assertRaises(HomeAssistantError):
+                    await self.player.async_media_previous_track()
+        self.assertEqual(self.native_calls, [])
+        self.assertEqual(self.commands, [])
+
     async def test_non_cast_android_app_uses_android_remote(self) -> None:
         await self.configure_media_sources()
         self.hass.states.async_set(
