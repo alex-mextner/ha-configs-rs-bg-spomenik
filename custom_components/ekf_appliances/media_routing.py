@@ -162,10 +162,21 @@ class TelevisionMediaRouting:
 
         # An idle receiver app can advertise PLAY even without a Cast media
         # session. Android still accepts physical transport keys on this device.
+        # Cast only publishes a position for an explicit media status. A
+        # finished item can report IDLE at 0 while its queue accepts track keys.
+        position = primary.attributes.get("media_position")
+        idle_queue = (
+            primary.state == "idle"
+            and service in {"media_next_track", "media_previous_track"}
+            and type(position) in (float, int)
+            and 0 <= position < float("inf")
+        )
         result = (
-            []
-            if service in _CAST_SESSION_SERVICES and primary.state not in _ACTIVE
-            else [primary]
+            [primary]
+            if service not in _CAST_SESSION_SERVICES
+            or primary.state in _ACTIVE
+            or idle_queue
+            else []
         )
         android = self.state(CONF_TV_ANDROIDTV_ENTITY_ID)
         if android is not None and self.ready(android):
