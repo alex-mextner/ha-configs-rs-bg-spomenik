@@ -1351,11 +1351,7 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_captured_wave_follows_the_resolved_yandex_station(self) -> None:
         station = "media_player.renamed_yandex_station"
-        self.set_power_pair("on", "on")
-        self.controller.mode.select("projector")
-        self.hass.states.async_set(
-            station, "idle", {"supported_features": 512, "alice_state": "IDLE"}
-        )
+        local = {"supported_features": 512, "alice_state": "IDLE"}
         route = {
             "owner": "speaker",
             "speaker_backend": "yandex",
@@ -1364,6 +1360,11 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
         }
 
         async def resolve(_call) -> dict[str, str]:
+            nonlocal lookups
+            lookups += 1
+            if lookups == 2:
+                resolving.set()
+                await resume.wait()
             return route
 
         self.hass.services.async_register(
@@ -1383,26 +1384,52 @@ class UniversalRemoteDispatchTests(unittest.IsolatedAsyncioTestCase):
             "script",
             script_mode="queued",
         )
-        pressed = time.time() - 1
-        self.controller.physical_press("audio", pressed)
-        result = await music.async_run(
-            {"command": "play_pause", "audio_received_ms": pressed * 1000},
-            context=Context(),
-        )
-        self.assertEqual(result.service_response["status"], "accepted")
-        self.assertEqual(
-            self.appliance_calls(),
-            [
-                (
-                    "media_player.play_media",
-                    {
-                        "entity_id": station,
-                        "media_content_type": "command",
-                        "media_content_id": "Включи мою волну",
-                    },
+        for state, attrs, accepted in (
+            ("idle", local, True),
+            ("playing", {**local, "media_content_id": "new-track"}, False),
+            ("idle", {**local, "assumed_state": True}, False),
+            ("unavailable", {}, False),
+        ):
+            with self.subTest(state=state, attrs=attrs):
+                self.reset()
+                self.set_power_pair("on", "on")
+                self.controller.mode.select("projector")
+                self.hass.states.async_set(station, "idle", local)
+                resolving, resume = asyncio.Event(), asyncio.Event()
+                lookups = 0
+                pressed = time.time() - 1
+                self.controller.physical_press("audio", pressed)
+                request = asyncio.create_task(
+                    music.async_run(
+                        {"command": "play_pause", "audio_received_ms": pressed * 1000},
+                        context=Context(),
+                    )
                 )
-            ],
-        )
+                try:
+                    await asyncio.wait_for(resolving.wait(), 1)
+                    self.hass.states.async_set(station, state, attrs)
+                finally:
+                    resume.set()
+                    result = await request
+                self.assertEqual(
+                    result.service_response["status"],
+                    "accepted" if accepted else "rejected",
+                )
+                self.assertEqual(
+                    self.appliance_calls(),
+                    []
+                    if not accepted
+                    else [
+                        (
+                            "media_player.play_media",
+                            {
+                                "entity_id": station,
+                                "media_content_type": "command",
+                                "media_content_id": "Включи мою волну",
+                            },
+                        )
+                    ],
+                )
 
     async def test_captured_audio_checks_live_music_owner_before_play_and_bookkeeping(
         self,

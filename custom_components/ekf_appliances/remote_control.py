@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
-    from homeassistant.core import Event, HomeAssistant, ServiceCall, ServiceResponse
+    from homeassistant.core import (
+        Event,
+        HomeAssistant,
+        ServiceCall,
+        ServiceResponse,
+        State,
+    )
 
     from .remote_mode import RemoteRoute
     from .runtime import ApplianceRuntime
@@ -90,6 +96,33 @@ _MEDIA_BUTTONS = {
 
 class PowerConfirmationTimeoutError(HomeAssistantError):
     """A bounded owned operation timed out and already emitted its rejection."""
+
+
+def _station_can_start_wave(state: State | None) -> bool:
+    """Recheck the music script's local empty-Station decision before replacement."""
+    if state is None:
+        return False
+    attrs = state.attributes
+    alice = attrs.get("alice_state")
+    return (
+        (
+            state.state in {"idle", "paused", "standby", "off"}
+            or (state.state == "playing" and alice in ("SPEAKING", "NONE"))
+        )
+        and alice not in (None, "", "unknown", "unavailable")
+        and not any(
+            attrs.get(key)
+            for key in (
+                "assumed_state",
+                "restored",
+                "media_content_id",
+                "media_title",
+                "media_content_type",
+                "media_playlist",
+                "media_duration",
+            )
+        )
+    )
 
 
 def _with_service_context(
@@ -829,7 +862,13 @@ class RemoteController:
         )
         if reason := route.get("blocked"):
             return {"sent": False, "blocked": reason}
-        if button == "audio" and route.get("audio_action") != "play_pause":
+        if button == "audio" and (
+            route.get("audio_action") != "play_pause"
+            or (
+                service == "play_media"
+                and not _station_can_start_wave(self.hass.states.get(entity))
+            )
+        ):
             return {"sent": False}
         payload["entity_id"] = entity if button == "audio" else [entity]
         return await self._async_service(
