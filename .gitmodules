@@ -68,3 +68,7 @@
 [submodule "submodules/adaptive-plant"]
 	path = submodules/adaptive-plant
 	url = https://github.com/Big-Xan/adaptive_plant.git
+[submodule "submodules/ha-petkit"]
+	path = submodules/ha-petkit
+	url = https://github.com/alex-mextner/ha-petkit.git
+	branch = main

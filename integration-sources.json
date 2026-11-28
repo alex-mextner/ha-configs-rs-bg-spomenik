@@ -11,5 +11,14 @@
     "aliases": [
       "AlexxIT/YandexStation"
     ]
+  },
+  "petkit_ble": {
+    "submodule": "submodules/ha-petkit",
+    "repository": "alex-mextner/ha-petkit",
+    "branch": "main",
+    "protected_branch": "main",
+    "aliases": [
+      "aavdberg/ha-petkit"
+    ]
   }
 }
