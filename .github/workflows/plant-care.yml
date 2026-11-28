@@ -2,7 +2,11 @@ name: Plant care
 
 on:
   push:
-    branches: [main, feat/plant-care-yandex-main-20261118, feat/plant-care-alerts]
+    branches:
+      - main
+      - feat/plant-care-yandex-main-20261118
+      - feat/plant-care-alerts
+      - feat/plant-autocalibration-20261118
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -76,6 +80,8 @@ jobs:
         run: |
           node tests/plant_care/test_card.cjs
           node tests/plant_care/test_reliability_card.cjs
+          node tests/plant_care/test_autocalibration_card.cjs
+          node tests/plant_care/test_compact_card.cjs
       - name: Recovery controller regression tests
         if: always()
         run: python3 tests/plant_recovery/test_recovery.py
@@ -86,6 +92,7 @@ jobs:
           docker run --rm --entrypoint python3
           -v "$PWD:/workspace:ro" -w /workspace
           -e PYTHONPATH=/workspace -e PYTHONDONTWRITEBYTECODE=1
+          -e PLANT_NATIVE_HA_REQUIRED=1
           ghcr.io/home-assistant/home-assistant:2026.9.3
           -m unittest discover -s tests/plant_care -v
 
@@ -107,12 +114,23 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/plant-card-browser" --no-save --package-lock=false --ignore-scripts playwright@1.65.1
           "$RUNNER_TEMP/plant-card-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Render the captured baseline with its original card revision
+        env:
+          NODE_PATH: ${{ runner.temp }}/plant-card-browser/node_modules
+        run: >-
+          node tests/plant_care/render_component.cjs
+          --snapshot tests/plant_care/fixtures/autocalibration-before.json
+          --photo-manifest tests/plant_care/fixtures/photo-assets.json
+          --card-revision 14cafefee7ac09578b0174229b67af26189e018c
+          --expected-card-sha 4a9059f2b8e2a3cd139e88e81af12237442fef1aecdc0e9cbf7cb3d16c92fcd3
+          --output "$RUNNER_TEMP/plant-card-preview/before"
       - name: Render the component from the captured plant state
         env:
           NODE_PATH: ${{ runner.temp }}/plant-card-browser/node_modules
         run: >-
           node tests/plant_care/render_component.cjs
           --snapshot tests/plant_care/fixtures/live-reading.json
+          --photo-manifest tests/plant_care/fixtures/photo-assets.json
           --output "$RUNNER_TEMP/plant-card-preview"
       - name: Save component screenshots and provenance
         if: always()

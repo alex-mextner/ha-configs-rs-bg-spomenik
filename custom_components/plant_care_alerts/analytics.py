@@ -5,11 +5,16 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
-from itertools import pairwise
 from typing import Any
 
+from .watering import (
+    detect_watering,
+    invalidate_watering,
+    pause_watering,
+    retract_untrusted_history,
+)
+
 BASELINE_SAMPLES = 3
-EVENT_SAMPLES = 6
 RETENTION_SECONDS = 14 * 86400
 FUTURE_TOLERANCE = 60
 FORECAST_SAMPLES = 12
@@ -32,20 +37,29 @@ class AnalysisSettings:
     unreliable_since: float | None = None
 
 
-def _valid_points(samples: list, now: float) -> list:
+def normalize_adc_points(
+    samples: list, now: float, *, conflicts: set | None = None
+) -> tuple[list, list]:
+    """Retain JSON-native points and contradictions for every raw-data consumer."""
     valid = {}
+    conflicts = set(conflicts or [])
     for point in samples:
         try:
             stamp, value = float(point[0]), float(point[1])
             if (
                 math.isfinite(stamp)
                 and math.isfinite(value)
-                and stamp <= now + FUTURE_TOLERANCE
+                and now - RETENTION_SECONDS <= stamp <= now + FUTURE_TOLERANCE
             ):
+                if stamp in valid and valid[stamp] != value:
+                    conflicts.add(stamp)
                 valid.setdefault(stamp, value)
         except (ValueError, TypeError, IndexError):
             continue
-    return sorted(valid.items())
+    return (
+        [[stamp, valid[stamp]] for stamp in sorted(valid)],
+        sorted(stamp for stamp in conflicts if now - RETENTION_SECONDS <= stamp <= now),
+    )
 
 
 def _quarantined(segment: list, intervals: list, now: float) -> bool:
@@ -61,6 +75,17 @@ def _event_segment(points: list, event: float) -> list:
     if index is None or index < BASELINE_SAMPLES or index + 2 >= len(points):
         return []
     return points[index - BASELINE_SAMPLES : index + BASELINE_SAMPLES]
+
+
+def _segment_untrusted(segment: list, result: dict, wet: float, now: float) -> bool:
+    if not segment:
+        return False
+    legacy_clipped = result.get("last_watering_precision") != "interval" and any(
+        point[1] >= wet for point in segment[:BASELINE_SAMPLES]
+    )
+    return legacy_clipped or _quarantined(
+        segment, result.get("reliability_invalid_intervals") or [], now
+    )
 
 
 def _retract_automatic(
@@ -87,58 +112,18 @@ def _retract_automatic(
     unsupported = event in rejected or (
         unreliable_since is not None and event >= unreliable_since
     )
-    segment = _event_segment(points, event)
-    if segment:
-        unsupported = unsupported or any(
-            point[1] >= wet for point in segment[:BASELINE_SAMPLES]
-        )
-        unsupported = unsupported or _quarantined(
-            segment, result.get("reliability_invalid_intervals") or [], now
-        )
+    unsupported = unsupported or _segment_untrusted(
+        _event_segment(points, event), result, wet, now
+    )
     if unsupported:
         rejected.add(event)
+        invalidate_watering(result, event, now)
         result.update(
             rejected_watering_events=sorted(rejected),
             untrusted_last_watering_at=event,
             last_watering_at=None,
             last_watering_source="unknown",
         )
-
-
-def _watering_candidate(segment: list, calibration: list) -> bool:
-    dry, wet = calibration
-    span = wet - dry
-    baseline = statistics.median(point[1] for point in segment[:BASELINE_SAMPLES])
-    return (
-        all(point[1] < wet for point in segment[:BASELINE_SAMPLES])
-        and segment[2][1] - baseline < span * 0.4
-        and segment[3][1] - baseline >= span * 0.5
-        and all(point[1] - baseline >= span * 0.4 for point in segment[4:])
-    )
-
-
-def _detect_watering(
-    result: dict, points: list, calibration: list, now: float, *, stale_seconds: float
-) -> None:
-    existing = result.get("last_watering_at")
-    if not isinstance(existing, (int, float)):
-        existing = None
-    intervals = result.get("reliability_invalid_intervals") or []
-    rejected = result.get("rejected_watering_events", [])
-    for index in range(BASELINE_SAMPLES, len(points) - 2):
-        segment = points[index - BASELINE_SAMPLES : index + BASELINE_SAMPLES]
-        if _quarantined(segment, intervals, now):
-            continue
-        if any(b[0] - a[0] > stale_seconds for a, b in pairwise(segment)):
-            continue
-        event = segment[BASELINE_SAMPLES][0]
-        if (
-            event not in rejected
-            and _watering_candidate(segment, calibration)
-            and (existing is None or event > existing)
-        ):
-            existing = event
-            result.update(last_watering_at=event, last_watering_source="auto")
 
 
 def _trusted_tail(points: list, intervals: list, now: float) -> list:
@@ -256,7 +241,10 @@ def analyze(previous: dict, samples: list, now: float, **options: Any) -> dict:
     settings = AnalysisSettings(**options)
     calibration, stale_seconds = settings.calibration, settings.stale_seconds
     result = dict(previous)
-    points = _valid_points(samples, now)
+    points, result["watering_conflicts"] = normalize_adc_points(
+        samples, now, conflicts=set(result.get("watering_conflicts", []))
+    )
+    retract_untrusted_history(result, now, settings.unreliable_since)
     result.update(
         wet_risk="unknown",
         wet_since=None,
@@ -266,18 +254,22 @@ def analyze(previous: dict, samples: list, now: float, **options: Any) -> dict:
     )
     if not points:
         result["forecast_status"] = "stale"
+        pause_watering(result, now, "stale")
         return result
     if not calibration or calibration[1] <= calibration[0]:
+        pause_watering(result, now, "uncalibrated")
         return result
     _retract_automatic(
         result, points, calibration[1], now, unreliable_since=settings.unreliable_since
     )
     if not settings.reliable:
         result["forecast_status"] = "invalid_readings"
+        pause_watering(result, now, "unreliable")
         return result
     if now - points[-1][0] > stale_seconds:
         result["forecast_status"] = "stale"
+        pause_watering(result, now, "stale")
         return result
-    _detect_watering(result, points, calibration, now, stale_seconds=stale_seconds)
+    detect_watering(result, points, now, stale_seconds)
     _analyze_trend(result, points, settings, now)
     return result

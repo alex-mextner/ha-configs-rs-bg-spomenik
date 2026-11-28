@@ -11,9 +11,25 @@ plant_care_alerts:
     sensor.strelitzia_soil_smoothed:
       dry: input_number.strelitzia_soil_dry_adc
       wet: input_number.strelitzia_soil_wet_adc
+  automatic_calibration:
+    sensor.strelitzia_soil_smoothed:
+      enabled: true
+      original_dry: 67
+      # User-requested manual maximum-point setting, 2026-11-18T19:14:39.561933Z.
+      # Wet 221 -> 1298 from five fresh burst medians; dry 67 unchanged.
+      # Native Logbook/Recorder retain the actual event. This is not an
+      # independent qualified reference or an automatic calibration event.
+      original_wet: 1298
+      source_revision: "n2-adc3-pin22-v1"
+      # No independent qualified reference is currently installed: observe only.
   user_reports:
-    sensor.strelitzia_soil_smoothed: "2026-11-03"
+    sensor.strelitzia_soil_smoothed:
+      date: "2026-11-17"
+      precision: approximate_day
+      note: "Вчера вроде"
+      timezone: Europe/Belgrade
 
+# Companion raw-window detection is automatic; no routine manual confirmation.
 # Upstream must not interpret individual resistive-probe spikes as watering.
 sensor:
   - platform: statistics
